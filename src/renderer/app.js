@@ -1,0 +1,1317 @@
+'use strict'
+/* 音源猎手 PC 版 — 渲染进程 */
+
+const PLAT = [
+  { k: 'wy', t: '网易' }, { k: 'tx', t: 'QQ' }, { k: 'kw', t: '酷我' },
+  { k: 'kg', t: '酷狗' }, { k: 'mg', t: '咪咕' }
+]
+const PAGE_SIZE = 50
+
+// 表格排序（v1.7.3）：纯函数在 sorters.js，渲染进程与单测共用同一份口径。
+// 注意：loadSort 会在下面的 state 字面量里调用，相关声明必须放在 state 之前——
+// const 在声明执行前处于 TDZ，被 try/catch 吞掉后会静默丢失持久化排序（曾踩坑）。
+const LXSort = window.LXSort
+const { sortSources, SORT_DEFS, SORT_KEYS, isDeepDead, isCheckedNoSource } = LXSort
+
+// ---------------- 排序（v1.7.3） ----------------
+// 表头四列可排序：名称 / 平台可用性 / 来源仓库 / 状态；点表头切换，再点反向。
+// 选择持久化到 localStorage（重启后保持）；key 为 null 时按入库顺序。
+const SORT_STORE_KEY = 'lxh-sort'
+function loadSort() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SORT_STORE_KEY) || 'null')
+    if (s && SORT_KEYS.includes(s.key) && (s.dir === 'asc' || s.dir === 'desc')) return { key: s.key, dir: s.dir }
+  } catch (e) {}
+  return { key: null, dir: 'asc' }
+}
+function saveSort() { try { localStorage.setItem(SORT_STORE_KEY, JSON.stringify(state.sort)) } catch (e) {} }
+
+const state = {
+  sources: [],
+  imported: {},
+  patrol: { lastRun: 0 },
+  lastCrawl: 0,
+  selected: new Set(),
+  filter: 'all',
+  query: '',
+  hideDeprecated: true,
+  page: 1,
+  results: [],
+  installed: [],
+  // 公共音源清理（v1.7.4）：服务端公开源列表 + 勾选池（只可能是公开源，私有源不在其中）
+  pubList: [],
+  pubSel: new Set(),
+  config: null,
+  busy: false,
+  // 排序：{ key, dir }，key 为空 = 不排序；localStorage 持久化，重启后保持
+  sort: loadSort()
+}
+
+const $ = id => document.getElementById(id)
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+
+let toastTimer = null
+function toast(msg, kind) {
+  const el = $('toast')
+  el.textContent = msg
+  el.className = 'toast' + (kind ? ' ' + kind : '')
+  el.hidden = false
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { el.hidden = true }, 3600)
+}
+
+// ---------------- 视图 ----------------
+document.querySelectorAll('.nav-item').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'))
+    $('view-' + btn.dataset.view).classList.add('active')
+    if (btn.dataset.view === 'installed') refreshInstalled()
+    if (btn.dataset.view === 'logs') flushLogs()
+  })
+})
+
+$('themeBtn').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'
+  document.documentElement.dataset.theme = next
+  localStorage.setItem('lxh-theme', next)
+})
+;(function initTheme() {
+  const t = localStorage.getItem('lxh-theme')
+  if (t) document.documentElement.dataset.theme = t
+  else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'light'
+})()
+
+// ---------------- 配置 ----------------
+async function loadConfig() {
+  const r = await api.configGet()
+  if (!r.ok) return toast('读取配置失败: ' + r.error, 'err')
+  state.config = r.data.config
+  const c = state.config
+  $('cfgServer').value = c.serverUrl || ''
+  $('cfgPwd').value = c.adminPassword || ''
+  $('cfgUser').value = c.username || ''
+  $('cfgSrvTmo').value = c.serverTimeoutMs || 25000
+  $('cfgToken').value = c.ghToken || ''
+  $('cfgMirror').value = c.mirror || 'auto'
+  $('cfgMaxCand').value = c.maxCandidatesPerRepo || 400
+  $('cfgConc').value = c.concurrency || 8
+  $('cfgTmo').value = c.timeoutMs || 15000
+  $('cfgLinkTmo').value = c.linkTimeoutMs || 20000
+  $('cfgEnableAfter').checked = c.enableAfterImport !== false
+  $('cfgSkipUnusable').checked = c.skipUnusable !== false
+  $('cfgExcludeObf').checked = !!c.excludeHighRiskObfuscated
+  $('cfgAutoUnsafe').checked = !!c.autoAllowUnsafeVM
+  $('cfgQuick').checked = c.quickCheck !== false
+  $('cfgSkipChecked').checked = c.skipChecked !== false
+  $('cfgHashDedupe').checked = c.hashDedupeAfterCrawl !== false
+  $('cfgPatrolOn').checked = !!c.patrolEnabled
+  $('cfgPatrolHours').value = c.patrolIntervalHours || 12
+  $('cfgPatrolDisable').checked = c.patrolAutoDisable !== false
+  $('cfgCrawlOn').checked = !!c.crawlScheduleEnabled
+  $('cfgCrawlHours').value = c.crawlIntervalHours || 24
+  $('cfgCrawlSinceDays').value = Math.max(0, Number(c.crawlSinceDays) || 0)
+  $('cfgReplaceSame').checked = c.replaceSameNameOnImport !== false
+  $('cfgRepos').value = (c.customRepos || []).join('\n')
+  $('srvUrl').textContent = c.serverUrl || '（未配置）'
+  testConn()
+}
+
+$('btnSaveCfg').addEventListener('click', async () => {
+  const patch = {
+    serverUrl: $('cfgServer').value.trim(),
+    adminPassword: $('cfgPwd').value,
+    username: $('cfgUser').value.trim() || 'default',
+    serverTimeoutMs: parseInt($('cfgSrvTmo').value, 10) || 25000,
+    ghToken: $('cfgToken').value.trim(),
+    mirror: $('cfgMirror').value,
+    maxCandidatesPerRepo: parseInt($('cfgMaxCand').value, 10) || 400,
+    concurrency: Math.max(1, Math.min(16, parseInt($('cfgConc').value, 10) || 8)),
+    timeoutMs: parseInt($('cfgTmo').value, 10) || 15000,
+    linkTimeoutMs: parseInt($('cfgLinkTmo').value, 10) || 20000,
+    enableAfterImport: $('cfgEnableAfter').checked,
+    skipUnusable: $('cfgSkipUnusable').checked,
+    excludeHighRiskObfuscated: $('cfgExcludeObf').checked,
+    autoAllowUnsafeVM: $('cfgAutoUnsafe').checked,
+    quickCheck: $('cfgQuick').checked,
+    skipChecked: $('cfgSkipChecked').checked,
+    hashDedupeAfterCrawl: $('cfgHashDedupe').checked,
+    patrolEnabled: $('cfgPatrolOn').checked,
+    patrolIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgPatrolHours').value, 10) || 12)),
+    patrolAutoDisable: $('cfgPatrolDisable').checked,
+    crawlScheduleEnabled: $('cfgCrawlOn').checked,
+    crawlIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgCrawlHours').value, 10) || 24)),
+    crawlSinceDays: Math.max(0, Math.min(365, parseInt($('cfgCrawlSinceDays').value, 10) || 0)),
+    replaceSameNameOnImport: $('cfgReplaceSame').checked,
+    customRepos: $('cfgRepos').value.split('\n').map(s => s.trim()).filter(Boolean)
+  }
+  const r = await api.configSet(patch)
+  if (!r.ok) return toast('保存失败: ' + r.error, 'err')
+  state.config = r.data
+  $('cfgRepos').value = (r.data.customRepos || []).join('\n')
+  $('srvUrl').textContent = patch.serverUrl || '（未配置）'
+  toast('设置已保存（仓库地址已自动规范为 owner/repo 格式）', 'ok')
+  testConn()
+})
+
+$('btnTestConn').addEventListener('click', () => testConn(true))
+
+async function testConn(explicit) {
+  const chip = $('connChip'), txt = $('connText')
+  chip.className = 'conn'
+  txt.textContent = '连接中…'
+  const r = await api.serviceTest(explicit ? {
+    serverUrl: $('cfgServer').value.trim(),
+    adminPassword: $('cfgPwd').value,
+    username: $('cfgUser').value.trim() || 'default'
+  } : null)
+  if (r.ok && r.data && r.data.ok) {
+    chip.className = 'conn on'
+    txt.textContent = '已连接'
+    if (explicit) toast('连接成功：' + r.data.msg, 'ok')
+  } else {
+    chip.className = 'conn err'
+    txt.textContent = '未连接'
+    if (explicit) toast('连接失败：' + ((r.data && r.data.msg) || r.error), 'err')
+  }
+}
+
+// ---------------- 音源库 ----------------
+async function loadSources() {
+  const r = await api.sourcesGet()
+  if (!r.ok) return toast('读取音源库失败: ' + r.error, 'err')
+  state.sources = r.data.sources || []
+  state.imported = r.data.imported || {}
+  state.patrol = r.data.patrol || { lastRun: 0 }
+  state.lastCrawl = r.data.lastCrawl || 0
+  clampPage()
+  renderStats()
+  renderTable()
+  renderPatrolInfo()
+  renderCrawlInfo()
+}
+
+/** 上次爬取时间（爬取页工具栏；启用定时爬取后会随增量爬取自动刷新） */
+function renderCrawlInfo() {
+  const el = $('crawlInfo')
+  if (!el) return
+  const t = state.lastCrawl
+  if (!t) {
+    el.textContent = '上次爬取：—'
+    el.title = '还没有爬取过。点右上角「爬取仓库」开始；也可在设置页启用定时爬取'
+    return
+  }
+  const d = new Date(t)
+  const hh = n => String(n).padStart(2, '0')
+  const s = `${d.getFullYear()}-${hh(d.getMonth() + 1)}-${hh(d.getDate())} ${hh(d.getHours())}:${hh(d.getMinutes())}`
+  el.textContent = '上次爬取：' + s
+  el.title = '上次爬取：' + s + '。启用定时爬取后（设置页），应用会按间隔自动增量爬取：只收新音源与内容更新，已抓取的不重抓'
+}
+
+function renderStats() {
+  const s = state.sources.filter(e => !e.deprecated)
+  $('stTotal').textContent = s.length
+  $('stUsable').textContent = s.filter(e => e.usable).length
+  // 「疑似音源」= 非典型脚本（缺洛雪接口特征）+ 深检全失败但原因像本机网络（可自救）；
+  // 深检确证失效的不再混进疑似，计入下面的「失效」
+  $('stSuspected').textContent = s.filter(e => !e.usable && e.status !== 'dead' && !isDeepDead(e) && (e.suspected || isCheckedNoSource(e))).length
+  $('stDead').textContent = s.filter(e => e.status === 'dead' || isDeepDead(e)).length
+  $('stImported').textContent = Object.keys(state.imported).length
+}
+
+function matchFilter(e) {
+  // 「已选」页签：只显示当前勾选的条目 —— 勾选是跨筛选/跨页全局的，
+  // 用户在别的页签勾了若干条后回到列表经常"找不到勾哪去了"，这里给出唯一入口
+  if (state.filter === 'selected') return state.selected.has(e.id) && !(state.hideDeprecated && e.deprecated)
+  if (state.hideDeprecated && e.deprecated) return false
+  const q = state.query.trim().toLowerCase()
+  switch (state.filter) {
+    case 'usable': if (!e.usable) return false; break
+    case 'suspected': if (!(e.status !== 'dead' && !isDeepDead(e) && !e.usable && (e.suspected || isCheckedNoSource(e)))) return false; break
+    case 'dead': if (!(e.status === 'dead' || isDeepDead(e))) return false; break
+    // 「未检测」= 完全没跑过检测的；已检测但不是音源脚本的也算已检测
+    // 已合并的重复项不算「未检测」：它不需要检测，是内容/名称与保留项重复
+    case 'unchecked': if (e.deprecated || e.deep || e.status === 'dead' || isCheckedNoSource(e)) return false; break
+    case 'imported': if (!state.imported[e.id]) return false; break
+  }
+  if (!q) return true
+  return [e.scriptName, e.name, e.author, e.repo, e.path].some(v => String(v || '').toLowerCase().includes(q))
+}
+
+function filtered() {
+  const list = state.sources.filter(matchFilter)
+  // 排序在筛选之后统一做：分页/全选/勾选池看到的都是同一顺序
+  return sortSources(list, state.sort, state.imported)
+}
+
+/** id -> 条目，供「重复项指向保留项」查名 */
+const srcIndex = new Map()
+function indexSources() {
+  srcIndex.clear()
+  for (const e of state.sources) srcIndex.set(e.id, e)
+}
+
+/** 废弃重复项的去向说明：告诉用户它被合并到哪条、为什么 */
+function mergeTip(e) {
+  const keep = e.dupOf ? srcIndex.get(e.dupOf) : null
+  const kn = keep ? (keep.lxName || keep.scriptName || keep.name) : ''
+  return (kn ? '与「' + kn + '」重复，已合并' : '重复项，已合并') +
+    (e.dupReason ? '（' + e.dupReason + '）' : '') +
+    ' —— 检测结果以保留项为准；勾选「隐藏已废弃重复项」可不显示'
+}
+
+/** 混淆风险摘要（v1.7.1）：把检测记录的特征数据翻成人话，徽章 tooltip 用 */
+function obfTip(e) {
+  const h = e.obfHits
+  if (!h) return e.obfLevel === 'high'
+    ? '重度混淆脚本：混淆常用于隐藏恶意代码（木马/后门/统计上报），建议拒绝使用'
+    : '含局部混淆：可能用于防和谐，也可能藏统计上报/后门，建议自行甄别'
+  const parts = []
+  if (h.perKb0x >= 2) parts.push(`_0x 变量名 ${Math.round(h.perKb0x)}/KB`)
+  if (h.perKbUni >= 1) parts.push(`unicode 转义 ${h.perKbUni.toFixed(1)}/KB`)
+  if (h.perKbExotic >= 2) parts.push(`异体字符 ${Math.round(h.perKbExotic)}/KB`)
+  if (h.evalCalls) parts.push(`动态执行 ${h.evalCalls} 处`)
+  const detail = parts.length ? '（' + parts.join('、') + '）' : ''
+  return e.obfLevel === 'high'
+    ? `重度混淆脚本${detail}：音源没有混淆的必要，重度混淆常用于隐藏恶意代码，建议拒绝使用`
+    : `含局部混淆${detail}：可能用于防和谐，也可能藏统计上报/后门，建议自行甄别`
+}
+
+function platCells(e) {
+  // 去重废弃的重复条目从没单独跑过检测，画五个灰格子会让人以为「检测没生效」。
+  // 直接说明它被合并了，别让人对着一片「未检测」猜。
+  if (e.deprecated && !e.deep) {
+    return `<span class="plat skipped" title="${esc(mergeTip(e))}">已合并</span>`
+  }
+  const p = (e.deep && e.deep.platforms) || {}
+  const declared = (e.deep && e.deep.declaredSources) || []
+  return PLAT.map(x => {
+    const cell = p[x.k]
+    const st = cell ? cell.status : ''
+    // usable=实测可用（绿）；failed=实测失败（红）；untested=快速模式没测（虚线灰，≠不支持）；skipped=脚本未提供
+    const cls = st === 'usable'
+      // 已解析链接但本机没下载校验通过：算可用，但用浅色+波浪号区分于「实测可播」
+      ? (cell.verified === false ? 'weak' : 'usable')
+      : (st === 'failed' ? 'failed' : (st === 'untested' ? 'untested' : (st ? 'skipped' : '')))
+    let title
+    if (!cell) title = x.t + '：未检测'
+    else if (st === 'untested') title = x.t + '：未测（快速模式命中即停，非不支持）—— 点「补全平台覆盖」可实测'
+    else if (st === 'usable' && cell.verified === false) {
+      title = x.t + '：可用 —— 脚本已解析出播放链接，本机未下载校验（常见于需 Referer / 有地域或时效限制的 CDN，导入洛雪后通常可正常播放）\n' + (cell.message || '')
+    } else title = x.t + '：' + (cell.message || st)
+    if (declared.includes(x.k)) title += '｜脚本声明支持'
+    return `<span class="plat ${cls}" title="${esc(title)}">${x.t}</span>`
+  }).join('')
+}
+
+function statusCell(e) {
+  if (e.checking) return '<span class="badge accent">检测中…</span>'
+  if (state.imported[e.id]) return '<span class="badge accent">已灌入</span>'
+  // 去重废弃的重复条目压根没进过检测 —— 显示成「未检测」会让人以为检测坏了。
+  // 它的真实状态是「已合并到保留项」，必须这么说。
+  if (e.deprecated && !e.deep) return `<span class="badge gray" title="${esc(mergeTip(e))}">重复·已合并</span>`
+  // 内容有更新（定时爬取发现上游换了内容，检测结果已重置）—— 不能显示成普通「未检测」
+  if (e.updated && !e.deep) return '<span class="badge warn" title="上游内容已变更（定时爬取发现），检测结果已重置：重新检测后生效；灌入时会自动替换服务端上的同名旧版">有更新·待检测</span>'
+  if (e.usable) return '<span class="badge ok">可用</span>'
+  if (e.status === 'dead') return '<span class="badge fail">失效</span>'
+  // 缺少洛雪音源接口特征的脚本与疑似音源合并显示（都归入「疑似音源」），但 tooltip 区分
+  if (e.suspected) return '<span class="badge warn">疑似</span>'
+  if (isCheckedNoSource(e)) return '<span class="badge warn" title="疑似音源：脚本缺少洛雪音源接口特征，未进入深度检测">疑似</span>'
+  // 混淆风险标注（v1.7.1，依据 lx-ikun issue#8 科普）：检测时评估，重危红/局部黄
+  if (e.obfLevel === 'high') {
+    return `<span class="badge fail" title="${esc(obfTip(e))}">⚠混淆高危</span>`
+  }
+  if (e.obfLevel === 'mid' && !e.usable) {
+    return `<span class="badge warn" title="${esc(obfTip(e))}">含混淆</span>`
+  }
+  if (e.deep) {
+    // 抢救回来的脚本（init 报错但仍注册了取链能力）：告知用户「有初始化报错，但实测能取链」
+    if (e.deep.initWarning) {
+      return `<span class="badge gray" title="脚本初始化有报错，但已注册取链能力，按实测结果判定：${esc(e.deep.initWarning)}">不可用</span>`
+    }
+    if (e.deep.loadError) return `<span class="badge gray" title="加载失败：${esc(e.deep.loadError)}">不可用</span>`
+    // 深检确证失效：无可用平台且失败原因不像本机网络 —— 直接标红「失效」，与统计卡口径一致
+    if (!e.usable && e.deep.failKind === 'dead') {
+      const tip = e.deep.hint || '已检测，各平台真实取链全部失败（失败原因不像本机网络问题），判定为失效'
+      return `<span class="badge fail" title="${esc(tip)}">失效</span>`
+    }
+    // 全平台同因失败：区分「音源真死了」（域名已失效，该删）和「本机网络问题」（可自救）。
+    // 这条提示光放 tooltip 里没人看得到，必须带可见标记。
+    if (e.deep.hint) {
+      const dead = e.deep.deadDomain === true || /已失效|建议删除/.test(String(e.deep.hint))
+      const mark = dead ? '⚠失效' : '⚠网络'
+      return `<span class="badge gray" title="${esc(e.deep.hint)}">不可用 <b title="${esc(e.deep.hint)}">${mark}</b></span>`
+    }
+    return '<span class="badge gray" title="已检测，五个平台都取不到播放链接">不可用</span>'
+  }
+  return '<span class="badge gray">未检测</span>'
+}
+
+function rowHtml(e) {
+  return `
+    <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
+    <td><span class="nm">${esc(e.scriptName || e.name)}</span>
+        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span></td>
+    <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
+    <td class="c-repo"><span class="repo">${esc(e.repo)}</span></td>
+    <td class="c-status">${statusCell(e)}</td>
+    <td class="c-op">
+      <button class="btn sm" data-act="check" data-id="${esc(e.id)}">检测</button>
+      <button class="btn sm" data-act="import" data-id="${esc(e.id)}">灌入</button>
+    </td>`
+}
+
+const rowMap = new Map() // id -> <tr>
+
+/** 已选页签徽章：显示勾选数量；0 条时置灰提示（点击仍可进入空视图，方便反选） */
+function updateSelectedSeg() {
+  const seg = $('segSelected')
+  if (!seg) return
+  const n = state.selected.size
+  seg.textContent = n ? `已选 ${n}` : '已选'
+  seg.title = n ? `查看当前勾选的 ${n} 个音源` : '没有勾选任何音源'
+}
+
+function renderTable() {
+  indexSources()   // 行内要按 id 查「合并到哪条」，先建索引
+  updateSelectedSeg()
+  renderSortHeads()
+  const list = filtered()
+  const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE))
+  if (state.page > totalPages) state.page = totalPages
+  const start = (state.page - 1) * PAGE_SIZE
+  const show = list.slice(start, start + PAGE_SIZE)
+
+  const body = $('srcBody')
+  body.innerHTML = ''
+  rowMap.clear()
+  const frag = document.createDocumentFragment()
+  for (const e of show) {
+    const tr = document.createElement('tr')
+    tr.innerHTML = rowHtml(e)
+    rowMap.set(e.id, tr)
+    frag.appendChild(tr)
+  }
+  body.appendChild(frag)
+
+  $('emptyTip').hidden = list.length > 0
+  $('selInfo').textContent = selInfoText(`筛选结果 ${list.length} 条`)
+  $('chkAll').checked = show.length > 0 && show.every(e => state.selected.has(e.id))
+  $('pgInfo').textContent = `${state.page} / ${totalPages}`
+  $('pgPrev').disabled = state.page <= 1
+  $('pgNext').disabled = state.page >= totalPages
+}
+
+/** 实时更新单行（检测线程每完成一条推送一次） */
+function patchRow(e) {
+  const tr = rowMap.get(e.id)
+  if (!tr) return
+  if (!matchFilter(e)) {
+    // 该行已不匹配当前筛选（如「未检测」视图里检测完成/失效的行），
+    // 必须移除陈旧行，否则看起来像「检测过了却还显示未检测」
+    tr.remove()
+    rowMap.delete(e.id)
+    scheduleTableRefresh()
+    return
+  }
+  const fresh = document.createElement('tr')
+  fresh.innerHTML = rowHtml(e)
+  rowMap.set(e.id, fresh)
+  tr.replaceWith(fresh)
+  // 按「状态 / 平台可用性」排序时，一次检测完成会改变行的排序位置（如变成「可用」）：
+  // 行内替换只更新内容，位置交给节流全表刷新重排
+  if (state.sort.key === 'status' || state.sort.key === 'plat') scheduleTableRefresh()
+}
+
+/** 表头排序箭头与 aria-sort（renderTable 时同步，保证翻页/刷新后不丢状态） */
+function renderSortHeads() {
+  document.querySelectorAll('#srcTable th.sortable').forEach(th => {
+    const on = state.sort.key === th.dataset.k
+    th.classList.toggle('sorted', on)
+    th.setAttribute('aria-sort', on ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none')
+    const ar = th.querySelector('.sort-arrow')
+    if (ar) ar.textContent = on ? (state.sort.dir === 'asc' ? '▲' : '▼') : ''
+  })
+}
+
+// 表头点击排序（v1.7.3）：首次点击用该列的首选方向，再点反向
+document.querySelectorAll('#srcTable th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const k = th.dataset.k
+    if (!SORT_DEFS[k]) return
+    if (state.sort.key === k) state.sort.dir = state.sort.dir === 'asc' ? 'desc' : 'asc'
+    else { state.sort.key = k; state.sort.dir = SORT_DEFS[k].dir }
+    saveSort()
+    state.page = 1
+    renderSortHeads()
+    renderTable()
+  })
+})
+
+// 检测过程中行会跨筛选视图进出（进入「可用/失效」、离开「未检测」），
+// 用节流的全表刷新修正分页计数与当页内容（每页 50 行，重建开销很小）
+let tableRefreshTimer = null
+function scheduleTableRefresh() {
+  if (tableRefreshTimer) return
+  tableRefreshTimer = setTimeout(() => {
+    tableRefreshTimer = null
+    renderTable()
+  }, 800)
+}
+
+let statsTimer = null
+function scheduleStats() {
+  if (statsTimer) return
+  statsTimer = setTimeout(() => {
+    statsTimer = null
+    renderStats()
+    const list = filtered()
+    $('selInfo').textContent = selInfoText(`筛选结果 ${list.length} 条`)
+  }, 400)
+}
+
+$('srcBody').addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-act]')
+  if (!btn) return
+  const id = btn.dataset.id
+  if (btn.dataset.act === 'check') startCheck([id])
+  else startImport([id])
+})
+$('srcBody').addEventListener('change', ev => {
+  const cb = ev.target.closest('input[data-id]')
+  if (!cb) return
+  if (cb.checked) state.selected.add(cb.dataset.id)
+  else state.selected.delete(cb.dataset.id)
+  syncExportScope()
+  // 「已选」视图里取消勾选的行要立即消失；其他视图只更新计数徽章
+  if (state.filter === 'selected') renderTable()
+  else { updateSelectedSeg(); $('selInfo').textContent = selInfoText('筛选结果见上') }
+})
+
+/**
+ * 同步「导出范围」下拉与当前勾选：
+ * 勾选条目后自动切到「选中项」，用户勾了却不生效是最容易被当成 bug 的地方；
+ * 清空勾选后回落到当前筛选页签。
+ */
+function syncExportScope() {
+  const ef = $('expFilter')
+  if (!ef) return
+  const opt = ef.querySelector('option[value="selected"]')
+  const n = state.selected.size
+  if (opt) {
+    opt.textContent = n ? `导出：选中项（${n}）` : '导出：选中项'
+    opt.disabled = !n
+  }
+  if (n) { ef.value = 'selected'; return }
+  // 用户手动选过某个范围（且此刻没有勾选）→ 尊重手动选择，不覆盖（已选页签除外：空了自动离开）
+  if (ef.value !== 'selected' && state.filter !== 'selected' && ef.querySelector(`option[value="${ef.value}"]`)) return
+  // 否则跟随当前筛选页签
+  ef.value = ef.querySelector(`option[value="${state.filter === 'selected' ? 'all' : state.filter}"]`) ? (state.filter === 'selected' ? 'all' : state.filter) : 'all'
+}
+
+$('chkAll').addEventListener('change', () => {
+  const list = filtered()
+  const start = (state.page - 1) * PAGE_SIZE
+  // 「已选」视图里的表头全选框语义反转：勾上=保留本页（本页本来就已勾选），取消=批量反选本页
+  for (const e of list.slice(start, start + PAGE_SIZE)) {
+    if ($('chkAll').checked) state.selected.add(e.id); else state.selected.delete(e.id)
+  }
+  syncExportScope()
+  renderTable()
+})
+$('btnSelectAll').addEventListener('click', () => {
+  const list = filtered()
+  for (const e of list) state.selected.add(e.id)
+  syncExportScope()
+  renderTable()
+  // 点这之前往往已有一批跨筛选勾选的残留（例如先在「全部」勾了一堆再切到「可用」），
+  // 提示总数 = 筛选结果 + 此前残留，用户才知道勾选池里实际有多少
+  toast(`已勾选本筛选全部 ${list.length} 条；勾选池共 ${state.selected.size} 条（含其他筛选下的历史勾选，点「已选」页签可查看）`, 'ok')
+})
+// 只选未灌入（v1.7.3）：与状态排序（已灌入垫底）配套——一键排除已灌入/已合并项，
+// 只把当前筛选下的未灌入音源加进勾选池，直接灌入，不用逐条手动勾
+$('btnSelUnimported').addEventListener('click', () => {
+  const all = filtered()
+  const list = all.filter(e => !state.imported[e.id] && !e.deprecated)
+  if (!list.length) return toast('当前筛选下没有未灌入的音源（已灌入/已合并项已被排除）', 'info')
+  state.selected.clear()
+  for (const e of list) state.selected.add(e.id)
+  syncExportScope()
+  renderTable()
+  const skipped = all.length - list.length
+  toast(`已勾选未灌入 ${list.length} 条` + (skipped ? `（排除已灌入/已合并 ${skipped} 条）` : '') + '，点「灌入选中的音源」即可', 'ok')
+})
+$('btnClearSel').addEventListener('click', () => {
+  const n = state.selected.size
+  state.selected.clear()
+  syncExportScope()
+  renderTable()
+  if (n) toast(`已清空全部勾选（${n} 条）`, 'ok')
+})
+$('searchBox').addEventListener('input', e => { state.query = e.target.value; state.page = 1; renderTable() })
+$('hideDeprecated').addEventListener('change', e => { state.hideDeprecated = e.target.checked; state.page = 1; renderTable() })
+document.querySelectorAll('#filterSeg .seg-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#filterSeg .seg-btn').forEach(x => x.classList.remove('active'))
+    b.classList.add('active')
+    state.filter = b.dataset.f
+    state.page = 1
+    syncExportScope()          // 有勾选时保持「选中项」，否则跟随页签
+    renderTable()
+  })
+})
+$('pgPrev').addEventListener('click', () => { if (state.page > 1) { state.page--; renderTable() } })
+$('pgNext').addEventListener('click', () => { state.page++; renderTable() })
+
+// ---------------- 任务事件 ----------------
+function setBusy(on) {
+  state.busy = on
+  $('btnCrawl').disabled = on
+  $('btnCheck').disabled = on
+  $('btnImportSelected').disabled = on
+  $('btnImportUsable').disabled = on
+  $('btnCancel').disabled = !on
+  $('btnCancelImport').disabled = !on
+  $('progWrap').hidden = !on
+  if (!on) {
+    $('btnCancel').textContent = '取消'
+    $('btnCancelImport').textContent = '取消'
+    $('progStep').textContent = ''
+    $('progFill').style.width = '0%'
+  }
+}
+
+let lastProgAt = 0
+// 选择集里可能残留已废弃条目（去重后失效），统计时分开报
+function selCounts() {
+  let invalid = 0
+  for (const id of state.selected) {
+    const e = state.sources.find(x => x.id === id)
+    if (!e || e.deprecated) invalid++
+  }
+  return { valid: state.selected.size - invalid, invalid }
+}
+function selInfoText(suffix) {
+  const { valid, invalid } = selCounts()
+  return invalid > 0 ? `已选 ${valid} 条（另有 ${invalid} 条已废弃失效） · ${suffix}` : `已选 ${valid} 条 · ${suffix}`
+}
+api.onEvent(ev => {
+  const { type, payload } = ev
+  if (type === 'source-updated') {
+    const e = payload
+    const i = state.sources.findIndex(x => x.id === e.id)
+    if (i >= 0) state.sources[i] = e
+    else state.sources.unshift(e)
+    patchRow(e)
+    scheduleStats()
+    // 非全部视图时行会进出筛选结果，节流刷新修正列表
+    if (state.filter !== 'all' || state.query) scheduleTableRefresh()
+    return
+  }
+  // 公共音源批删进度：删除是串行的，没有这个反馈用户会以为卡死
+  if (type === 'pub-delete') {
+    const el = $('pubInfo')
+    if (el) el.textContent = `正在删除 ${payload.done}/${payload.total} …${payload.success ? '' : '（' + payload.id + ' 失败）'}`
+    return
+  }
+  if (type === 'progress' || type === 'step') {
+    const p = payload || {}
+    if (type === 'step') $('progStep').textContent = p.text || ''
+    else {
+      const now = Date.now()
+      const isFinal = p.done != null && p.total != null && p.done >= p.total
+      if (!isFinal && now - lastProgAt < 180) return   // 节流，避免高频重排
+      lastProgAt = now
+      if (p.step) $('progStep').textContent = p.step
+      const done = p.done != null ? p.done : p.reposDone
+      const total = p.total != null ? p.total : p.repoTotal
+      if (done != null && total) {
+        $('progNum').textContent = `${done}/${total}`
+        $('progFill').style.width = Math.min(100, (done / total) * 100) + '%'
+      }
+    }
+    return
+  }
+  if (type === 'import-item') {
+    state.results.push(payload)
+    renderImportResults()
+    return
+  }
+  if (type === 'job') {
+    if (payload.running) {
+      // 兜底：定时巡检/定时爬取等由主进程启动的任务也要进入忙碌态
+      setBusy(true)
+      return
+    }
+    setBusy(false)
+    loadSources()
+    if (payload.cancelled) toast('任务已取消（已完成的结果已保留）', 'warn')
+    if (payload.type === 'import') refreshInstalled()
+    if (payload.type === 'patrol') {
+      refreshInstalled()
+      const s = payload.summary || {}
+      if (!payload.cancelled) toast(`巡检完成：正常 ${s.ok || 0}、失效禁用 ${s.disabled || 0}、无法判定 ${s.unknown || 0} / 共 ${s.total || 0}`, 'ok')
+    }
+    if (payload.type === 'crawl' && payload.summary && !payload.cancelled) {
+      const s = payload.summary
+      toast(s.incremental
+        ? `定时爬取完成：新增 ${s.added || 0}、内容更新 ${s.updated || 0}、跳过已抓取 ${s.skipped || 0}`
+        : `爬取完成：新增 ${s.added || 0} 条`, 'ok')
+    }
+  }
+})
+
+api.onLog(e => appendLog(e))
+
+// ---------------- 日志（缓冲渲染，切页时一次性刷入） ----------------
+const logBuf = []
+let logFlushTimer = null
+function appendLog(e) {
+  logBuf.push(e)
+  if (logBuf.length > 600) logBuf.splice(0, logBuf.length - 600)
+  if (!$('view-logs').classList.contains('active')) return   // 后台页不碰 DOM
+  if (logFlushTimer) return
+  logFlushTimer = setTimeout(flushLogs, 120)
+}
+function flushLogs() {
+  logFlushTimer = null
+  if (!logBuf.length) return
+  const box = $('logBox')
+  const frag = document.createDocumentFragment()
+  for (const e of logBuf) frag.appendChild(logLine(e))
+  logBuf.length = 0
+  box.appendChild(frag)
+  while (box.childElementCount > 1500) box.removeChild(box.firstChild)
+  box.scrollTop = box.scrollHeight
+}
+function logLine(e) {
+  const d = new Date(e.at || Date.now())
+  const hh = n => String(n).padStart(2, '0')
+  const div = document.createElement('div')
+  div.className = 'log-line' + (e.level === 'warn' ? ' warn' : e.level === 'error' ? ' error' : '')
+  div.innerHTML = `<span class="log-time">${hh(d.getHours())}:${hh(d.getMinutes())}:${hh(d.getSeconds())}</span>` +
+    `<span class="log-mod">${esc(e.module || '')}</span><span class="log-msg">${esc(e.msg)}</span>`
+  return div
+}
+
+// ---------------- 爬取 / 检测 ----------------
+$('btnCrawl').addEventListener('click', async () => {
+  setBusy(true)
+  $('progStep').textContent = '开始爬取…'
+  const r = await api.crawlStart()
+  setBusy(false)
+  if (r.ok) { toast(`爬取完成，新增 ${r.data.added} 条`, 'ok'); loadSources() }
+  else toast('爬取失败: ' + r.error, 'err')
+})
+
+$('btnCheck').addEventListener('click', () => {
+  const ids = [...state.selected]
+  if (!ids.length) return toast('请先勾选要检测的音源（或点表格里的「检测」）')
+  // 勾选池是跨筛选全局的：当前筛选下看不到的条目也会被检测（例如先在「全部」勾了一堆
+  // 再切到「可用」）。数量对不上时明确告知，避免「我勾的明明是 41 却检了 57」的困惑
+  const visible = filtered().length
+  const n = ids.length
+  if (state.filter !== 'all' && state.filter !== 'selected' && n > visible) {
+    if (!confirm(`当前勾选 ${n} 条，但本筛选下只能看到 ${visible} 条（其余是其他筛选页签下的历史勾选）。\n\n「检测选中」会检测全部 ${n} 条。点「已选」页签可先查看/整理勾选。\n\n是否继续？`)) return
+  }
+  startCheck(ids)
+})
+
+// 一键「检测并灌入」：先检测，再把通过的音源批量灌入服务端
+$('btnCheckImport').addEventListener('click', async () => {
+  const ids = [...state.selected]
+  if (!ids.length) return toast('请先勾选要检测的音源')
+  setBusy(true)
+  $('progStep').textContent = '开始检测…'
+  const r = await api.checkStart(ids)
+  if (!r.ok) { setBusy(false); return toast('检测失败: ' + r.error, 'err') }
+  await loadSources()
+  const okIds = state.sources.filter(e => ids.includes(e.id) && e.usable && !e.deprecated && !state.imported[e.id]).map(e => e.id)
+  if (!okIds.length) {
+    setBusy(false)
+    return toast(`检测完成：可用 ${r.data.usable} / ${r.data.total}，但本次没有新增可灌入的音源`, 'warn')
+  }
+  state.results = []
+  renderImportResults()
+  $('progStep').textContent = '检测完成，开始灌入…'
+  const ir = await api.importStart(okIds)
+  setBusy(false)
+  if (ir.ok) {
+    toast(`检测并灌入完成：灌入成功 ${ir.data.ok} / ${ir.data.results.length}（检测可用 ${r.data.usable}）` + (ir.data.replaced ? `，其中替换服务端同名旧版 ${ir.data.replaced} 个` : ''), 'ok')
+    loadSources()
+    refreshInstalled()
+  } else toast('灌入失败: ' + ir.error, 'err')
+})
+
+// 快速去重：只下载算哈希（不进沙箱），先按内容去重，检测时直接跳过重复项
+$('btnHashDedupe').addEventListener('click', async () => {
+  if (state.busy) return toast('已有任务在运行', 'warn')
+  setBusy(true)
+  $('progStep').textContent = '开始快速去重…'
+  const r = await api.hashStart([...state.selected])
+  setBusy(false)
+  if (r.ok) {
+    toast(`去重完成：${r.data.hashed} 条已建立指纹，累计废弃 ${r.data.depTotal} 条重复项`, 'ok')
+    loadSources()
+  } else toast('去重失败: ' + r.error, 'err')
+})
+
+// 撤销去重：把被判重复的条目全部恢复为候选
+$('btnUndedupe').addEventListener('click', async () => {
+  if (state.busy) return toast('已有任务在运行', 'warn')
+  if (!confirm('撤销去重会把所有被判为重复的条目恢复为候选（检测结果和已灌入记录都会保留）。\n\n适用于误杀复查或想换一种去重方式。确定继续？')) return
+  const r = await api.dbUndedupe()
+  if (r.restored > 0) {
+    toast(`已恢复 ${r.restored} 条候选（库内共 ${r.total} 条）`, 'ok')
+    loadSources()
+  } else if (r.busy) toast('已有任务在运行', 'warn')
+  else toast('当前没有已废弃的重复项', 'info')
+})
+
+// 补全平台覆盖：只对「已可用」的条目跑全平台完整检测（关闭快速模式，逐个平台真取链）
+$('btnFullPlat').addEventListener('click', async () => {
+  if (state.busy) return toast('已有任务在运行', 'warn')
+  const pool = state.sources.filter(e => !e.deprecated && e.usable)
+  const picked = pool.filter(e => state.selected.has(e.id))
+  const targets = (picked.length ? picked : pool).map(e => e.id)
+  if (!targets.length) return toast('还没有已可用的音源，先跑一次检测', 'warn')
+  if (!confirm(`将对 ${targets.length} 条已可用音源跑全平台完整检测：\n` +
+    '五平台逐个真实取链（关闭快速模式），把「未测(?)」的平台补齐为「实测可用/实测失败」，\n' +
+    '并对「已取链未校验(~)」的平台重新尝试本机下载校验。\n\n' +
+    `耗时约 ${Math.ceil(targets.length * 5 * 3 / 60)} 分钟内（并发取链），确定继续？`)) return
+  setBusy(true)
+  $('progStep').textContent = '开始全平台完整检测…'
+  const r = await api.checkStart(targets, { full: true })
+  setBusy(false)
+  if (r.ok) {
+    toast(`平台覆盖已补全：可用 ${r.data.usable} / ${r.data.total}`, 'ok')
+    loadSources()
+  } else toast('检测失败: ' + r.error, 'err')
+})
+
+async function startCheck(ids) {
+  setBusy(true)
+  $('btnCheck').textContent = '检测中…'
+  $('progStep').textContent = '开始检测…'
+  const r = await api.checkStart(ids)
+  setBusy(false)
+  $('btnCheck').textContent = '检测选中'
+  if (r.ok) {
+    const extra = r.data.notSource ? `，非音源 ${r.data.notSource} 条（已标灰）` : ''
+    toast(`检测完成：可用 ${r.data.usable} / ${r.data.total}${extra}`, 'ok')
+    loadSources()
+  }
+  else toast('检测失败: ' + r.error, 'err')
+}
+
+function doCancel() {
+  $('btnCancel').textContent = '取消中…'
+  $('btnCancelImport').textContent = '取消中…'
+  api.jobCancel().then(r => {
+    if (r.ok && !r.data.cancelled) toast('当前没有正在运行的任务')
+  })
+}
+$('btnCancel').addEventListener('click', doCancel)
+$('btnCancelImport').addEventListener('click', doCancel)
+
+// ---------------- 灌入 ----------------
+$('btnImportSelected').addEventListener('click', () => {
+  const ids = [...state.selected]
+  if (!ids.length) return toast('请先勾选要灌入的音源')
+  startImport(ids)
+})
+$('btnImportUsable').addEventListener('click', () => {
+  const ids = state.sources.filter(e => e.usable && !e.deprecated).map(e => e.id)
+  if (!ids.length) return toast('库里还没有检测通过的音源，先跑一次检测')
+  startImport(ids)
+})
+
+async function startImport(ids) {
+  setBusy(true)
+  $('progStep').textContent = '开始灌入…'
+  state.results = []
+  renderImportResults()
+  const r = await api.importStart(ids)
+  setBusy(false)
+  if (r.ok) {
+    toast(`灌入完成：成功 ${r.data.ok} / ${r.data.results.length}`, 'ok')
+    loadSources()
+    refreshInstalled()
+  } else toast('灌入失败: ' + r.error, 'err')
+}
+
+function renderImportResults() {
+  const body = $('impBody')
+  body.innerHTML = ''
+  for (const r of state.results) {
+    const cls = (r.status === 'success' || r.status === 'replaced') ? 'ok' : r.status === 'failed' ? 'fail' : (r.status === 'synced' ? 'ok' : 'warn')
+    const label = r.status === 'success' ? '成功' : r.status === 'replaced' ? '已替换' : r.status === 'failed' ? '失败' : (r.status === 'synced' ? '已同步' : '跳过')
+    const tr = document.createElement('tr')
+    tr.innerHTML = `<td>${esc(r.name)}</td><td class="repo">${esc(r.lxId || '')}</td>` +
+      `<td><span class="badge ${cls}">${label}</span></td><td class="nm-sub">${esc(r.message || '')}</td>`
+    body.appendChild(tr)
+  }
+  $('impEmpty').hidden = state.results.length > 0
+}
+
+$('btnManualImport').addEventListener('click', async () => {
+  const url = $('manualUrl').value.trim()
+  if (!url) return toast('请填写音源脚本 URL')
+  const r = await api.importUrl(url, $('manualName').value.trim())
+  if (r.ok && r.data && r.data.success) {
+    toast('已灌入：' + (r.data.name || url), 'ok')
+    state.results.push({ name: r.data.name || url, status: 'success', lxId: r.data.id, message: r.data.message || '' })
+    renderImportResults()
+    refreshInstalled()
+  } else toast('灌入失败：' + (((r.data && r.data.message)) || r.error), 'err')
+})
+
+// ---------------- 已灌入 ----------------
+async function refreshInstalled() {
+  const r = await api.serviceList()
+  const body = $('insBody')
+  body.innerHTML = ''
+  if (!r.ok) {
+    $('insInfo').textContent = '读取失败：' + r.error
+    $('insEmpty').hidden = false
+    return
+  }
+  state.installed = r.data || []
+  for (const s of state.installed) {
+    const tr = document.createElement('tr')
+    const plats = (s.supportedSources || []).map(p => {
+      const t = PLAT.find(x => x.k === p)
+      return `<span class="plat usable">${t ? t.t : esc(p)}</span>`
+    }).join('') || '<span class="nm-sub">—</span>'
+    // 停用分两种，必须分开说清（v1.6.5 前「已停用」一个词混用两者，用户对照 LX 管理页显示
+    // 「已启用」会以为状态不同步）：
+    //  - 平台级停用（disabledSources）：本工具/巡检写的，只写服务端 states.json，
+    //    LX 管理页里该音源的平台徽章会置灰（删除线）——即网页端可见的停用；
+    //    全局开关仍显示「已启用」是正常的，取歌时这些平台会被跳过
+    //  - 全局禁用（enabled=false）：服务端正式开关，LX 管理页也显示禁用
+    const ds = Array.isArray(s.disabledSources) ? s.disabledSources : []
+    const globalOff = s.enabled === false
+    const platformOff = !globalOff && ds.length > 0
+    const stopped = globalOff || platformOff
+    // 私有源（owner 非 open）：只对同名账号可用，LX 网页端公开列表里根本看不到它 ——
+    // 用户拿着猎手里的停用状态去网页端对不上，就是因为它（v1.6.7 明确标注）
+    const isPrivate = !!(s.owner && s.owner !== 'open' && s.owner !== '_open')
+    const privBadge = isPrivate
+      ? `<span class="badge gray" title="私有音源（归属「${esc(s.owner)}」账号）：只对该账号可用，LX 网页端公开列表里看不到、也管不了——这是正常现象，不是状态不同步。\n停用状态按「${esc(s.owner)}」身份存储，猎手显示与服务端一致。">私有·${esc(s.owner)}</span>`
+      : ''
+    const badge = globalOff
+      ? '<span class="badge gray" title="服务端全局开关为禁用（与 LX 管理页显示一致）">已禁用</span>'
+      : platformOff
+        ? `<span class="badge gray" title="平台级停用（${esc(ds.join(' / '))}）：取歌时这些平台会被跳过。\n${isPrivate ? '私有源：停用按「' + esc(s.owner) + '」身份写入，仅对该身份取歌生效；网页端公开列表看不到此源。' : 'LX 网页端音源管理页该音源的平台徽章会同步置灰（删除线）；全局开关仍显示「已启用」是正常的。'}点「启用」即可恢复。">已停用</span>`
+        : '<span class="badge ok">已启用</span>'
+    tr.innerHTML = `
+      <td><span class="nm">${esc(s.name || s.id)}</span><span class="nm-sub">${esc([s.version, s.author].filter(Boolean).join(' · '))}</span></td>
+      <td class="repo">${esc(s.id)}</td>
+      <td class="c-plat"><div class="plats">${plats}</div></td>
+      <td>${privBadge}${badge}
+          ${s.status === 'success' ? '' : `<span class="badge warn">${esc(s.status || '')}</span>`}</td>
+      <td class="c-op">
+        <button class="btn sm" data-t="${esc(s.id)}" data-stop="${stopped ? 0 : 1}" data-goff="${globalOff ? 1 : 0}" title="${stopped ? '恢复该音源参与解析' : '让该音源不参与解析（不触发服务端重载）'}">${stopped ? '启用' : '停用'}</button>
+        <button class="btn sm" data-del="${esc(s.id)}">删除</button>
+      </td>`
+    body.appendChild(tr)
+  }
+  $('insEmpty').hidden = state.installed.length > 0
+  const privN = state.installed.filter(s => s.owner && s.owner !== 'open' && s.owner !== '_open').length
+  const insUser = $('insUser')
+  if (insUser) {
+    insUser.textContent = privN ? `· 含 ${privN} 个私有音源` : ''
+    insUser.title = privN
+      ? `有 ${privN} 个音源是私有源（归属某个账号）：只对该账号可用，LX 网页端公开列表里看不到、也管不了——这是正常现象。其停用状态按归属身份存储，猎手显示与服务端一致`
+      : ''
+  }
+  $('insInfo').textContent = `共 ${state.installed.length} 个自定义音源`
+  // 顺带刷新「公共音源清理」面板：两者读的是同一份服务端数据，避免要用户点两次
+  loadPublic()
+}
+
+// 已灌入页操作在途锁：这些操作都会触发服务端「整轮脚本重载」，旧版服务端可能长时间无响应。
+// 没有忙态保护时用户连点会叠加多次全量重载，把服务端进一步拖垮（表现为只能重启容器）。
+let insBusy = false
+function setInsBusy(on) {
+  insBusy = !!on
+  document.querySelectorAll('#insBody button[data-t], #insBody button[data-del], #btnPubRefresh, #btnPubDelSel, #btnPubDelAll').forEach(b => { b.disabled = !!on })
+}
+// 超时/中断类错误给出可诊断的提示（而不是冷冰冰一句 abort）
+function serverErrHint(msg) {
+  const m = String(msg || '')
+  return /abort|timeout|timed out|超时/i.test(m)
+    ? `${m}（服务端长时间无响应，通常是 LX 服务端正在全量重载脚本卡住；请看服务端日志，必要时重启容器）`
+    : m
+}
+
+// 让某个音源彻底不参与解析，需要把它支持的每个平台都写进 disabledSources。
+// 取「音源自报支持列表」与「本工具已知全部平台」的并集 —— 避免脚本实际注册的平台
+// 与入库时记录的列表不一致时，出现停用不干净的情况。
+function allPlatforms(s) {
+  const own = Array.isArray(s && s.supportedSources) ? s.supportedSources : []
+  return Array.from(new Set(own.concat(PLAT.map(x => x.k))))
+}
+
+// ---------------- 公共音源清理（v1.7.4） ----------------
+// 需求：只删服务端「公共音源」（owner=open，即 LX 网页端音源管理页看得到的那批，
+// 猎手灌入的音源都落在这里），各账号内的私有音源绝不触碰。
+// 思路沿用「已灌入」页踩过的坑：
+//  1. 删除必触发服务端全量重载 → 串行执行、在途锁（复用 insBusy）、逐条进度反馈；
+//  2. 结果要对账（哪个其实已不在服务端），不能只报一个总数；
+//  3. 危险操作强确认，明说「删除」与「停用」的代价差异（停用不重载、秒级）。
+/** 拉取服务端公共音源列表（服务端侧已按 owner 过滤，私有源不会进来） */
+async function loadPublic() {
+  const r = await api.serviceListPublic()
+  if (!r.ok) {
+    const el = $('pubInfo')
+    if (el) el.textContent = '读取失败：' + r.error
+    return false
+  }
+  state.pubList = r.data || []
+  // 勾选池收敛：服务端已经删掉的 id 要跟着消失（否则会重复删、报一堆失败）
+  const ids = new Set(state.pubList.map(s => s.id))
+  for (const id of Array.from(state.pubSel)) if (!ids.has(id)) state.pubSel.delete(id)
+  renderPublic()
+  return true
+}
+
+function renderPublic() {
+  const body = $('pubBody')
+  if (!body) return
+  body.innerHTML = ''
+  for (const s of state.pubList) {
+    const tr = document.createElement('tr')
+    const plats = (s.supportedSources || []).map(p => {
+      const t = PLAT.find(x => x.k === p)
+      return `<span class="plat usable">${t ? t.t : esc(p)}</span>`
+    }).join('') || '<span class="nm-sub">—</span>'
+    const ds = Array.isArray(s.disabledSources) ? s.disabledSources : []
+    const badge = s.enabled === false
+      ? '<span class="badge gray">已禁用</span>'
+      : ds.length
+        ? `<span class="badge gray" title="平台级停用：${esc(ds.join(' / '))}">已停用</span>`
+        : '<span class="badge ok">已启用</span>'
+    tr.innerHTML = `
+      <td><input type="checkbox" data-pub="${esc(s.id)}"${state.pubSel.has(s.id) ? ' checked' : ''}></td>
+      <td><span class="nm">${esc(s.name || s.id)}</span><span class="nm-sub">${esc([s.version, s.author].filter(Boolean).join(' · '))}</span></td>
+      <td class="repo">${esc(s.id)}</td>
+      <td class="c-plat"><div class="plats">${plats}</div></td>
+      <td>${badge}</td>`
+    body.appendChild(tr)
+  }
+  const empty = $('pubEmpty')
+  if (empty) {
+    empty.hidden = state.pubList.length > 0
+    empty.textContent = state.pubList.length ? '' : '服务端暂无公共音源（公共音源 = LX 网页端音源管理页可见的那批）'
+  }
+  const info = $('pubInfo')
+  if (info) info.textContent = `共 ${state.pubList.length} 个公共音源，已勾选 ${state.pubSel.size} 个`
+  // 私有源提示：讲清「不在本列表、也不会被删」，避免用户误以为漏了
+  const privN = (state.installed || []).filter(s => s.owner && s.owner !== 'open' && s.owner !== '_open').length
+  const priv = $('pubPriv')
+  if (priv) {
+    priv.textContent = privN ? `· 另有 ${privN} 个私有音源不在本列表` : ''
+    priv.title = privN
+      ? `这 ${privN} 个音源归属具体账号（私有源），只对该账号可用、LX 网页端公开列表看不到。\n本功能只删公共音源，不会触碰它们。`
+      : ''
+  }
+  const chkAll = $('pubChkAll')
+  if (chkAll) {
+    chkAll.checked = state.pubList.length > 0 && state.pubSel.size === state.pubList.length
+    chkAll.indeterminate = state.pubSel.size > 0 && state.pubSel.size < state.pubList.length
+    chkAll.disabled = state.pubList.length === 0
+  }
+}
+
+/**
+ * 批量删除公共音源（串行；服务端每个删除都要全量重载脚本，数量多时很慢）
+ * @param ids 要删的公共源 id（调用方保证是公共源）
+ * @param title 确认框标题
+ */
+async function runPubDelete(ids, title) {
+  if (!ids.length) return toast('没有选中任何公共音源', 'info')
+  if (insBusy) return toast('上一个服务端操作仍在处理中，请稍候…')
+  const names = ids.map(id => {
+    const s = (state.pubList || []).find(x => x.id === id)
+    return (s && (s.name || s.id)) || id
+  })
+  const preview = '  · ' + names.slice(0, 8).join('\n  · ') + (names.length > 8 ? `\n  · …等共 ${names.length} 个` : '')
+  // 耗时估算：每个删除 = 服务端全量重载（约 30s）+ 保护间隔（默认 5s）
+  const gapMs = (state.config && state.config.serverDeleteIntervalMs != null) ? Number(state.config.serverDeleteIntervalMs) : 5000
+  const mins = Math.max(1, Math.round(ids.length * (30 + gapMs / 1000) / 60))
+  const risk = ids.length > 10
+    ? `\n- 数量较多：lxserver 连续重载脚本有假死风险，已自动在每个删除之间留 ${Math.round(gapMs / 1000)} 秒；中途若出现网络超时会自动停止，未删的可稍后重删。`
+    : ''
+  if (!confirm(
+    `${title}\n\n将删除 ${ids.length} 个公共音源：\n${preview}\n\n` +
+    `- 只删公共音源，各账号私有音源不受影响；\n` +
+    `- 每删一个都会让 LX 服务端全量重载脚本，${ids.length} 个约需 ${mins} 分钟以上，期间服务端可能无响应；\n` +
+    `- 若只是不想让它们参与解析，请用上方「停用」（不触发重载，秒级完成）。${risk}\n\n确定删除？`
+  )) return
+  setInsBusy(true)
+  const info = $('pubInfo')
+  if (info) info.textContent = `正在删除 0/${ids.length} …（服务端逐个重载，请耐心等待）`
+  try {
+    const r = await api.serviceRemovePublicBatch(ids)
+    if (!r.ok) { toast('删除失败：' + serverErrHint(r.error), 'err'); return }
+    const d = r.data || {}
+    const failed = (d.results || []).filter(x => !x.success)
+    if (d.aborted) {
+      // 服务端已经在重载/假死：整批中止，剩余项不动（继续删只会更糟）
+      toast(`服务端响应异常，已中止：成功 ${d.ok || 0}、失败 ${failed.length}，剩余 ${(d.skipped || []).length} 个未删。请先在服务端确认状态（必要时重启容器），稍后重删剩余项`, 'err')
+    } else if (!failed.length) {
+      toast(`已删除 ${d.ok || 0} 个公共音源`, 'ok')
+    } else {
+      // 对账：逐条说明失败原因（最常见是网页端已经手动删过）
+      const first = failed.slice(0, 3).map(x => `${x.id}（${x.message || '失败'}）`).join('；')
+      toast(`删除完成：成功 ${d.ok || 0}、失败 ${failed.length}。失败项：${first}${failed.length > 3 ? ' 等' : ''}（可能是网页端已手动删除）`, 'warn')
+    }
+    state.pubSel.clear()
+    await loadPublic()
+    refreshInstalled()
+    // 库内「已灌入」标记按服务端现状刷新一次（删掉的不再算已灌入）
+    try { await api.serverSync(); await loadSources() } catch (e) {}
+  } finally {
+    setInsBusy(false)
+    renderPublic()
+  }
+}
+
+$('pubBody').addEventListener('change', ev => {
+  const cb = ev.target.closest('input[data-pub]')
+  if (!cb) return
+  if (cb.checked) state.pubSel.add(cb.dataset.pub)
+  else state.pubSel.delete(cb.dataset.pub)
+  renderPublic()
+})
+
+$('pubChkAll').addEventListener('change', ev => {
+  if (ev.target.checked) for (const s of state.pubList) state.pubSel.add(s.id)
+  else state.pubSel.clear()
+  renderPublic()
+})
+
+$('btnPubRefresh').addEventListener('click', async () => {
+  if (insBusy) return toast('上一个服务端操作仍在处理中，请稍候…')
+  const ok = await loadPublic()
+  if (ok) toast(`已读取服务端公共音源 ${state.pubList.length} 个`, 'ok')
+})
+
+$('btnPubDelSel').addEventListener('click', async () => {
+  await runPubDelete(Array.from(state.pubSel), '删除选中的公共音源')
+})
+
+$('btnPubDelAll').addEventListener('click', async () => {
+  await runPubDelete((state.pubList || []).map(s => s.id), '清空服务端全部公共音源')
+})
+
+$('insBody').addEventListener('click', async ev => {
+  if (insBusy) { toast('上一个服务端操作仍在处理中，请稍候…'); return }
+  const t = ev.target.closest('button[data-t]')
+  if (t) {
+    const id = t.dataset.t
+    const doStop = t.dataset.stop === '1'          // 1=本次要停用，0=本次要启用
+    const globalOff = t.dataset.goff === '1'       // 服务端全局 disabled（非平台级）
+    // 全局禁用的源只能靠 toggle 恢复，而 toggle 会触发服务端全量重载脚本（有假死风险），先说清楚
+    if (!doStop && globalOff) {
+      if (!confirm('该音源当前是「全局禁用」状态。\n\n恢复启用必须调用服务端的正式开关接口，该接口会让 LX 服务端全量重新加载所有脚本（期间可能几十秒无响应，极端情况需重启容器）。\n\n是否仍要继续？')) return
+      setInsBusy(true)
+      try {
+        const target0 = (state.installed || []).find(x => x.id === id)
+        const r = await api.serviceToggle(id, true, target0 && target0.owner)
+        if (r.ok && r.data.success) { toast('已启用', 'ok'); refreshInstalled() }
+        else toast('启用失败：' + serverErrHint((r.data && r.data.message) || r.error), 'err')
+      } finally { setInsBusy(false) }
+      return
+    }
+    // 其余一律走「平台级」停用/启用：只写服务端 states.json，不重载脚本 —— 不会把服务端拖垮
+    const target = (state.installed || []).find(x => x.id === id)
+    const list = doStop ? allPlatforms(target) : []
+    setInsBusy(true)
+    try {
+      // owner：私有源（owner=admin 等）的停用必须写其归属身份那份 states，否则对它不生效
+      const r = await api.servicePlatforms(id, list, target && target.owner)
+      if (r.ok && r.data && r.data.success) {
+        const priv = target && target.owner && target.owner !== 'open' && target.owner !== '_open'
+        toast(priv ? (doStop ? `已停用（按 ${target.owner} 身份写入，网页端公开列表看不到此私有源）` : '已启用')
+          : (doStop ? '已停用（LX 网页端同步生效）' : '已启用（LX 网页端同步生效）'), 'ok')
+        refreshInstalled(); return
+      }
+      // 老版本服务端没有 update-platforms 接口：退回 toggle，保证功能仍可用
+      const msg = (r.data && r.data.message) || r.error || ''
+      if (/HTTP 40[0-9]|不存在|not found/i.test(msg)) {
+        const r2 = await api.serviceToggle(id, !doStop, target && target.owner)
+        if (r2.ok && r2.data.success) { toast(doStop ? '已停用' : '已启用', 'ok'); refreshInstalled() }
+        else toast('操作失败：' + serverErrHint((r2.data && r2.data.message) || r2.error), 'err')
+        return
+      }
+      toast('操作失败：' + serverErrHint(msg), 'err')
+    } finally { setInsBusy(false) }
+    return
+  }
+  const d = ev.target.closest('button[data-del]')
+  if (d) {
+    if (!confirm('确定从服务端删除该音源？\n\n注意：删除会让 LX 服务端全量重载所有脚本，期间可能几十秒无响应。\n\n若只是不想让它参与解析，建议改用左侧「停用」（不触发重载，秒级完成且不会卡死服务端）。')) return
+    setInsBusy(true)
+    try {
+      const target = (state.installed || []).find(x => x.id === d.dataset.del)
+      const r = await api.serviceRemove(d.dataset.del, target && target.owner)
+      if (r.ok && r.data.success) { toast('已删除', 'ok'); refreshInstalled() }
+      else toast('删除失败：' + serverErrHint((r.data && r.data.message) || r.error), 'err')
+    } finally { setInsBusy(false) }
+  }
+})
+
+$('btnRefreshInstalled').addEventListener('click', refreshInstalled)
+
+// 一键恢复全部平台级停用的音源：清掉服务端 disabledSources（不触发脚本重载，秒级）。
+// 主要用于清理历史误禁（如旧版本巡检误禁后一直没遇到「确认可用」的机会）。
+$('btnEnableAll').addEventListener('click', async () => {
+  if (insBusy) return toast('上一个服务端操作仍在处理中，请稍候…')
+  const stoppedList = (state.installed || []).filter(s => s.enabled !== false && Array.isArray(s.disabledSources) && s.disabledSources.length > 0)
+  if (!stoppedList.length) return toast('没有平台级停用的音源，无需恢复', 'info')
+  if (!confirm(`将把 ${stoppedList.length} 个平台级停用的音源全部恢复启用（只清平台停用，不动全局开关，不触发服务端重载），继续？`)) return
+  setInsBusy(true)
+  let okN = 0
+  try {
+    for (const s of stoppedList) {
+      try {
+        const r = await api.servicePlatforms(s.id, [], s.owner)
+        if (r.ok && r.data && r.data.success) okN++
+      } catch (e) { /* 单个失败不中断整批 */ }
+    }
+  } finally { setInsBusy(false) }
+  toast(`已恢复启用 ${okN} / ${stoppedList.length} 个音源`, okN === stoppedList.length ? 'ok' : 'warn')
+  refreshInstalled()
+})
+
+// ---------------- 健康巡检 ----------------
+function renderPatrolInfo() {
+  const p = state.patrol || {}
+  const el = $('patrolInfo')
+  if (!el) return
+  if (!p.lastRun) { el.textContent = '尚未巡检'; return }
+  const d = new Date(p.lastRun)
+  const hh = n => String(n).padStart(2, '0')
+  el.textContent = `上次巡检 ${d.getFullYear()}-${hh(d.getMonth() + 1)}-${hh(d.getDate())} ${hh(d.getHours())}:${hh(d.getMinutes())}：正常 ${p.ok || 0}、失效禁用 ${p.disabled || 0}、无法判定 ${p.unknown || 0}${p.cancelled ? '（已取消）' : ''}`
+}
+
+$('btnSyncServer').addEventListener('click', async () => {
+  if (state.busy) return toast('已有任务在运行', 'warn')
+  setBusy(true)
+  $('progStep').textContent = '同步服务端音源…'
+  const r = await api.serverSync()
+  setBusy(false)
+  if (r.ok) {
+    toast(`已同步：匹配 ${r.data.matched} 个、新增占位 ${r.data.added} 个（清理失效 ${r.data.pruned} 个），共 ${r.data.imported} 条算作已灌入`, 'ok')
+    loadSources()
+    refreshInstalled()
+  } else toast('同步失败: ' + r.error, 'err')
+})
+
+$('btnPatrol').addEventListener('click', async () => {
+  if (state.busy) return toast('已有任务在运行', 'warn')
+  setBusy(true)
+  $('progStep').textContent = '开始巡检…'
+  const r = await api.patrolStart()
+  setBusy(false)
+  if (r.ok) {
+    loadSources()
+    refreshInstalled()
+  } else toast('巡检失败: ' + r.error, 'err')
+})
+
+/** 启动后静默把服务端已有音源纳入「已灌入」管理（已连接才执行） */
+async function autoSyncServer() {
+  try {
+    const r = await api.serverSync()
+    if (r.ok) { await loadSources(); refreshInstalled() }
+  } catch (e) { /* 静默：没连上服务端不影响本地使用 */ }
+}
+
+$('btnRevokeSelected').addEventListener('click', async () => {
+  const ids = Object.keys(state.imported)
+  if (!ids.length) return toast('没有本工具灌入的记录')
+  if (!confirm(`将撤回本工具灌入的 ${ids.length} 个音源（从服务端删除），继续？`)) return
+  const r = await api.revoke(ids)
+  if (!r.ok) return toast('撤回失败: ' + r.error, 'err')
+  const ok = (r.data || []).filter(x => x.status === 'success').length
+  toast(`撤回完成：成功 ${ok} 个`, 'ok')
+  loadSources(); refreshInstalled()
+})
+
+// ---------------- 其他 ----------------
+$('btnClearLogs').addEventListener('click', async () => { await api.logsClear(); $('logBox').innerHTML = '' })
+$('btnOpenData').addEventListener('click', () => api.openDataDir())
+$('btnExport').addEventListener('click', async () => {
+  const scope = $('expFilter') ? $('expFilter').value : 'all'
+  if (scope === 'selected' && !state.selected.size) {
+    return toast('还没有勾选音源：勾选表格左侧复选框后，导出范围会自动切到「选中项」', 'warn')
+  }
+  const known = new Set(state.sources.map(e => e.id))
+  const ids = exportIds(scope).filter(id => known.has(id))
+  if (!ids.length) return toast(`当前范围没有可导出的音源（${scopeLabel(scope)}）`, 'warn')
+  const r = await api.dbExport(ids)
+  if (r.ok && r.data && r.data.exported) toast(`已导出 ${r.data.count} 条（${scopeLabel(scope)}，含检测结果）到 ${r.data.path}`, 'ok')
+  else if (r.ok && !r.data.exported) toast('已取消导出', 'info')
+  else toast('导出失败: ' + r.error, 'err')
+})
+
+/** 按筛选范围收集要导出的音源 id（忽略搜索词，整范围导出） */
+function matchScope(e, k) {
+  switch (k) {
+    case 'usable': return !!e.usable
+    case 'suspected': return !e.usable && e.status !== 'dead' && (e.suspected || isCheckedNoSource(e))
+    case 'dead': return e.status === 'dead' || isDeepDead(e)
+    // 已合并的重复项不该出现在「导出未检测」里：它们不是漏检，是重复
+    case 'unchecked': return !e.deprecated && !e.deep && e.status !== 'dead' && !isCheckedNoSource(e)
+    case 'imported': return !!state.imported[e.id]
+    default: return true
+  }
+}
+function scopeLabel(k) {
+  if (k === 'selected') return `选中 ${state.selected.size} 条`
+  return { all: '全部', usable: '可用', suspected: '疑似', dead: '失效', unchecked: '未检测', imported: '已灌入' }[k] || k
+}
+function exportIds(scope) {
+  // 「选中项」严格按用户勾选导出（保持勾选顺序），其余按整体范围导出
+  if (scope === 'selected') return [...state.selected]
+  return state.sources.filter(e => matchScope(e, scope)).map(e => e.id)
+}
+$('btnImport').addEventListener('click', async () => {
+  const r = await api.dbImport()
+  if (!r.ok) return toast('导入失败: ' + r.error, 'err')
+  if (!r.data || !r.data.imported) return
+  const s = r.data.summary || {}
+  toast(`导入完成：新增 ${s.added}、更新 ${s.updated}、按内容补检测结果 ${s.copied}、并入灌入记录 ${s.importedAdded}（共 ${s.total} 条）`, 'ok')
+  state.selected.clear()
+  state.page = 1
+  loadSources()
+})
+$('btnClearDb').addEventListener('click', async () => {
+  if (!confirm('清空本地音源库（不影响服务端已灌入的音源）？')) return
+  await api.dbClear(); state.selected.clear(); state.page = 1; loadSources(); toast('已清空', 'ok')
+})
+
+function clampPage() {
+  const total = Math.max(1, Math.ceil(filtered().length / PAGE_SIZE))
+  if (state.page > total) state.page = total
+}
+
+// ---------------- 启动 ----------------
+;(async function boot() {
+  await loadConfig()
+  await loadSources()
+  syncExportScope()      // 初始化导出范围下拉（首次进入默认跟随页签）
+  autoSyncServer()   // 静默同步服务端已有音源 → 纳入「已灌入」管理
+  const lr = await api.logsGet()
+  if (lr.ok) {
+    const box = $('logBox')
+    const frag = document.createDocumentFragment()
+    for (const e of (lr.data || [])) frag.appendChild(logLine(e))
+    box.appendChild(frag)
+    box.scrollTop = box.scrollHeight
+  }
+})()

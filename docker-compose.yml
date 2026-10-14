@@ -1,0 +1,26 @@
+# 音源猎手 Web/Docker 版 —— 飞牛 NAS（fnOS）Docker Compose 部署
+#
+# 用法（飞牛 NAS）：
+#   1. 把整个 lx-hunter-pc 文件夹拷贝到 NAS（SMB/文件管理器）；
+#   2. 飞牛桌面 → Docker → Compose → 新增项目 → 路径选到本文件夹所在目录；
+#   3. 保持下方默认配置，创建并启动；
+#   4. 浏览器访问 http://NAS的IP:7971
+#
+# 使用预构建镜像（GitHub Container Registry）而不是本地构建时，把 build: . 换成：
+#   image: ghcr.io/zues0077/lx-hunter:latest
+# 数据持久化：音源库 / 配置 / 已灌入记录默认落在 ./data（仓库同级目录）。
+# NAS 上想放到指定位置时，把 ./data 换成你的绝对路径即可。
+# 备份或迁移只需拷贝该文件夹；也可在网页「导入音源库」上传 PC 版导出的 JSON。
+services:
+  lx-hunter:
+    build: .
+    image: lx-hunter-pc:web-1.7.4
+    container_name: lx-hunter-pc
+    restart: unless-stopped
+    ports:
+      - "7971:7970"            # 冒号左边可改：与 NAS 上其他服务冲突时换成 7971 等
+    volumes:
+      - ./data:/data                     # 数据卷：配置 / 音源库 / 灌入记录 / 日志
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=7970              # 容器内监听端口，改这里就要同步改上面映射

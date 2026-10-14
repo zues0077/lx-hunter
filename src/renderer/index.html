@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>音源猎手 PC 版</title>
+<link rel="stylesheet" href="styles.css?v=4">
+</head>
+<body>
+<div class="app">
+  <!-- 侧边导航 -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">猎</div>
+      <div class="brand-text">
+        <div class="brand-title">音源猎手</div>
+        <div class="brand-sub">PC 版 v1.7.5</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="library"><span class="ni">◈</span>音源库</button>
+      <button class="nav-item" data-view="import"><span class="ni">⇪</span>灌入</button>
+      <button class="nav-item" data-view="installed"><span class="ni">☰</span>已灌入</button>
+      <button class="nav-item" data-view="settings"><span class="ni">⚙</span>设置</button>
+      <button class="nav-item" data-view="logs"><span class="ni">▤</span>日志</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="conn" id="connChip"><span class="dot"></span><span id="connText">未连接</span></div>
+      <button class="btn-link" id="themeBtn">切换主题</button>
+    </div>
+  </aside>
+
+  <!-- 主区 -->
+  <main class="main">
+    <!-- ===== 音源库 ===== -->
+    <section class="view active" id="view-library">
+      <header class="view-head">
+        <div>
+          <h1>音源库</h1>
+          <p class="sub">从 GitHub 仓库爬取洛雪音源脚本 → 沙箱真实取链检测 → 批量灌入自建 LX MUSIC 服务</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn" id="btnCrawl">爬取仓库</button>
+          <button class="btn primary" id="btnCheck">检测选中</button>
+          <button class="btn" id="btnCheckImport" title="先跑检测，再把通过的音源直接灌入服务端">检测并灌入</button>
+          <button class="btn danger-ghost" id="btnCancel" disabled>取消</button>
+        </div>
+      </header>
+
+      <div class="cards">
+        <div class="card stat"><div class="stat-num" id="stTotal">0</div><div class="stat-label">库内候选</div></div>
+        <div class="card stat"><div class="stat-num ok" id="stUsable">0</div><div class="stat-label">检测可用</div></div>
+        <div class="card stat"><div class="stat-num warn" id="stSuspected">0</div><div class="stat-label">疑似音源</div></div>
+        <div class="card stat"><div class="stat-num dead" id="stDead">0</div><div class="stat-label">失效</div></div>
+        <div class="card stat"><div class="stat-num accent" id="stImported">0</div><div class="stat-label">已灌入</div></div>
+      </div>
+
+      <div class="card">
+        <div class="toolbar">
+          <input type="search" id="searchBox" class="input" placeholder="搜索名称 / 作者 / 仓库…">
+          <span class="muted" id="crawlInfo" title="上次爬取时间。启用定时爬取后（设置页），应用会按间隔自动增量爬取：只收新音源与内容更新，已抓取的不重抓">上次爬取：—</span>
+          <div class="seg" id="filterSeg">
+            <button class="seg-btn active" data-f="all">全部</button>
+            <button class="seg-btn" data-f="usable">可用</button>
+            <button class="seg-btn" data-f="suspected">疑似</button>
+            <button class="seg-btn" data-f="dead">失效</button>
+            <button class="seg-btn" data-f="unchecked">未检测</button>
+            <button class="seg-btn" data-f="imported">已灌入</button>
+            <button class="seg-btn" data-f="selected" id="segSelected">已选</button>
+          </div>
+          <label class="chk inline"><input type="checkbox" id="hideDeprecated" checked><span>隐藏已废弃重复项</span></label>
+          <select class="input" id="expFilter" style="max-width:170px" title="选择导出的音源范围：勾选表格里的条目后会自动切到「选中项」，也可手动切换（切换上方筛选页签时会跟随）">
+            <option value="selected">导出：选中项</option>
+            <option value="all">导出：全部</option>
+            <option value="usable">导出：可用</option>
+            <option value="suspected">导出：疑似</option>
+            <option value="dead">导出：失效</option>
+            <option value="unchecked">导出：未检测</option>
+            <option value="imported">导出：已灌入</option>
+          </select>
+          <button class="btn ghost" id="btnExport" title="把所选范围的音源（含检测结果与内容指纹）导出为 JSON，可导入到其他机器；勾选表格里的条目即可只导出这些">导出</button>
+          <div class="grow"></div>
+          <span class="muted" id="selInfo">已选 0 条</span>
+          <button class="btn ghost" id="btnSelectAll" title="把当前筛选结果的所有条目加入选择">选全部筛选结果</button>
+          <button class="btn ghost" id="btnSelUnimported" title="排除已灌入/已合并项，只勾选当前筛选下「未灌入」的音源（与状态排序「已灌入垫底」配套：排除已灌入部分，只灌未灌入部分）">只选未灌入</button>
+          <button class="btn ghost" id="btnHashDedupe" title="只下载并计算内容指纹（不进沙箱），先按内容去重，检测时直接跳过重复项">快速去重（内容指纹）</button>
+          <button class="btn ghost" id="btnUndedupe" title="把被判为重复的条目全部恢复为候选（保留检测结果，可重新去重）">撤销去重</button>
+          <button class="btn ghost" id="btnFullPlat" title="对已可用的音源跑「全平台完整检测」：逐个平台真实取链，补齐快速模式下没测的平台">补全平台覆盖</button>
+          <button class="btn ghost" id="btnClearSel">清空选择</button>
+        </div>
+        <div class="plat-legend muted">
+          平台标记：
+          <span class="plat usable" style="min-width:auto">实测可播</span> 本机下载并校验为音频
+          <span class="plat weak" style="min-width:auto">已取链(~)</span> 脚本已解析出播放链接，本机未校验（多为 CDN 限制，导入后通常可播）· 同样计入可用
+          <span class="plat failed" style="min-width:auto">取链失败</span>
+          <span class="plat untested" style="min-width:auto">未测(?)</span> 快速模式命中即停，非不支持
+          <span class="plat skipped" style="min-width:auto">未提供</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="srcTable">
+            <thead>
+              <tr>
+                <th class="c-chk"><input type="checkbox" id="chkAll"></th>
+                <th class="c-name sortable" data-k="name" title="点击按名称排序（再点反向）">音源<span class="sort-arrow"></span></th>
+                <th class="c-plat sortable" data-k="plat" title="点击按平台可用性排序：实测可用平台多的在前（再点反向）">平台可用性<span class="sort-arrow"></span></th>
+                <th class="c-repo sortable" data-k="repo" title="点击按来源仓库排序（再点反向）">来源仓库<span class="sort-arrow"></span></th>
+                <th class="c-status sortable" data-k="status" title="点击按状态排序：可用 → 疑似 → 未检测 → 不可用 → 失效 → 已灌入（垫底，方便排除已灌入、只勾选未灌入的灌入；再点反向）">状态<span class="sort-arrow"></span></th>
+                <th class="c-op">操作</th>
+              </tr>
+            </thead>
+            <tbody id="srcBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="emptyTip" hidden>库内还是空的 —— 点右上角「爬取仓库」开始</div>
+        <div class="pager">
+          <button class="btn sm" id="pgPrev">‹ 上一页</button>
+          <span class="muted" id="pgInfo">1 / 1</span>
+          <button class="btn sm" id="pgNext">下一页 ›</button>
+        </div>
+      </div>
+
+      <div class="progress-bar" id="progWrap" hidden>
+        <div class="prog-head"><span id="progStep">准备中…</span><span id="progNum"></span></div>
+        <div class="prog-track"><div class="prog-fill" id="progFill"></div></div>
+      </div>
+    </section>
+
+    <!-- ===== 灌入 ===== -->
+    <section class="view" id="view-import">
+      <header class="view-head">
+        <div>
+          <h1>灌入 LX MUSIC 服务</h1>
+          <p class="sub">把库里检测通过的音源批量灌入自建服务，并自动启用</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn primary" id="btnImportSelected">灌入选中的音源</button>
+          <button class="btn" id="btnImportUsable">灌入全部可用</button>
+          <button class="btn danger-ghost" id="btnCancelImport" disabled>取消</button>
+        </div>
+      </header>
+
+      <div class="card">
+        <h3 class="card-title">手动灌入（单个 URL）</h3>
+        <div class="row-form">
+          <input type="text" id="manualUrl" class="input grow" placeholder="https://raw.githubusercontent.com/owner/repo/HEAD/xxx.js">
+          <input type="text" id="manualName" class="input" placeholder="名称（可选）" style="max-width:220px">
+          <button class="btn" id="btnManualImport">灌入</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">灌入结果</h3>
+        <div class="table-wrap">
+          <table class="table" id="impTable">
+            <thead><tr><th class="c-name">音源</th><th>服务端 id</th><th>结果</th><th>说明</th></tr></thead>
+            <tbody id="impBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="impEmpty">还没有灌入记录</div>
+      </div>
+    </section>
+
+    <!-- ===== 已灌入 ===== -->
+    <section class="view" id="view-installed">
+      <header class="view-head">
+        <div>
+          <h1>已灌入音源</h1>
+          <p class="sub">服务端 <code id="srvUrl"></code> 上的自定义音源，可启用 / 禁用 / 撤回</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn" id="btnSyncServer" title="把服务端已有音源全部纳入本工具管理，算作「已灌入」（同名本地候选会标记已灌入，服务端原生音源建占位条目）">同步服务端音源</button>
+          <button class="btn" id="btnPatrol">健康巡检</button>
+          <button class="btn" id="btnRefreshInstalled">刷新</button>
+        </div>
+      </header>
+      <div class="card">
+        <div class="toolbar">
+          <span class="muted" id="patrolInfo">尚未巡检</span>
+          <span class="muted" id="insInfo"></span>
+          <span class="muted" id="insUser"></span>
+          <div class="grow"></div>
+          <button class="btn ghost" id="btnEnableAll" title="把所有平台级停用的音源恢复启用（只清服务端 disabledSources，不触发脚本重载；可用于清理历史误禁）">全部恢复启用</button>
+          <button class="btn danger-ghost" id="btnRevokeSelected">撤回本工具灌入的全部</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="insTable">
+            <thead><tr><th class="c-name">音源</th><th>id</th><th class="c-plat">平台</th><th>状态</th><th class="c-op">操作</th></tr></thead>
+            <tbody id="insBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="insEmpty">服务端暂无自定义音源</div>
+      </div>
+
+      <!-- 公共音源清理（v1.7.4）：只删服务端公开源，绝不碰账号私有源 -->
+      <div class="card">
+        <div class="toolbar">
+          <h3 class="card-title" style="margin:0">公共音源清理</h3>
+          <span class="muted" id="pubInfo">未读取</span>
+          <span class="muted" id="pubPriv"></span>
+          <div class="grow"></div>
+          <button class="btn ghost" id="btnPubRefresh">读取公共音源</button>
+          <button class="btn danger-ghost" id="btnPubDelSel">删除选中</button>
+          <button class="btn danger-ghost" id="btnPubDelAll">清空公共音源</button>
+        </div>
+        <p class="hint">
+          只清理服务端<b>公共音源</b>（owner=open，即 LX 网页端「音源管理」页里能看到的那批，猎手灌入的音源都落在这里）。
+          各账号内的<b>私有音源不在此列表、也绝不会被删除</b>。
+          每次删除都会触发 LX 服务端全量重载脚本，逐个串行执行，数量多时请耐心等待。
+        </p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th class="c-chk"><input type="checkbox" id="pubChkAll"></th>
+              <th class="c-name">公共音源</th><th>id</th><th class="c-plat">平台</th><th>状态</th>
+            </tr></thead>
+            <tbody id="pubBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="pubEmpty">点「读取公共音源」获取服务端公开音源列表</div>
+      </div>
+    </section>
+
+    <!-- ===== 设置 ===== -->
+    <section class="view" id="view-settings">
+      <header class="view-head">
+        <div><h1>设置</h1><p class="sub">连接自建 LX MUSIC 服务与 GitHub 爬取参数</p></div>
+        <div class="head-actions">
+          <button class="btn primary" id="btnSaveCfg">保存</button>
+          <button class="btn" id="btnTestConn">测试连接</button>
+        </div>
+      </header>
+
+      <div class="card">
+        <h3 class="card-title">LX MUSIC 服务</h3>
+        <div class="grid-form">
+          <label class="field"><span>服务地址</span><input class="input" id="cfgServer" placeholder="http://你的服务地址:7968"></label>
+          <label class="field"><span>管理员密码（frontend.password）</span><input class="input" id="cfgPwd" type="password" placeholder="lxserver 的 frontend.password"></label>
+          <label class="field"><span>用户名</span><input class="input" id="cfgUser" placeholder="default"></label>
+          <label class="field"><span>服务超时 (ms)</span><input class="input" id="cfgSrvTmo" type="number" placeholder="25000"></label>
+        </div>
+        <p class="hint">管理员密码即服务端配置里的 <code>frontend.password</code>（Web 端设置页可查看/修改），不是登录账号密码。<br>
+        「用户名」是<strong>灌入目标身份</strong>（v1.7.5 起）：填 <code>default</code> = 灌入<strong>公开源</strong>（所有账号可用、LX Music 网页端「音源管理」可见）；填具体账号名（如 admin）= 灌入<strong>该账号的私有源列表</strong>（网页端公共列表看不到，只有该账号登录后可见可用）。「已灌入」页合并显示两个空间，删除/停用/平台设置按每条音源各自的归属路由，不会串。公共音源清理始终只删公开源，绝不触碰账号私有源。</p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">GitHub 爬取</h3>
+        <div class="grid-form">
+          <label class="field"><span>GitHub Token（可选，提升限额至 5000/小时）</span><input class="input" id="cfgToken" type="password" placeholder="ghp_xxx"></label>
+          <label class="field"><span>下载镜像</span>
+            <select class="input" id="cfgMirror">
+              <option value="auto">自动（直连优先，失败自动切换）</option>
+              <option value="direct">直连 GitHub</option>
+              <option value="ghfast">ghfast.top</option>
+              <option value="ghproxy">gh-proxy.com</option>
+              <option value="ghproxy-net">ghproxy.net</option>
+              <option value="jsdelivr">jsDelivr CDN</option>
+              <option value="fastgit">FastGit</option>
+            </select>
+          </label>
+          <label class="field"><span>单仓库候选上限</span><input class="input" id="cfgMaxCand" type="number"></label>
+          <label class="field"><span>并发数（1–16）</span><input class="input" id="cfgConc" type="number" min="1" max="16"></label>
+          <label class="field"><span>下载超时 (ms)</span><input class="input" id="cfgTmo" type="number"></label>
+          <label class="field"><span>取链超时 (ms)</span><input class="input" id="cfgLinkTmo" type="number"></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgEnableAfter"><span>灌入后自动启用</span></label>
+          <label class="chk"><input type="checkbox" id="cfgSkipUnusable"><span>跳过本地检测未通过的音源</span></label>
+          <label class="chk"><input type="checkbox" id="cfgAutoUnsafe"><span>脚本要求 VM 模式时自动放行（有安全风险）</span></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgQuick"><span>快速检测（首个平台可用即通过，剩余平台<strong>不测</strong>并标「未测?」——平台列只反映实测结果；要完整覆盖请点「补全平台覆盖」或关闭此项）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgSkipChecked"><span>跳过已检测且脚本内容未变的音源（单条手动检测仍会重测）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgHashDedupe"><span>爬取后先做内容指纹去重（只下载算哈希、不进沙箱），检测直接跳过重复项</span></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>自动剔除<strong>重度混淆</strong>脚本（安全建议，依据 lx-ikun issue#8：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门；剔除发生在检测阶段，局部混淆只标注不剔除）</span></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">健康巡检（已灌入音源定期重测）</h3>
+        <div class="grid-form">
+          <label class="field"><span>巡检间隔（小时）</span><input class="input" id="cfgPatrolHours" type="number" min="1" max="720"></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（应用运行期间每分钟检查是否到期）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgPatrolDisable"><span>巡检失效的音源自动禁用（脚本被删/五平台全部取链失败才判定，网络抖动不误杀）</span></label>
+        </div>
+        <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">定时爬取（增量发现新音源）</h3>
+        <div class="grid-form">
+          <label class="field"><span>爬取间隔（小时）</span><input class="input" id="cfgCrawlHours" type="number" min="1" max="720"></label>
+          <label class="field"><span>只爬近期更新的仓库（天，0=不限）</span><input class="input" id="cfgCrawlSinceDays" type="number" min="0" max="365"></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgCrawlOn"><span>启用定时爬取（应用运行期间每分钟检查是否到期）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgReplaceSame"><span>灌入时自动替换服务端同名旧版（先删后传；关闭则改名上传）</span></label>
+        </div>
+        <p class="hint">定时爬取为<strong>增量模式</strong>：同时读取仓库<strong>文件树</strong>与 <strong>Releases 资产</strong>（lx-ikun-music-sources 等仓库只把音源发在 release 里，旧版本不读 release 永远抓不到）；zip 压缩包自动下载解压。已抓取的按 blob sha / 资产标识判重<strong>跳过不重抓</strong>；内容有变化的标记「有更新」并重置检测结果，重新检测后灌入时会<strong>替换服务端同名旧版</strong>（LX 里上传同名音源必须先删旧的，猎手自动完成这两步；删除会触发服务端短暂重载，批量替换时留意服务端负载）。</p>
+        <p class="hint"><strong>时间窗</strong>：设为 60 表示只爬 60 天内有提交的仓库（静默仓库整仓跳过，省 GitHub 配额），新发布的 release 资产也只收时间窗内的；<strong>树内文件不受此限制</strong>——活跃仓库里老文件的变更仍靠内容判重发现。填 0 关闭。</p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">附加仓库</h3>
+        <textarea class="input" id="cfgRepos" rows="4" placeholder="每行一个，格式 owner/repo"></textarea>
+        <p class="hint">内置 34 个常用音源仓库，这里可追加你自己的（一行一个）。</p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">数据</h3>
+        <div class="row-form">
+          <button class="btn ghost" id="btnOpenData">打开数据目录</button>
+          <button class="btn ghost" id="btnImport">导入音源库（合并检测结果）</button>
+          <button class="btn danger-ghost" id="btnClearDb">清空音源库</button>
+        </div>
+        <p class="hint">导出功能在「音源库」页工具栏：选择范围（全部 / 可用 / 疑似 / 失效 / 未检测 / 已灌入）后点「导出」。导出文件含所选范围音源与检测结果（含内容指纹）。换机器后先「爬取仓库」入库再导入，即可按内容指纹补齐检测结果，无需重跑检测。</p>
+        <p class="hint"><strong>便携模式（数据与软件同目录）</strong>：便携单文件版首次运行后，数据（音源库 / 配置 / 已灌入记录）会自动存放在 exe 同级的 <code>userData</code> 目录里。换电脑时<strong>把 exe 和它旁边的 userData 文件夹一起拷贝</strong>即可，数据不丢；旧位置（系统用户目录）的数据会在首次便携运行时自动迁移过去，原文件保留作备份。若软件目录不可写（如装在 Program Files），自动回退系统用户目录。</p>
+      </div>
+    </section>
+
+    <!-- ===== 日志 ===== -->
+    <section class="view" id="view-logs">
+      <header class="view-head">
+        <div><h1>运行日志</h1><p class="sub">实时任务输出</p></div>
+        <div class="head-actions">
+          <button class="btn ghost" id="btnClearLogs">清空</button>
+        </div>
+      </header>
+      <div class="card">
+        <div class="logs" id="logBox"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="sorters.js?v=27"></script>
+<script src="web-bridge.js?v=27"></script>
+<script src="app.js?v=27"></script>
+</body>
+</html>

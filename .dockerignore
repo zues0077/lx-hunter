@@ -1,0 +1,11 @@
+# 构建上下文里只需要 src/ 和 package.json，其余一律排除（node_modules 体积很大）
+node_modules
+dist
+tests
+ref
+.git
+.workbuddy
+*.patch
+*.log
+# 注意：Dockerfile / docker-compose.yml 必须在上下文里（Compose 构建时要读），
+# 不能排除——否则 NAS 上「Compose 新增项目」会报找不到 Dockerfile。

@@ -1,0 +1,612 @@
+'use strict'
+/** 音源检测：下载 → 疑似识别 → vm 沙箱深度检测（真实取链 + 音频魔数校验） */
+const crypto = require('crypto')
+const { Sandbox } = require('./sandbox')
+const { crawlFetch, readText, fetchAnyWithTimeout, describeNetError, dohLookup, UA } = require('./net')
+
+const TEST_SONGS = {
+  wy: [{ name: '海阔天空', info: { songmid: '347230' } }],
+  tx: [{ name: '晴天', info: { songmid: '0039MnYb0qxYhV' } }],
+  kw: [{ name: '晴天', info: { songmid: '838607' } }],
+  kg: [{ name: '晴天', info: { hash: '30ece05c17d4e9ec8ba0ef9f96e7a07c' } }],
+  mg: [{ name: '晴天', info: { copyrightId: '69984639', songmid: '69984639' } }]
+}
+const PLATFORMS = ['wy', 'tx', 'kw', 'kg', 'mg']
+/** 网络类瞬时错误：重试一次很可能就成功，不该据此把平台判死 */
+function isTransient(msg) {
+  return /timeout|timedout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network|abort|fetch failed|fetch 失败|请求超时|连接|已取消/i.test(String(msg || ''))
+}
+
+/**
+ * 失败原因是否偏向「本机 / 网络侧」，而不是音源本身失效。
+ *
+ * 这是自动禁用前必须过的闸门：看到 DNS 失败、证书不受信、代理拒绝、429/403，
+ * 只能说明「这一刻从这台机器取不到」，不能说明「导入洛雪也不能用」。
+ * 过去这里漏掉了中文文案（沙箱抛的是「沙箱 fetch 失败」，而旧规则只认英文 fetch failed），
+ * 结果一次网络抖动就把好音源判死、还会被巡检自动禁用 —— 典型的误杀。
+ */
+function isLocalNetworkIssue(msg) {
+  const m = String(msg || '')
+  if (!m) return false
+  return /fetch 失败|Failed to fetch|沙箱 fetch|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EHOSTUNREACH|socket|certificate|证书|代理|proxy|请求超时|解析失败|HTTP (403|401|429|5\d\d)/i.test(m) ||
+    isTransient(m)
+}
+const PLATFORM_LABEL = { wy: '网易云', tx: 'QQ音乐', kw: '酷我', kg: '酷狗', mg: '咪咕' }
+const MAX_CONTENT_BYTES = 2 * 1024 * 1024
+
+/** 给慢 Promise 挂一个「取消探针」：shouldStop() 为真时立刻 reject，不再等网络 */
+function stoppable(p, shouldStop, intervalMs) {
+  return new Promise((resolve, reject) => {
+    if (shouldStop && shouldStop()) { reject(new Error('已取消')); return }
+    let done = false
+    const t = setInterval(() => {
+      if (!done && shouldStop && shouldStop()) { done = true; clearInterval(t); reject(new Error('已取消')) }
+    }, intervalMs || 250)
+    p.then(
+      v => { if (!done) { done = true; clearInterval(t); resolve(v) } },
+      e => { if (!done) { done = true; clearInterval(t); reject(e) } }
+    )
+  })
+}
+
+function sha256Str(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('hex') }
+
+/**
+ * 构造给脚本的 musicInfo。除 id 外补上歌曲名 ——
+ * 真实洛雪传的就是完整歌曲信息，部分脚本依赖 name 做二次搜索/兜底，缺了会直接取不到链。
+ */
+function musicInfo(song) {
+  const base = song.info || {}
+  return base.name ? base : Object.assign({ name: song.name }, base)
+}
+
+function extractMeta(code) {
+  const meta = { name: '', description: '', version: '', author: '', homepage: '' }
+  const block = code.match(/\/\*[!*][\s\S]*?\*\//)
+  if (!block) return meta
+  const pairs = {
+    name: /@name\s+(.+)/, version: /@version\s+(.+)/,
+    description: /@description\s+(.+)/, author: /@author\s+(.+)/, homepage: /@homepage\s+(.+)/
+  }
+  for (const k of Object.keys(pairs)) {
+    const m = block[0].match(pairs[k])
+    if (m && m[1]) meta[k] = m[1].trim()
+  }
+  return meta
+}
+
+/**
+ * 音源疑似度打分。阈值从 5 下调到 4：
+ * 旧阈值会把「只有 lx.request + @name + 文件名带 source」这类真实音源挡在深检之外，
+ * 它们连手动点击「检测」都进不了沙箱（用户表现为「明明能用却检测不出来」）。
+ * 深检本身有并发与预算保护，多放行一档不会拖垮速度。
+ */
+function scoreEntry(path, content) {
+  const fname = String(path || '').split('/').pop() || ''
+  let score = 0
+  if (/音源|源|source|lx-source/i.test(fname)) score += 2
+  if (/^(lx|src|source)[-_ .]/i.test(fname)) score += 1
+  if (content) {
+    if (/globalThis\s*\.\s*lx\b|globalThis\s*\[\s*['"]lx['"]\s*\]/.test(content)) score += 3
+    if (/EVENT_NAMES/.test(content)) score += 2
+    if (/\blx\s*\.\s*on\s*\(|\bLX\s*\.\s*on\s*\(/.test(content)) score += 2
+    if (/\blx\s*\.\s*request\b|\blx\s*\.\s*send\b|\blx\s*\.\s*utils\b/.test(content)) score += 2
+    if (/musicSources|musicUrl|supportedSources|qualitys/.test(content)) score += 2
+    if (/@name\s|@description\s/.test(content)) score += 1
+    if (/on\s*\(\s*['"]request['"]/.test(content)) score += 2
+    if (/['"]inited['"]/.test(content)) score += 1
+  }
+  return score
+}
+
+function classifyEntry(path, content) { return scoreEntry(path, content) >= 4 }
+
+/**
+ * 混淆风险评估（v1.7.1，依据 lx-ikun-music-sources issue#8 的科普）：
+ * 音源脚本没必要混淆 —— 混淆的主要用途是藏代码（木马/后门/统计上报）。
+ * 用三个特征判级，阈值按实测样本标定（23 个真实音源扫描）：
+ *  - _0x 十六进制变量名：重混淆样本 37~52 个/KB，良性偶用 < 1 个/KB
+ *  - \uXXXX unicode 转义：独家V5 样本 14 个/KB，正常脚本 ≈ 0
+ *  - 阿拉伯/异体 Unicode 字符（参与运算的小语种字符）：独家V5 47 个/KB，正常 ≈ 0
+ * 判级：
+ *  - 'high'  重度混淆：任何一项密度超过高阈值 —— 建议直接拒绝使用
+ *  - 'mid'   局部混淆：轻度命中 —— 有风险，需自行甄别（issue 里 Hei Music 属此类）
+ *  - ''      未检出混淆特征
+ */
+function obfuscationRisk(content) {
+  const t = String(content || '')
+  if (!t || t.length < 200) return { level: '', hits: null }
+  const kb = t.length / 1024
+  const count = re => (t.match(re) || []).length
+  const n0x = count(/_0x[0-9a-f]{4,6}/gi)
+  const nUni = count(/\\u[0-9a-fA-F]{4}/g)
+  const nExotic = count(/[\u0600-\u06FF\uFB50-\uFEFF]/g)
+  // eval / new Function 动态执行：混淆脚本的常用执行出口，单独计数供 tooltip
+  const nEval = count(/\beval\s*\(|new\s+Function\s*\(/g)
+  const hits = { perKb0x: n0x / kb, perKbUni: nUni / kb, perKbExotic: nExotic / kb, evalCalls: nEval, total0x: n0x, totalUni: nUni, totalExotic: nExotic }
+  const HIGH_0X = 20, HIGH_UNI = 8, HIGH_EXOTIC = 20
+  const MID_0X = 2, MID_UNI = 1, MID_EXOTIC = 2
+  if (hits.perKb0x >= HIGH_0X || hits.perKbUni >= HIGH_UNI || hits.perKbExotic >= HIGH_EXOTIC) {
+    return { level: 'high', hits }
+  }
+  if (hits.perKb0x >= MID_0X || hits.perKbUni >= MID_UNI || hits.perKbExotic >= MID_EXOTIC) {
+    return { level: 'mid', hits }
+  }
+  return { level: '', hits }
+}
+
+/** 混淆风险的中文摘要（状态徽章 tooltip / 日志用） */
+function obfuscationTip(risk) {
+  if (!risk || !risk.level || !risk.hits) return ''
+  const h = risk.hits
+  const parts = [`_0x 变量名 ${Math.round(h.perKb0x)}/KB`, `unicode 转义 ${h.perKbUni.toFixed(1)}/KB`, `异体字符 ${Math.round(h.perKbExotic)}/KB`]
+    .filter((s, i) => [h.perKb0x >= 2, h.perKbUni >= 1, h.perKbExotic >= 2][i])
+  if (h.evalCalls) parts.push(`动态执行 eval/new Function ${h.evalCalls} 处`)
+  return risk.level === 'high'
+    ? `重度混淆脚本（${parts.join('、')}）：音源脚本没有混淆的必要，混淆常用于隐藏恶意代码，建议拒绝使用`
+    : `含局部混淆（${parts.join('、')}）：可能用于防和谐，也可能藏统计上报/后门，建议自行甄别`
+}
+
+function looksAudio(headAscii, b0, b1) {
+  if (headAscii.slice(0, 3) === 'ID3') return true
+  if (b0 === 0xff && (b1 & 0xe0) === 0xe0) return true
+  const four = headAscii.slice(0, 4)
+  if (four === 'fLaC' || four === 'OggS' || four === 'RIFF') return true
+  if (headAscii.slice(4, 8) === 'ftyp') return true
+  return false
+}
+
+async function verifyUrl(url) {
+  let u
+  try { u = new URL(url) } catch (e) { return { ok: false, reason: '无效 URL' } }
+  const host = (u.hostname || '').toLowerCase()
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || /^10\./.test(host) ||
+    /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host)) {
+    return { ok: false, reason: '私有/本地地址，疑似假链接' }
+  }
+  try {
+    const res = await fetchAnyWithTimeout(url, {
+      // 不少音乐 CDN 校验 Referer / UA，缺了会返回 403 —— 过去据此把实际可用的音源误判为失效
+      headers: { Range: 'bytes=0-16383', 'User-Agent': UA, Referer: u.origin + '/' }
+    }, 8000)
+    let ct = ''
+    try { ct = res.headers.get('content-type') || '' } catch (e) {}
+    if (!res.ok && res.status !== 206) return { ok: false, reason: 'HTTP ' + res.status }
+    const ab = await res.arrayBuffer()
+    const bytes = new Uint8Array(ab.slice(0, 16))
+    let ascii = ''
+    for (let i = 0; i < bytes.length; i++) ascii += String.fromCharCode(bytes[i])
+    // 先以「音频魔数」为准，避免个别 CDN 返回 text/plain / 空 content-type 被误杀
+    if (looksAudio(ascii, bytes[0], bytes[1])) return { ok: true, size: ab.byteLength }
+    if (/audio|octet-stream/i.test(ct)) return { ok: true, size: ab.byteLength }
+    if (/json|text\/html/i.test(ct)) return { ok: false, reason: '返回 ' + ct + '，非音频' }
+    return { ok: false, reason: '非音频内容 (' + (ct || '未知') + ')' }
+  } catch (e) {
+    return { ok: false, reason: describeNetError(e).slice(0, 120) }
+  }
+}
+
+/** 下载脚本 + 基础判定（可达性、大小、哈希、疑似度、@name/@version）
+ *  @returns {{entry:object, code:string|null}} code 直接回传，避免调用方二次下载 */
+/** 混淆风险统一评估：主检两条路径（解压 code / 下载 text）都要过一遍 */
+function assessObfuscation(entry, text) {
+  const risk = obfuscationRisk(text)
+  entry.obfLevel = risk.level || ''
+  entry.obfHits = risk.hits || null
+  return risk
+}
+
+async function checkBasic(entry, cfg, onEvent, preferredMirror) {
+  entry.lastCheck = Date.now()
+  // 压缩包内脚本：内容在爬取时已解出随条目保存（raw 链接指向整个 zip，没法按文件下）。
+  // 直接复用，元信息补齐逻辑与下载路径一致。
+  if (typeof entry.code === 'string' && entry.code) {
+    entry.status = 'ok'
+    entry.error = null
+    entry.size = entry.code.length
+    entry.contentHash = entry.contentHash || sha256Str(entry.code)
+    const score = entry.suspectScore != null ? entry.suspectScore : scoreEntry(entry.path, entry.code)
+    entry.suspectScore = score
+    entry.suspected = score >= 4
+    assessObfuscation(entry, entry.code)
+    const meta = extractMeta(entry.code)
+    entry.scriptName = meta.name || entry.name
+    entry.scriptVersion = meta.version || ''
+    entry.author = meta.author || ''
+    entry.homepage = meta.homepage || ''
+    entry.description = meta.description || ''
+    entry.lxName = meta.name || ''
+    return { entry, code: entry.code }
+  }
+  const { res, url, mirror } = await crawlFetch(entry.url, null, cfg.timeoutMs, cfg.mirror, preferredMirror)
+  if (!res) { entry.status = 'dead'; entry.error = '全部镜像不可达'; return { entry, code: null } }
+  if (!res.ok) { entry.status = 'dead'; entry.error = 'HTTP ' + res.status; return { entry, code: null } }
+  const text = await readText(res, cfg.timeoutMs)
+  if (text.length > MAX_CONTENT_BYTES) { entry.status = 'dead'; entry.error = '文件过大'; return { entry, code: null } }
+  entry.size = text.length
+  entry.contentHash = sha256Str(text)
+  entry.status = 'ok'
+  entry.error = null
+  entry.fetchMirror = mirror
+  entry.fetchUrl = url
+  try {
+    const lm = res.headers && res.headers.get ? res.headers.get('last-modified') : null
+    if (lm) entry.lastModified = Date.parse(lm) || 0
+  } catch (e) {}
+  const score = scoreEntry(entry.path, text)
+  entry.suspectScore = score
+  entry.suspected = score >= 4
+  assessObfuscation(entry, text)
+  const meta = extractMeta(text)
+  entry.scriptName = meta.name || entry.name
+  entry.scriptVersion = meta.version || ''
+  entry.author = meta.author || ''
+  entry.homepage = meta.homepage || ''
+  entry.description = meta.description || ''
+  entry.lxName = meta.name || ''
+  return { entry, code: text }
+}
+
+/** 受限并发：既要压低总耗时，又不能一次把 5 个平台全打进同一个脚本（见 deepCheck 说明） */
+async function runPool(items, width, fn) {
+  const queue = items.slice()
+  if (!queue.length) return
+  const n = Math.max(1, Math.min(width, queue.length))
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (queue.length) { await fn(queue.shift()) }
+  }))
+}
+
+/**
+ * 单个平台的可用性判定。
+ *
+ * 【判定口径已修正】脚本能解析出真实 http(s) 音频链接 ⟹ 该平台「可用」。
+ * 旧口径要求「狩猎机把这段音频下载下来且魔数校验通过」才算可用，于是遇到需要 Referer、
+ * 或有地域/时效限制的 CDN 时，会把「导入洛雪后明明能听」的音源整片误判为失效（假阴性）。
+ * 本机能否下载只反映狩猎机到该 CDN 的连通性，并不等价于音源本身能否解析出链接。
+ *
+ * 每个平台有总预算 deadline：到点即收手，避免多档音质叠加重试把单条目拖到几分钟。
+ *
+ * @returns null 表示被提前叫停（快速模式已出结果 / 用户取消）
+ */
+/**
+ * 按「脚本自己声明的音质清单」去取链，而不是瞎猜 128k/320k。
+ *
+ * 洛雪音源注册格式形如：
+ *   sources[src] = { name, type:'music', actions:['musicUrl'], qualitys:['128k','320k','flac'] }
+ * 大量脚本只认清单里的值（例如只有 'flac' / '320k'，或自定义档位），
+ * 请求一个它不支持的 type 会直接返回空 —— 旧逻辑固定试 128k/320k，
+ * 于是这类「导入后明明能用」的音源被整片判成无可用平台。
+ */
+function declaredQualities(def) {
+  if (!def || typeof def !== 'object') return []
+  const raw = def.qualitys || def.qualities || def.supportQualitys
+  if (!Array.isArray(raw)) return []
+  return raw.filter(q => typeof q === 'string' && q).slice(0, 4)   // 最多 4 档，避免拖慢
+}
+
+async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
+  const songs = TEST_SONGS[src] || []
+  if (!songs.length) return { status: 'skipped', message: '无测试歌曲' }
+  // 优先用脚本声明的音质，取不到再退回常用两档（顺带覆盖只认 320k 的源）
+  const QUALITIES = (function () {
+    const own = declaredQualities(def)
+    if (own.length) return own
+    return ['128k', '320k']
+  })()
+  // 单平台总预算：够跑完「多档音质 + 一次抖动重试」，又不至于让坏脚本拖垮整个批次。
+  // 显式配置了就用配置值（只兜一个很小的下限），否则按取链超时推算。
+  const budgetCfg = Number(cfg.platformBudgetMs)
+  const budget = budgetCfg > 0 ? Math.max(3000, budgetCfg) : (Number(cfg.linkTimeoutMs) || 20000) * 2
+  const deadline = Date.now() + budget
+  let lastMsg = ''
+  for (const q of QUALITIES) {
+    for (const song of songs) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        if (bail()) return null
+        if (Date.now() > deadline) { lastMsg = lastMsg || '取链超时（已超出单平台预算）'; continue }
+        onEvent('step', { text: `沙箱取链 ${PLATFORM_LABEL[src]}「${song.name}」${q} · ${displayName || ''}` })
+        try {
+          const left = Math.max(1000, deadline - Date.now())
+          const waitMs = Math.min(Number(cfg.linkTimeoutMs) || 20000, left)
+          const r = await stoppable(
+            sb.dispatch('request', { source: src, action: 'musicUrl', info: { type: q, musicInfo: musicInfo(song) } }, waitMs),
+            bail
+          )
+          const ret = r && r.result
+          // 规范协议要求返回字符串；少数脚本返回 {url} / {link} / {data} 形式，一并兼容，
+          // 否则这批源会被当成「返回异常」误杀
+          let link = null
+          if (typeof ret === 'string') link = ret
+          else if (ret && typeof ret === 'object') {
+            const cand = ret.url || ret.link || ret.data
+            if (typeof cand === 'string') link = cand
+          }
+          if (link && /^https?:\/\//i.test(link)) {
+            const v = await stoppable(verifyUrl(link), bail).catch(() => ({ ok: false, reason: bail() ? '未校验（已确认可用，无需继续）' : '校验异常' }))
+            if (v.ok) return { status: 'usable', message: `「${song.name}」返回可播音频 (${q})`, url: link, verified: true }
+            // 明确是假链接（内网/非法地址）才算真的失败，且不用再试其它音质
+            if (/私有|本地|无效 URL/.test(v.reason || '')) return { status: 'failed', message: v.reason }
+            // 链接已解析出来，只是本机没拉下来 —— 仍判可用，把原因标注出来供参考
+            return { status: 'usable', message: `已解析音频链接（本机未校验：${v.reason}）`, url: link, verified: false }
+          }
+          lastMsg = (ret == null || ret === '') ? '返回空链接' : '返回异常: ' + String(ret).slice(0, 60)
+        } catch (e) {
+          lastMsg = String((e && e.message) || e).slice(0, 80)
+          // 网络抖动才重试；脚本明确返回空/异常没必要再试
+          if (isTransient(lastMsg) && attempt < 2) { onEvent('step', { text: `${PLATFORM_LABEL[src]} 网络抖动，重试…` }); continue }
+        }
+      }
+    }
+  }
+  return { status: 'failed', message: lastMsg || '未知失败' }
+}
+
+/** 沙箱深度检测：初始化脚本 + 平台真实取链
+ *  - quickCheck（默认开）：拿到第一个可用平台即通过，剩余平台标记跳过，大幅提速
+ *  - 脚本未注册的平台直接跳过，不发请求
+ *  - 结果记录内容指纹 hash，供「跳过已检测且内容未变」使用 */
+async function deepCheck(entry, code, cfg, onEvent, shouldStop) {
+  const result = { checkedAt: Date.now(), loadable: false, loadError: null, inited: false, platforms: {}, hash: entry.contentHash || null }
+  const quick = cfg.quickCheck !== false
+  const meta = extractMeta(code)
+  result.version = meta.version
+  result.lxName = meta.name || ''
+  result.author = meta.author || ''
+  let sb = null
+  let recovered = false
+  try {
+    sb = new Sandbox({
+      id: entry.id,
+      fetchTimeout: cfg.timeoutMs,
+      dispatchTimeout: Number(cfg.linkTimeoutMs) || 20000,
+      initGraceMs: Number(cfg.initGraceMs) || 4000,
+      initGraceMaxMs: Number(cfg.initGraceMaxMs) || 15000
+    })
+    const initRes = await sb.init(code, {
+      name: meta.name, description: meta.description, version: meta.version,
+      author: meta.author, homepage: meta.homepage, rawScript: code
+    })
+    recovered = !!(initRes && initRes.recovered)
+    // 只知道脚本挂了取链处理器、却没拿到它声明的平台列表 ⇒ 按标准五平台全测。
+    // 此时某个平台失败不等于「脚本不支持」，只是这次没取到链，UI 需据此措辞。
+    result.guessedSources = !!(initRes && initRes.guessedSources)
+    if (recovered) result.initWarning = (initRes && initRes.runError) || '脚本初始化有报错，但已注册音源，仍按可用流程实测'
+    if (!initRes.inited) {
+      result.loadError = (sb.initError && ('脚本执行报错: ' + sb.initError)) || "脚本未调用 lx.send('inited', …)"
+      return result
+    }
+    // 保留完整注册对象：里面的 qualitys 决定「该用哪个音质去请求」，是能不能取到链的关键
+    const srcDefs = (initRes.data && initRes.data.sources) || {}
+    result.sources = Object.keys(srcDefs)
+    result.sourceDefs = srcDefs
+    result.loadable = true
+    result.inited = true
+    // 脚本注册了哪些平台（key 一般是 wy/tx/kw/kg/mg）；全部 key 都不认识时视为无法判断，逐个照常测
+    const srcKeys = result.sources.map(k => String(k).toLowerCase())
+    const registered = srcKeys.filter(k => PLATFORMS.includes(k))
+
+    // 快速模式下「任一平台已确认可用」后即通知其余平台尽快收手，不必再等它们跑完
+    let stopEarly = false
+    const bail = () => stopEarly || !!(shouldStop && shouldStop())
+    let anyUsable = false
+
+    const queue = PLATFORMS.filter(src => !registered.length || registered.includes(src))
+    for (const src of PLATFORMS) {
+      if (!queue.includes(src)) result.platforms[src] = { status: 'skipped', message: '脚本未提供该平台' }
+    }
+
+    // 限制的并发数而非一次性全放：少数脚本用模块级共享变量暂存「当前请求状态」，
+    // 5 个平台同时打进去会互相串味，反而制造新的假阴性。默认 3 路，够快也够安全。
+    const width = Math.max(1, Math.min(5, Number(cfg.platformConcurrency) || 3))
+    await runPool(queue, width, async src => {
+      if (bail()) return
+      const r = await testPlatform(sb, src, cfg, onEvent, bail, result.lxName || entry.name, srcDefs[src]).catch(e => ({ status: 'failed', message: String((e && e.message) || e).slice(0, 80) }))
+      if (!r) return
+      result.platforms[src] = r
+      if (r.status === 'usable') { anyUsable = true; if (quick) stopEarly = true }
+    })
+
+    // 并发串扰兜底：失败的平台单独再串行跑一次（此刻没有其它请求在飞），
+    // 若这次成功，说明上一轮是并发导致的假阴性，以串行结果为准。
+    const cancelled0 = !!(shouldStop && shouldStop())
+    const losers = queue.filter(src => {
+      const p = result.platforms[src]
+      if (!p || p.status !== 'failed') return false
+      // 明确是假链接的没必要复测
+      if (/私有|本地|无效 URL/.test(p.message || '')) return false
+      // 超时/取消是脚本本身卡死，复测也只是再等一轮，白白翻倍耗时
+      if (/超时|已取消/.test(p.message || '')) return false
+      return true
+    })
+    // 若所有平台报的是同一个错（网络不通、网关挂了、鉴权失败…），
+    // 那是系统性原因而不是并发串扰，再串行复测只是把耗时翻倍却不会改变结论。
+    const msg0 = losers.length ? String(result.platforms[losers[0]].message || '') : ''
+    // 只有当「同一个错」且属于系统性原因（网络/沙箱/网关）才跳过复测。
+    // 「返回空链接」这种恰好是并发串扰的典型特征，必须保留复测，否则会误杀。
+    const systemic = /fetch 失败|沙箱|网络|超时|HTTP \d+|ECONN|ENOTFOUND|ETIMEDOUT|鉴权|403|401/i.test(msg0)
+    const allSameReason = queue.length > 1 && losers.length === queue.length &&
+      new Set(losers.map(src => String(result.platforms[src].message || ''))).size === 1 && systemic
+    const needRetry = losers.length && !allSameReason && !cancelled0 && !(quick && anyUsable)
+    result.retrySkipped = losers.length > 0 && !needRetry && !!allSameReason
+    if (needRetry) {
+      // 复测也要有预算，否则「脚本整体卡死」时会被逐个重试点名拖到几分钟
+      const rbCfg = Number(cfg.retryBudgetMs)
+      const retryDeadline = Date.now() + (rbCfg > 0 ? Math.max(2000, rbCfg) : 25000)
+      for (const src of losers) {
+        if (shouldStop && shouldStop()) break
+        if (Date.now() > retryDeadline) break
+        const r = await testPlatform(sb, src, cfg, onEvent, () => !!(shouldStop && shouldStop()), result.lxName || entry.name, srcDefs[src]).catch(() => null)
+        if (!r) continue
+        result.platforms[src] = r
+        if (r.status === 'usable') {
+          anyUsable = true
+          if (quick) break // 快速模式：复测出一个可用就够了
+        }
+      }
+
+      // 靠复测才救回来的：说明首轮结果普遍受并发串扰污染，
+      // 其余仍标 failed 的平台实为「没验证干净」，按未验证计，避免整片误判失效
+      if (anyUsable && quick) {
+        for (const src of losers) {
+          const p = result.platforms[src]
+          if (p && p.status === 'failed') result.platforms[src] = { status: 'untested', message: '未逐一验证（已确认该音源可用）' }
+        }
+      }
+    }
+
+    const cancelled = !!(shouldStop && shouldStop())
+    for (const src of PLATFORMS) {
+      if (result.platforms[src]) continue
+      if (cancelled) result.platforms[src] = { status: 'skipped', message: '已取消' }
+      // 注意：这里是「未测」而不是「不支持」，界面必须区别于 failed，
+      // 否则会让人以为音源只支持 1 个平台（洛雪里显示多平台来自脚本声明，本工具才是真取链验证）
+      else if (anyUsable && quick) result.platforms[src] = { status: 'untested', message: '未测（快速模式：已确认可用即停止）' }
+      else result.platforms[src] = { status: 'skipped', message: '未检测' }
+    }
+    // 脚本声明支持的平台数（洛雪里显示的多平台来自这个值，未经真实取链验证）
+    result.declaredSources = result.sources || []
+    // 全平台同因失败时给出方向性提示。
+    // 特别地，DNS 解析失败必须用公共 DoH 二次确认：
+    //   「本机 DNS 坏了」→ 可自救；「域名全网都不存在」→ 音源接口已停用，该删。
+    // 过去这两者显示同一句 ENOTFOUND，用户会以为检测坏了，实际是音源死了。
+    const failing = queue.map(src => result.platforms[src]).filter(p => p && p.status === 'failed')
+    if (failing.length >= 2 && new Set(failing.map(p => String(p.message || ''))).size === 1) {
+      const msg0 = String(failing[0].message || '')
+      const hostM = msg0.match(/ENOTFOUND\s+([a-z0-9][a-z0-9.-]*[a-z0-9])/i)
+      if (hostM) {
+        const doh = await dohLookup(hostM[1]).catch(() => ({ ok: false, nx: false, ips: [] }))
+        if (doh.nx) {
+          result.deadDomain = true
+          result.hint = '接口域名 ' + hostM[1] + ' 已失效（公共 DNS 确认域名不存在，多为接口停用或域名易主），该音源大概率已废弃，建议删除或找替代源'
+        } else if (doh.ok && doh.ips.length) {
+          result.hint = '接口域名 ' + hostM[1] + ' 本机解析失败，但公共 DNS 可解析：是本机 DNS 被污染或抽风，换 DNS / 开代理后重测即可，不代表导入洛雪后不可用'
+        } else {
+          result.hint = sameReasonHint(msg0)
+        }
+      } else {
+        result.hint = sameReasonHint(msg0)
+      }
+    }
+  } catch (e) {
+    const msg = String((e && e.message) || e)
+    result.loadError = msg.slice(0, 200)
+    if (msg === '已取消') result.cancelled = true
+  } finally {
+    if (sb) sb.stop()
+    if (sb) sb.destroy()
+    // 统一在这里收口失效类别：无论走正常流程还是异常分支，统计口径都一致
+    result.failKind = deepFailKind(result)
+  }
+  return result
+}
+
+/**
+ * 全平台报同一个网络错时，给一条「能照着做」的提示。
+ *
+ * 这类错误几乎从来不代表音源废了 —— 洛雪客户端跑的是同一份脚本、同一个 Link 流程，
+ * 差别只在本机网络栈（代理 / 证书 / DNS / 防火墙）。所以提示的重点是：告诉用户可以先怎么试，
+ * 并明确「这可能是本机环境问题」，别让人误以为这批音源都不能用而白删。
+ */
+function sameReasonHint(msg) {
+  const m = String(msg || '')
+  if (!m) return ''
+  // 错误信息形如「沙箱 fetch 失败: fetch failed ← getaddrinfo ENOTFOUND xxx.com […]」，取最内层原因
+  let cause = String(msg || '').replace(/^沙箱 fetch 失败:\s*/, '')
+  if (cause.indexOf('←') >= 0) cause = cause.split('←').pop()
+  cause = cause.replace(/\[.*$/, '').trim()
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo|解析/i.test(cause)) {
+    return '域名解析失败（' + cause.slice(0, 40) + '）：本机 DNS 或运营商拦截，不代表导入洛雪后不可用。可尝试换 DNS / 开代理后再测'
+  }
+  if (/certificate|证书|UNABLE_TO_VERIFY|SSL/i.test(cause)) {
+    return '证书校验失败（' + cause.slice(0, 40) + '）：多为代理或安全软件的中间人证书，不代表导入洛雪后不可用'
+  }
+  if (/ECONNREFUSED/.test(cause)) {
+    return '连接被拒绝（' + cause.slice(0, 40) + '）：多为本机代理端口不对或防火墙拦截，不代表导入洛雪后不可用'
+  }
+  if (/超时|timeout|ETIMEDOUT/i.test(cause)) {
+    return '请求超时（' + cause.slice(0, 40) + '）：本机到音源接口太慢或被限速，可放宽「链接超时」后重测，不代表导入洛雪后不可用'
+  }
+  if (/403|401|鉴权/i.test(cause)) {
+    return '接口返回鉴权失败（' + cause.slice(0, 40) + '）：多为音源侧限流或本机 IP 被拒，不代表导入洛雪后不可用'
+  }
+  if (/HTTP \d+/.test(m)) {
+    return '所有平台返回 ' + (m.match(/HTTP \d+/) || [''])[0] + '：多为接口限制或本机网络限制，不代表导入洛雪后不可用'
+  }
+  if (/fetch 失败|沙箱|网络/.test(m)) {
+    return '所有平台报同一个网络错（' + cause.slice(0, 60) + '），多为本机到音源接口不通或被拦截，不代表导入洛雪后不可用'
+  }
+  return '所有平台报同一个错：' + m.slice(0, 60)
+}
+
+/** 统计可用平台数。两种入参都认：
+ *  - 整个条目 { deep: { platforms } }（音源库条目）
+ *  - 深检结果本身 { platforms }（deepCheck 的返回值）
+ *  过去巡检把深检结果 d 直接传进来，函数只认 entry.deep ⇒ 永远返回 0 ⇒
+ *  所有已灌入源被巡检判死并自动禁用（包括主检明明可用的）—— 这是「检测可用的源被巡检禁用」的根因。 */
+function usableCount(entry) {
+  const deep = entry && entry.deep ? entry.deep : (entry && entry.platforms ? entry : null)
+  const p = (deep && deep.platforms) || {}
+  let n = 0
+  for (const s of Object.keys(p)) if (p[s] && p[s].status === 'usable') n++
+  return n
+}
+
+/**
+ * 深检结果的「失效类别」（供统计卡、筛选与状态徽章使用）：
+ *  - 'dead'：无任何可用平台、有平台实测失败，且失败原因不像本机网络/限流（真失效）
+ *  - 'net' ：同样无可用平台，但失败原因偏向本机网络/限流（可自救，不计入失效）
+ *  - ''    ：其余（有可用平台 / 加载失败 / 没有实测失败的平台 / 已取消）
+ * 过去统计只认「脚本下载失败(status=dead)」，深检全平台失败的真实失效源全部被算进
+ * 「疑似」，失效栏永远是 0 —— 与列表里一片红自相矛盾。
+ */
+function deepFailKind(deep) {
+  if (!deep || deep.loadError || deep.cancelled) return ''
+  const vals = Object.values(deep.platforms || {})
+  if (vals.some(p => p && p.status === 'usable')) return ''
+  const failed = vals.filter(p => p && p.status === 'failed')
+  if (!failed.length) return ''
+  if (deep.deadDomain === true) return 'dead'
+  // 只要有任一失败像网络问题（超时/DNS/限流…）就保守归为「网络疑云」，不把可自救的源算死
+  return failed.some(p => isLocalNetworkIssue(p.message || '')) ? 'net' : 'dead'
+}
+
+/**
+ * 巡检判定：把一次巡检深检结果翻成 verdict（纯函数，便于测试）。
+ * 策略——「一次失败不判死」：
+ *  - 铁证（脚本已删 / 域名全网注销 / 已不是音源）可立即判死；
+ *  - 其余全平台失败只算「疑似失效」，连续 threshold 次（默认 2）才升级为 dead。
+ *    聚合类音源对请求频率极敏感，巡检 34 个源并发重测很容易被限流而全灭，
+ *    一次失败就禁用会误杀用户正在用的源。
+ * @returns {{verdict:'ok'|'dead'|'unknown'|'suspect', note:string, fatal?:boolean, streak?:number}}
+ */
+function patrolJudge(d, ctx) {
+  const c = ctx || {}
+  if (!d || d.cancelled) return { verdict: 'unknown', note: d && d.cancelled ? '已取消' : '无深检结果' }
+  if (!d.loadable) return { verdict: 'unknown', note: '本地无法验证（' + String(d.loadError || '').slice(0, 60) + '），不动服务端' }
+  const n = usableCount(d)
+  if (n > 0) return { verdict: 'ok', note: '可用平台 ' + n + ' 个' + (c.updated ? '（脚本内容已更新）' : '') }
+  const fails = Object.values(d.platforms || {}).filter(p => p && p.status === 'failed')
+  const firstMsg = fails.length ? String(fails[0].message || '') : ''
+  const netIssue = fails.some(p => isLocalNetworkIssue(p.message || ''))
+  if (netIssue && d.deadDomain !== true) {
+    return {
+      verdict: 'unknown',
+      note: '全部平台取链失败，但失败原因像本机网络/限流（' + firstMsg.slice(0, 60) + '），不禁用' +
+        (d.hint ? '；建议：' + String(d.hint).slice(0, 80) : '')
+    }
+  }
+  if (d.deadDomain === true) return { verdict: 'dead', fatal: true, note: '接口域名已失效（公共 DNS 确认不存在）' }
+  const streak = (Number(c.prevStreak) || 0) + 1
+  const need = Math.max(1, Number(c.threshold) || 2)
+  const brief = d.hint ? String(d.hint).slice(0, 90) : (firstMsg ? '如 ' + firstMsg.slice(0, 60) : '五平台真实取链全部失败')
+  if (streak >= need) return { verdict: 'dead', streak, note: '连续 ' + streak + ' 次巡检全平台失败：' + brief }
+  return { verdict: 'suspect', streak, note: '五平台取链全部失败（连续第 ' + streak + ' 次），连续 ' + need + ' 次确认后才自动禁用' }
+}
+
+module.exports = {
+  TEST_SONGS, PLATFORMS, PLATFORM_LABEL,
+  sha256Str, extractMeta, classifyEntry, scoreEntry, obfuscationRisk, obfuscationTip, verifyUrl,
+  checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge,
+  isTransient, isLocalNetworkIssue, deepFailKind
+}
