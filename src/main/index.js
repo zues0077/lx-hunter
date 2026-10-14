@@ -3,8 +3,8 @@ const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { Store } = require('../core/store')
-const { Hunter } = require('../core/hunter')
-const lx = require('../core/lxservice')
+const { Hunter, formatIntervalHours } = require('../core/hunter')
+const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
 
 let win = null
 let store = null
@@ -68,6 +68,9 @@ function getDataDir() {
 }
 function setupPortableMode() {
   const { resolvePortableRoot, migrateLegacyData } = require('../core/portable')
+  // 开发模式（electron .）下模块顶层拿不到 app.getPath —— 此时 app 尚未就绪，
+  // 取 path 会抛 TypeError 并让整个主进程挂掉。开发模式没有便携意图，直接跳过。
+  if (!app.isPackaged) return null
   const legacyUserData = app.getPath('userData')
   const portableRoot = resolvePortableRoot(process.env, path.dirname(app.getPath('exe')))
   if (!portableRoot) return null
@@ -122,31 +125,39 @@ app.whenReady().then(() => {
   hunter = new Hunter(store, emitAll)
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
-  // 健康巡检定时器：每分钟检查一次是否到期（到期 = 上次巡检距今 ≥ 间隔小时数）
+  // ---- 定时任务：巡检 / 爬取（v1.7.0 起，v1.9.0 起爬取可接自动灌入）----
+  // 「每分钟检查一次」是**轮询节奏**，不是**执行频率**：到期判据 = 距上次执行 ≥ 设置里的间隔，
+  // 所以设 2 天就是每 2 天跑一次（最多晚 1 分钟），应用需保持运行。
   setInterval(() => {
     try {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.patrolEnabled || hunter.job.running) return
       const last = (store.db.patrol && store.db.patrol.lastRun) || 0
-      const iv = Math.max(1, Number(cfg.patrolIntervalHours) || 12) * 3600 * 1000
-      if (Date.now() - last >= iv) {
+      const hours = Math.max(1, Number(cfg.patrolIntervalHours) || 12)
+      if (Date.now() - last >= hours * 3600 * 1000) {
+        pushLog({ msg: `定时巡检到期（间隔 ${formatIntervalHours(hours)}），开始重测已灌入音源…`, module: '巡检', level: 'info', at: Date.now() })
         hunter.runPatrol().catch(e => pushLog({ msg: '定时巡检失败：' + String((e && e.message) || e), module: '巡检', level: 'error', at: Date.now() }))
       }
     } catch (e) {}
   }, 60 * 1000)
-  // 定时爬取定时器（v1.7.0，增量模式）：同一套「每分钟检查是否到期」模式。
-  // 到期后跑增量爬取（文件树 + Releases）：已抓取的按 blob sha / 资产标识判重跳过，
+  // 定时爬取：到期后跑增量爬取（文件树 + Releases），已抓取的按 blob sha / 资产标识判重跳过，
   // 只收新音源；内容有变化的就地更新并重置检测结果。
+  // 勾了「爬取结束后自动灌入」则走 runAutoPipeline：爬取 → 检测新增/变化音源 → 灌入可用音源。
   setInterval(() => {
     try {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.crawlScheduleEnabled || hunter.job.running) return
       const last = store.db.lastCrawl || 0
-      const iv = Math.max(1, Number(cfg.crawlIntervalHours) || 24) * 3600 * 1000
-      if (Date.now() - last >= iv) {
-        pushLog({ msg: '定时爬取到期，开始增量爬取（文件树 + Releases 资产）…', module: '爬取', level: 'info', at: Date.now() })
+      const hours = Math.max(1, Number(cfg.crawlIntervalHours) || 24)
+      if (Date.now() - last < hours * 3600 * 1000) return
+      const span = formatIntervalHours(hours)
+      if (cfg.crawlAutoImport) {
+        pushLog({ msg: `定时爬取到期（间隔 ${span}），开始「增量爬取 → 检测 → 自动灌入」…`, module: '爬取', level: 'info', at: Date.now() })
+        hunter.runAutoPipeline().catch(e => pushLog({ msg: '定时任务失败：' + String((e && e.message) || e), module: '爬取', level: 'error', at: Date.now() }))
+      } else {
+        pushLog({ msg: `定时爬取到期（间隔 ${span}），开始增量爬取（文件树 + Releases 资产）…`, module: '爬取', level: 'info', at: Date.now() })
         hunter.runCrawl({ incremental: true }).catch(e => pushLog({ msg: '定时爬取失败：' + String((e && e.message) || e), module: '爬取', level: 'error', at: Date.now() }))
       }
     } catch (e) {}
@@ -182,12 +193,21 @@ ipcMain.handle('config:set', guard((e, patch) => {
 }))
 
 ipcMain.handle('service:test', guard(async (e, cfgOverride) => {
-  const cfg = Object.assign({}, store.config, cfgOverride || {})
-  return await lx.verify(cfg)
+  const svc = resolveService(store.config, cfgOverride)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.verify(svc.acct)
 }))
 
 ipcMain.handle('service:list', guard(async () => {
-  return await lx.list(store.config)
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.list(svc.acct)
+}))
+
+// 账本对账：渲染层刚读到该账号的服务端列表，把「服务端已不存在」的灌入记录摘掉。
+// liveIds 由渲染层传（就是它刚展示的那份列表），核心层不再多打一次服务端。
+ipcMain.handle('service:reconcile', guard(async (e, platformId, liveIds) => {
+  return hunter.reconcileImported(platformId, liveIds)
 }))
 
 ipcMain.handle('sources:get', guard(() => {
@@ -223,8 +243,9 @@ ipcMain.handle('hash:start', guard(async (e, ids) => {
   return await hunter.runHash(ids)
 }))
 
-ipcMain.handle('import:start', guard(async (e, ids) => {
-  return await hunter.runImport(ids)
+// v1.8.0：opts.platformIds 可显式指定灌入目标（不给则用设置里标记「参与批量灌入」的账号）
+ipcMain.handle('import:start', guard(async (e, ids, opts) => {
+  return await hunter.runImport(ids, opts)
 }))
 
 // 同步服务端已有音源 → 全部纳入管理，算作「已灌入」
@@ -292,51 +313,79 @@ ipcMain.handle('db:import', guard(async () => {
 ipcMain.handle('source:validate', guard(async (e, id) => {
   const entry = store.db.sources[id]
   if (!entry) throw new Error('音源不存在')
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
   const { crawlFetch, readText } = require('../core/net')
   const { res } = await crawlFetch(entry.url, null, store.config.timeoutMs, store.config.mirror)
   if (!res || !res.ok) throw new Error('脚本下载失败')
   const code = await readText(res, store.config.timeoutMs)
-  const r = await lx.validate(store.config, code)
+  const r = await svc.adapter.validate(svc.acct, code)
   return { status: r.status, data: r.data, text: r.text }
 }))
 
 // 手动填 URL 灌入（PC 端下载后直传内容，服务端无需出网）
 ipcMain.handle('import:url', guard(async (e, url, name) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
   const { crawlFetch, readText } = require('../core/net')
   let r = null
   const { res } = await crawlFetch(url, null, store.config.timeoutMs, store.config.mirror)
   if (res && res.ok) {
     const code = await readText(res, store.config.timeoutMs)
-    r = await lx.upload(store.config, code, name)
+    r = await svc.adapter.upload(svc.acct, code, name)
   } else {
-    r = await lx.importUrl(store.config, url, name)
+    r = await svc.adapter.importUrl(svc.acct, url, name)
   }
   if (r.success) {
     store.imported['manual:' + r.id] = {
       lxId: r.id, name: r.name || name || url, contentHash: '',
-      serverUrl: lx.baseUrl(store.config), importedAt: Date.now(), platforms: r.platforms || []
+      serverUrl: svc.adapter.baseUrl(svc.acct), importedAt: Date.now(), platforms: r.platforms || [],
+      platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name
     }
     store.saveImported()
   }
   return r
 }))
 
-ipcMain.handle('service:toggle', guard(async (e, id, enabled, owner) => await lx.toggle(store.config, id, enabled, { owner })))
-ipcMain.handle('service:remove', guard(async (e, id, owner) => await lx.remove(store.config, id, { owner })))
+ipcMain.handle('service:toggle', guard(async (e, id, enabled, owner) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.toggle(svc.acct, id, enabled, { owner })
+}))
+ipcMain.handle('service:remove', guard(async (e, id, owner) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.remove(svc.acct, id, { owner })
+}))
 // 停用/启用（走 update-platforms，不触发服务端全量重载，不会假死）
 // owner：源的归属身份，私有源（owner=admin 等）的停用必须写其身份那份 states 才生效
-ipcMain.handle('service:platforms', guard(async (e, id, disabledSources, owner) => await lx.setPlatforms(store.config, id, disabledSources, { owner })))
+ipcMain.handle('service:platforms', guard(async (e, id, disabledSources, owner) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.setPlatforms(svc.acct, id, disabledSources, { owner })
+}))
 
-// 公共音源清理（v1.7.4）：只删服务端公开源（_open），绝不碰各账号私有源
-ipcMain.handle('service:listPublic', guard(async () => await lx.listPublic(store.config)))
+// 公共音源清理（v1.7.4）：只删服务端公开源（_open），绝不碰各账号私有源；
+// 仅 LX Server 平台具备该能力，其他平台（Songloft / MusicSync）返回友好提示。
+ipcMain.handle('service:listPublic', guard(async () => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  if (svc.type !== 'lxserver') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server 支持' }
+  return await svc.adapter.listPublic(svc.acct)
+}))
 // 批量删除：服务端每次 delete 都会全量重载脚本（几十秒），串行执行并逐个上报进度
-ipcMain.handle('service:removePublicBatch', guard(async (e, ids) => await lx.removePublicBatch(store.config, ids, (done, total, item) => {
-  emitAll('log', {
-    msg: `删除公共音源 ${done}/${total}：${item.id}${item.success ? '' : ' — 失败：' + item.message}`,
-    module: '服务', level: item.success ? 'info' : 'warn', at: Date.now()
+ipcMain.handle('service:removePublicBatch', guard(async (e, ids) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  if (svc.type !== 'lxserver') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server 支持' }
+  return await svc.adapter.removePublicBatch(svc.acct, ids, (done, total, item) => {
+    emitAll('log', {
+      msg: `删除公共音源 ${done}/${total}：${item.id}${item.success ? '' : ' — 失败：' + item.message}`,
+      module: '服务', level: item.success ? 'info' : 'warn', at: Date.now()
+    })
+    emitAll('event', { type: 'pub-delete', payload: { done, total, id: item.id, success: item.success } })
   })
-  emitAll('event', { type: 'pub-delete', payload: { done, total, id: item.id, success: item.success } })
-})))
+}))
 
 ipcMain.handle('app:openDataDir', guard(() => {
   shell.openPath(getDataDir())

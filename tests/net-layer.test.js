@@ -1,6 +1,7 @@
 // 验证网络层修复：错误原因展开 + 双通道回退 + 响应级错误不重复请求
 // 全部使用 net.js 里的真实实现（不是复制一份逻辑来测），通过注入假的 electron 模块控制通道行为
-const NET = 'C:/Users/Administrator/WorkBuddy/2026-10-09-09-17-06/lx-hunter-pc/src/core/net.js'
+// 用相对于本文件的路径解析：写死绝对路径会在换工作区目录后直接 MODULE_NOT_FOUND
+const NET = require('path').join(__dirname, '..', 'src', 'core', 'net.js')
 const Module = require('module')
 const EP = require.resolve('electron')
 

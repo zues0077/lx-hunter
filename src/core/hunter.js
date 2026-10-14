@@ -3,7 +3,7 @@
 const { crawl, DEFAULT_REPOS, normalizeRepo } = require('./crawler')
 const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
-const lx = require('./lxservice')
+const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
 const { Store } = require('./store')
 
 function normName(s) {
@@ -32,12 +32,58 @@ function versionNum(s) {
   return v
 }
 
+/**
+ * 把「间隔小时数」说成人话（定时任务的日志用）：48 → 「2 天（48 小时）」。
+ * 桌面版与 Web 版共用，免得用户看到「48 小时」还要自己换算，也别两边各写一份格式化。
+ */
+function formatIntervalHours(h) {
+  const n = Math.max(1, Number(h) || 1)
+  return n % 24 === 0 ? `${n / 24} 天（${n} 小时）` : `${n} 小时`
+}
+
 // 注：原先这里的规则只认英文 "fetch failed"，而沙箱抛的是中文「沙箱 fetch 失败」，
 // 导致全平台网络失败会被判死并自动禁用。现统一改由 checker.isLocalNetworkIssue 判定。
 
 /** 是否为「本地真实候选」：服务端原生占位 / 无脚本地址的条目不参与检测与去重 */
 function isLocalSource(e) {
   return !!e && !e.fromServer && !e.deprecated && !!e.url
+}
+
+/**
+ * 本地深检里「实测可用」的平台键列表（v1.8.0）。
+ * 用于同名裁决时判断两个脚本的平台是否有交集（完全不交集的视为无关脚本）。
+ */
+function usableKeys(e) {
+  const p = e && e.deep && e.deep.platforms
+  if (!p || typeof p !== 'object') return []
+  return Object.keys(p).filter(k => p[k] && p[k].status === 'usable')
+}
+
+/**
+ * 改名安全阀（v1.8.0）：有些脚本会**校验自己的名字**——实测 `_real_聚合API接口.js` 里有
+ * `scriptInfo.name !== "聚合API接口 (by lerd)" ||` 这种断言，只改 `@name` 注释不改这处，
+ * 脚本初始化就会失败（在 MusicSync 上表现为「初始化失败」，在别处可能是静默不可用）。
+ * 只改注释而让脚本变成坏源，比不改名严重得多，所以这里先判断能不能安全改名。
+ *
+ * 判据：脚本里出现「原始名字」的次数，减去两处**可以一起改写**的地方
+ * （`@name` 注释行、`lx.send('inited',{name:...})`）之后还有剩余 → 说明脚本自己也在用这个名字
+ * （自检断言、拼接、路由判断等），改名有风险。
+ *
+ * @param {string} code 脚本源码
+ * @param {string} name 脚本当前的 @name（不是要改成的那个）
+ * @returns {boolean} true = 改名会让脚本失效，不能改
+ */
+function renameSelfCheck(code, name) {
+  const n = String(name || '').trim()
+  if (!n) return false
+  const s = String(code || '')
+  const esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const all = s.split(n).length - 1
+  if (all <= 1) return false
+  let rewritable = 0
+  if (new RegExp('@name\\s+' + esc).test(s)) rewritable++
+  if (new RegExp('lx\\.send\\(\\s*["\']inited["\']\\s*,\\s*\\{\\s*name\\s*:\\s*["\']' + esc + '["\']').test(s)) rewritable++
+  return all - rewritable > 0
 }
 
 /**
@@ -102,6 +148,16 @@ class Hunter {
     this.job.cancel = true
     this.log('收到取消请求，正在停止…', '任务', 'warn')
     return true
+  }
+
+  /**
+   * 取当前选中的平台账号 { adapter, acct, type }（v1.8.0 多平台）。
+   * 没有任何平台账号或没选中 → 抛清晰错误，避免后续服务端调用拿着空配置瞎跑。
+   */
+  _active() {
+    const svc = getActiveService(this.store.config)
+    if (!svc) throw new Error('未配置或未选择服务平台账号：请先在「设置」里添加并选中一个平台账号')
+    return svc
   }
 
   // ---------------- 爬取 ----------------
@@ -169,6 +225,107 @@ class Hunter {
       })
     }
     return { added: total, updated: merge.updated, skipped: merge.skipped }
+  }
+
+  /**
+   * 定时任务全链路（v1.9.0）：增量爬取 → 检测新增/内容变化的音源 → 灌入可用音源。
+   *
+   * 为什么把三步串成一个方法，而不是在定时器里连着调三次：
+   *  1. 「该检测谁」「该灌谁」都依赖「本次爬取动了哪些条目」，这个信息只有在爬取跑完那一刻才拿得到；
+   *  2. job.running 是全局单任务锁，散着调会出现「爬取刚结束、检测还没起」的空窗，
+   *     定时器下一轮 tick 可能又挤进来；
+   *  3. 桌面版与 Web 版共用同一段逻辑，避免两边行为漂移。
+   *
+   * 灌入目标沿用与手动「检测并灌入」**完全一致**的口径（getBatchImportAccounts：设置里勾了
+   * 「参与批量灌入」的账号；一个都没勾时回退当前选中账号）——自动任务不该另有一套目标选择规则，
+   * 否则用户看到的设置和实际灌进去的地方会对不上。
+   *
+   * 任何一步失败都不中断整体收尾（只记日志），用户点取消则立刻停。
+   *
+   * @returns {{crawl:object|null, detect:object|null, import:object|null, skipped:string|null}}
+   */
+  async runAutoPipeline() {
+    if (this.job.running) throw new Error('已有任务在运行')
+    const cfg = this.store.config
+    const out = { crawl: null, detect: null, import: null, skipped: null }
+
+    // ① 爬取前给库内每条拍个快照（指纹 + stale），跑完 diff 出「本次新增 / 内容变化」的条目。
+    //    只比这两个字段：可用性、检测结果会被检测流程改写，拿它们做 diff 会把「本来就该重测」
+    //    的条目全算成变化，白扩大检测范围。
+    const before = new Map()
+    for (const e of this.store.getSources()) before.set(e.id, { hash: e.contentHash || '', stale: !!e.stale })
+
+    this.log('定时任务：开始增量爬取…', '定时')
+    out.crawl = await this.runCrawl({ incremental: true })
+    if (this.cancelRequested) { out.skipped = 'cancelled'; return out }
+
+    // ② 待检测 = 本次新增 + 内容变化（指纹变了或标了 stale）+ 从未检测过的可本地检测条目
+    const need = []
+    for (const e of this.store.getSources()) {
+      if (e.deprecated) continue
+      if (e.fromServer && !e.url) continue          // 服务端原生且无脚本地址 → 本地检不了
+      const prev = before.get(e.id)
+      const isNew = !prev
+      const changed = !!prev && (prev.hash !== (e.contentHash || '') || e.stale)
+      const never = !(e.deep && e.deep.checkedAt)
+      if (isNew || changed || never) need.push(e.id)
+    }
+    if (!need.length) {
+      out.skipped = 'no-new-sources'
+      this.log('定时任务：本次没有新增或内容变化的音源，跳过检测与灌入', '定时')
+      return out
+    }
+    this.log(`定时任务：检测 ${need.length} 条新增/内容变化的音源…`, '定时')
+    try { out.detect = await this.runCheck(need) } catch (e) {
+      this.log('自动检测失败：' + String((e && e.message) || e), '定时', 'error')
+      // runCheck 中途抛错可能没走到收尾，先把任务锁放开，否则紧接着的灌入会被自己挡住
+      this.job.running = false
+    }
+    if (this.cancelRequested) { out.skipped = 'cancelled'; return out }
+
+    // ③ 灌入 = 可用 ∧ 有脚本地址 ∧ 灌入目标账号里还有没灌过的。
+    //    粗筛用本地账本挡掉「每个目标都灌过了」的，避免每轮定时任务都拿整库走一遍裁决；
+    //    服务端上那条到底还在不在，交给 runImport 内部的服务端列表 + 账本对账去发现。
+    const targets = getBatchImportAccounts(cfg)
+    const tids = targets.map(a => a && a.id).filter(Boolean)
+    const activeId = cfg.activePlatformId || null
+    const ids = this.store.getSources()
+      .filter(e => !e.deprecated && e.usable && e.url)
+      .filter(e => !this._importedEverywhere(e.id, tids, activeId))
+      .map(e => e.id)
+    if (!ids.length) {
+      out.skipped = 'nothing-to-import'
+      this.log('定时任务：新增音源里没有可灌入的（检测未通过，或灌入目标账号都已有），本轮结束', '定时')
+      return out
+    }
+    const label = targets.map(a => a.name || a.url).filter(Boolean).join('、') || '当前选中账号'
+    this.log(`定时任务：把 ${ids.length} 条可用音源灌入目标账号（${label}）…`, '定时')
+    try { out.import = await this.runImport(ids) } catch (e) {
+      this.log('自动灌入失败：' + String((e && e.message) || e), '定时', 'error')
+    }
+    if (out.import) this.log(`定时任务完成：灌入成功 ${out.import.ok} / ${out.import.results.length}` +
+      (out.import.skipped ? `、跳过 ${out.import.skipped}` : ''), '定时')
+    return out
+  }
+
+  /**
+   * 该音源是否已经在**所有**灌入目标账号上都有灌入记录（v1.9.0，定时自动灌入的粗筛）。
+   * 用来挡掉「每个目标账号都灌过了」的音源，避免每轮定时任务都拿整库去走一遍裁决。
+   * 只灌过其中一部分账号、或从没灌过 → 返回 false，让它进候选去补灌（与「检测并灌入」
+   * 的 `importedState(e) !== 'all'` 口径一致）。
+   *
+   * 注意这只是**粗筛**，不是最终判定：服务端上那条是不是真的还在，由 runImport 内部
+   * 的服务端列表 + 账本对账负责（用户手动删过服务端时，只有那边才能发现）。
+   */
+  _importedEverywhere(eid, targetIds, activeId) {
+    if (!targetIds || !targetIds.length) return false
+    const rec = this.store.imported[eid]
+    if (!rec) return false
+    const got = new Set()
+    if (rec.platformId) got.add(rec.platformId)
+    for (const x of (Array.isArray(rec.importedTo) ? rec.importedTo : [])) if (x && x.platformId) got.add(x.platformId)
+    if (rec.platformId == null && activeId) got.add(activeId)   // 老记录（v1.8.0 前）归当前选中账号
+    return targetIds.every(id => got.has(id))
   }
 
   /** 增量判重地图：树内压缩包 sha（仓库::路径 → 上次见到的 blob sha）与 release 资产 key 集合 */
@@ -635,32 +792,90 @@ class Hunter {
     return { hashed, failed, noSource, depTotal, total: list.length }
   }
 
+  // ---------------- 已灌入列表 ----------------
+  // 说明（v1.8.0）：列表**只看当前选中账号**（= 该账号在服务端上真实存在的音源）。
+  // 不同平台账号的音源本来就是不同的两套，合并显示反而会让人以为「没灌成功」，
+  // 所以这里保持单账号视图；多平台只体现在「灌入」时一次灌多个目标账号。
+
   // ---------------- 灌入 ----------------
-  async runImport(ids) {
+  /**
+   * 解析本次灌入的目标平台账号（v1.8.0 多平台同时灌入）。
+   * - opts.platformIds 显式指定 → 用它（UI 里临时勾选的场景）；
+   * - 否则用「设置了『参与批量灌入』的账号」；一个都没标记 → 只灌当前选中账号（旧行为）。
+   */
+  _importTargets(opts) {
+    const cfg = this.store.config
+    const all = (cfg && cfg.platforms) || []
+    const wanted = opts && Array.isArray(opts.platformIds) && opts.platformIds.length ? opts.platformIds : null
+    const accts = wanted
+      ? all.filter(p => p && p.type && wanted.indexOf(p.id) >= 0)
+      : getBatchImportAccounts(cfg)
+    return accts.map(a => ({ adapter: getService(a.type), acct: a, type: a.type }))
+  }
+
+  /**
+   * 灌入（支持多平台同时灌入）
+   * @param {string[]} ids 音源 id
+   * @param {object} [opts] { platformIds?: string[] }
+   *
+   * 多平台要点：
+   *  1. 脚本内容只下载一次（共享 codeCache），各账号各自读列表、各自裁决 —— 同名
+   *     冲突必须按「那个服务端自己的现状」判，拿 A 的列表去裁决 B 会误判；
+   *  2. 各账号互不影响：某个账号连不上只跳过它，其它账号继续灌；
+   *  3. 「已灌入」记录按平台分类（platformId + importedTo[]），撤回按当前账号过滤。
+   */
+  async runImport(ids, opts) {
     if (this.job.running) throw new Error('已有任务在运行')
     const cfg = this.store.config
     const targets = (ids || []).map(i => this.store.db.sources[i]).filter(Boolean)
     if (!targets.length) throw new Error('没有选中任何音源')
 
-    this.job = { running: true, type: 'import', cancel: false, progress: { done: 0, total: targets.length }, step: '' }
-    this.emit('job', { running: true, type: 'import' })
+    const svcs = this._importTargets(opts)
+    if (!svcs.length) throw new Error(NO_ACCOUNT_ERR)
+    const multi = svcs.length > 1
 
-    const results = []
-    const v = await lx.verify(cfg)
-    if (!v.ok) {
+    this.job = { running: true, type: 'import', cancel: false, progress: { done: 0, total: targets.length * svcs.length }, step: '' }
+    this.emit('job', { running: true, type: 'import' })
+    this.emit('import-targets', svcs.map(s => ({ id: s.acct.id, name: s.acct.name || s.acct.url, type: s.type })))
+    if (multi) this.log(`多平台灌入：目标 ${svcs.length} 个账号（${svcs.map(s => s.acct.name || s.acct.url).join('、')}）`, '灌入')
+
+    // ---- 阶段 1：逐个账号连通性校验 + 读取服务端现有列表 ----
+    this.step(multi ? '校验各平台账号并读取服务端音源…' : '连接服务平台…')
+    const plans = []
+    for (const svc of svcs) {
+      const label = svc.acct.name || svc.acct.url
+      let v
+      try { v = await svc.adapter.verify(svc.acct) } catch (e) { v = { ok: false, msg: String((e && e.message) || e) } }
+      if (!v.ok) {
+        this.log(`平台「${label}」不可用，本次跳过：${v.msg}`, '灌入', 'warn')
+        continue
+      }
+      this.log(`已连接平台「${label}」（${svc.type}）：${v.msg}`, '灌入')
+      // serverIds 必须区分「读到了但为空」和「压根没读到」：
+      // 前者说明服务端确实一条都没有（该重灌就重灌），后者说明我们不知道现状 ——
+      // 不知道时只能相信本地账本，否则服务端一抖动就会把整库重复灌一遍。
+      let serverByName = {}
+      let serverIds = null
+      let serverList = null
+      try { serverList = await svc.adapter.list(svc.acct) } catch (e) {
+        this.log(`读取「${label}」音源列表失败：${String((e && e.message) || e)}（同名保护与「是否已灌入」判定将退回本地记录）`, '灌入', 'warn')
+      }
+      if (Array.isArray(serverList)) {
+        serverIds = new Set()
+        for (const s of serverList) {
+          if (!s) continue
+          if (s.id != null) serverIds.add(s.id)
+          if (s.name) serverByName[normName(s.name)] = s
+        }
+        this.log(`「${label}」服务端现有音源 ${serverList.length} 个`, '灌入')
+      }
+      plans.push({ svc, label, serverByName, serverIds, serverList })
+    }
+    if (!plans.length) {
       this.job.running = false
       this.emit('job', { running: false, type: 'import', done: true })
-      throw new Error('LX 服务不可用：' + v.msg)
+      throw new Error('所有灌入目标平台都不可用：' + svcs.map(s => s.acct.name || s.acct.url).join('、'))
     }
-    this.log('已连接 LX 服务：' + v.msg, '灌入')
-
-    // 服务端现有列表（用于同名保护）
-    let serverList = []
-    try { serverList = await lx.list(cfg) } catch (e) {
-      this.log('读取服务端音源列表失败：' + String((e && e.message) || e) + '（同名保护将跳过）', '灌入', 'warn')
-    }
-    const serverByName = {}
-    for (const s of serverList) if (s && s.name) serverByName[normName(s.name)] = s
 
     // 预处理：下载脚本内容（灌入走 upload，服务端无需自己出网）+ 补哈希 / @name
     // 小并发池下载（4），并做镜像学习
@@ -701,144 +916,374 @@ class Hunter {
     }
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => dlWorker()))
 
-    // 去重与同名裁决规划（抽成纯函数 _planImportQueue，便于单测）
-    const importedHashes = {}
-    for (const eid of Object.keys(this.store.imported)) {
-      const rec = this.store.imported[eid]
-      if (rec && rec.contentHash) importedHashes[rec.contentHash] = rec.name
+    // 去重与同名裁决规划（纯函数 _planImportQueue，便于单测）——每个账号各规划一份：
+    // 同名冲突取决于该服务端自己的现状，改名池也要按账号分开（否则第二个平台会
+    // 以为名字已被占用而继续往后加后缀）
+    const activeId = cfg.activePlatformId || (plans[0] && plans[0].svc.acct.id)
+    let total = 0
+    for (const p of plans) {
+      // 账本对账（只在该账号的列表确实读到时才做）：服务端已经删掉的条目，本地记录跟着摘掉。
+      // 不这么做的话，用户「删空服务端再重灌」会被本地那枚「已灌入」标记整体排除，表现为「灌不进去」。
+      if (p.serverIds) {
+        const rc = this.reconcileImported(p.svc.acct.id, Array.from(p.serverIds))
+        if (rc.changed) this.log(`「${p.label}」账本对账：摘除 ${rc.dropped} 条服务端已不存在的灌入记录`, '灌入', 'info')
+      }
+      p.importedRecs = this._importedRecsFor(p.svc.acct.id, activeId)
+      p.queue = this._planImportQueue(targets, {
+        cfg, serverByName: p.serverByName, serverIds: p.serverIds, serverList: p.serverList,
+        codeCache, importedRecs: p.importedRecs,
+        // 该平台名字是不是 key：不是（MusicSync）则同名不需要改名，直接新增为独立条目
+        uniqueName: p.svc.adapter.uniqueName !== false
+      })
+      p.usedRename = new Set()
+      total += p.queue.length
     }
-    const queue = this._planImportQueue(targets, { cfg, serverByName, codeCache, importedHashes })
-    const usedRename = new Set()
+    this.job.progress.total = total
 
-    for (let i = 0; i < queue.length; i++) {
-      if (this.cancelRequested) { this.log('用户取消灌入', '灌入', 'warn'); break }
-      const item = queue[i]
-      const e = item.e
-      const name = e.scriptName || e.lxName || e.name
-      if (item.skip) {
-        results.push({ id: e.id, name, status: 'skipped', message: item.skip })
-        this.log('跳过：' + name + ' — ' + item.skip, '灌入', 'warn')
-        this.emit('import-item', results[results.length - 1])
-        this.progress({ done: i + 1, total: queue.length })
-        continue
+    const results = []
+    let n = 0
+    outer:
+    for (const p of plans) {
+      if (this.cancelRequested) break
+      if (multi) this.log(`开始灌入平台「${p.label}」（${p.queue.length} 项）`, '灌入')
+      for (let i = 0; i < p.queue.length; i++) {
+        if (this.cancelRequested) { this.log('用户取消灌入', '灌入', 'warn'); break outer }
+        n++
+        const item = p.queue[i]
+        const nm = item.e.scriptName || item.e.lxName || item.e.name
+        this.step(multi ? `[${p.label}] 灌入 ${i + 1}/${p.queue.length} ${nm}` : `灌入 ${i + 1}/${p.queue.length} ${nm}`)
+        const r = await this._runImportItem(p, item, codeCache, multi)
+        results.push(r)
+        this.emit('import-item', r)
+        this.progress({ done: n, total })
+        await sleep(150)   // 轻微节流，避免打爆服务端；批量灌入时几乎无感
       }
-      this.step(`灌入 ${i + 1}/${queue.length} ${name}`)
-      try {
-        let r = null
-        if (item.sameContentServer) {
-          // 同名 + 同内容：服务端已有，不重复上传，直接标记为「已灌入」
-          const srv = item.sameContentServer
-          this.store.imported[e.id] = {
-            lxId: srv.id, name: srv.name || name, contentHash: e.contentHash || '',
-            serverUrl: lx.baseUrl(cfg), importedAt: Date.now(),
-            platforms: srv.supportedSources || [], serverSynced: true
-          }
-          this.store.saveImported()
-          results.push({ id: e.id, name, status: 'synced', lxId: srv.id, message: '与服务端同名同内容，已标记为已灌入（未重复上传）', platforms: srv.supportedSources || [] })
-          this.log('同名同内容，已标记已灌入（跳过上传）：' + name, '灌入', 'info')
-          this.emit('import-item', results[results.length - 1])
-          this.progress({ done: i + 1, total: queue.length })
-          await sleep(80)
-          continue
-        }
-        if (item.replaceServer) {
-          // 同名 + 内容不同 + 开启自动替换（默认）：先删服务端旧版，再传新版本 ——
-          // 这正是 LX 网页端「同名要先删旧才能传新」的操作，猎手自动完成（v1.7.0）。
-          // 删除会触发服务端全量脚本重载，等 2.5s 再传，规避「已存在」。
-          const srv = item.replaceServer
-          const code = codeCache[e.id]
-          const rm = await lx.remove(cfg, srv.id, { owner: srv.owner })
-          if (!rm.success) {
-            this.log(`替换失败：服务端旧版「${srv.name || name}」删除失败（${rm.message}），退回改名上传`, '灌入', 'warn')
-            r = await this._uploadRenamed(cfg, code, item.baseName, serverByName, usedRename)
-            if (r && r.success) r.replacedFallback = 'renamed'
-          } else {
-            this.log(`已删除服务端旧版「${srv.name || name}」（id=${srv.id}），等待服务端重载后上传新版本…`, '灌入')
-            await sleep(2500)
-            r = await lx.upload(cfg, code, name)
-            if (!r.success && r.message && /已存在/.test(r.message)) {
-              await sleep(2500)
-              r = await lx.upload(cfg, code, name)
-            }
-            if (!r.success && r.message && /已存在/.test(r.message)) {
-              // 仍撞名（极少见）：退回改名上传，保证音源至少能进去
-              this.log('替换上传仍撞名，退回改名上传', '灌入', 'warn')
-              r = await this._uploadRenamed(cfg, code, item.baseName, serverByName, usedRename)
-              if (r && r.success) r.replacedFallback = 'renamed'
-            }
-          }
-          if (r && r.success) {
-            // 清理本地「已灌入」里指向被替换音源的旧记录（服务端那份已不存在）
-            let purged = 0
-            for (const [k, rec] of Object.entries(this.store.imported)) {
-              if (rec && rec.lxId === srv.id) { delete this.store.imported[k]; purged++ }
-            }
-            if (purged) { this.store.saveImported(); this.log(`已清理 ${purged} 条指向被替换音源的本地灌入记录`, '灌入', 'info') }
-          }
-        } else if (item.renameServer) {
-          // 同名 + 内容不同 + 用户关闭了自动替换：改名后上传，规避服务端「已存在」
-          const srv = item.renameServer
-          let code = codeCache[e.id]
-          if (!code) {
-            r = await lx.importUrl(cfg, e.url, (e.lxName || e.scriptName || e.name))
-          } else {
-            r = await this._uploadRenamed(cfg, code, item.baseName, serverByName, usedRename)
-          }
-        } else {
-          const code = codeCache[e.id]
-          r = code
-            ? await lx.upload(cfg, code, (e.lxName || e.scriptName || e.name))
-            : await lx.importUrl(cfg, e.url, (e.lxName || e.scriptName || e.name))
-        }
-        if (r && r.success) {
-          this.store.imported[e.id] = {
-            lxId: r.id, name: r.name || name, contentHash: e.contentHash || '',
-            serverUrl: lx.baseUrl(cfg), importedAt: Date.now(), platforms: r.platforms || []
-          }
-          this.store.saveImported()
-          const note = item.replaceServer
-            ? (r.replacedFallback === 'renamed' ? '（同名替换因服务端旧版删除失败，已改名上传）' : '（已替换服务端同名旧版：先删后传）')
-            : item.renameServer ? '（已改名规避同名冲突）' : ''
-          const st = item.replaceServer && r.replacedFallback !== 'renamed' ? 'replaced' : 'success'
-          results.push({ id: e.id, name, status: st, lxId: r.id, message: (r.message || '') + note, platforms: r.platforms || [] })
-          this.log(`已灌入：${name}${note}（id=${r.id}）`, '灌入')
-        } else {
-          results.push({ id: e.id, name, status: 'failed', message: (r && r.message) || '导入失败', requireUnsafe: !!(r && r.requireUnsafe) })
-          this.log('灌入失败：' + name + ' — ' + ((r && r.message) || '导入失败'), '灌入', 'warn')
-        }
-      } catch (err) {
-        results.push({ id: e.id, name, status: 'failed', message: String((err && err.message) || err).slice(0, 160) })
-        this.log('灌入失败：' + name + ' — ' + String((err && err.message) || err), '灌入', 'warn')
-      }
-      this.emit('import-item', results[results.length - 1])
-      this.progress({ done: i + 1, total: queue.length })
-      await sleep(150)   // 轻微节流，避免打爆服务端；批量灌入时几乎无感
     }
     this.store.saveDb()
     const ok = results.filter(r => r.status === 'success' || r.status === 'replaced').length
     const replaced = results.filter(r => r.status === 'replaced').length
-    this.log(`灌入完成：成功 ${ok} / 共 ${results.length}` + (replaced ? `（其中替换同名旧版 ${replaced} 个）` : ''), '灌入')
+    const synced = results.filter(r => r.status === 'synced').length
+    const skipped = results.filter(r => r.status === 'skipped').length
+    const summary = { ok, replaced, synced, skipped, total: results.length }
+    if (multi) {
+      const byPlat = {}
+      for (const r of results) {
+        const k = r.accountName || '—'
+        byPlat[k] = byPlat[k] || { ok: 0, total: 0 }
+        byPlat[k].total++
+        if (r.status === 'success' || r.status === 'replaced') byPlat[k].ok++
+      }
+      this.log('各平台结果：' + Object.entries(byPlat).map(([k, v]) => `${k} ${v.ok}/${v.total}`).join('；'), '灌入')
+      summary.byPlatform = byPlat
+    }
+    this.log(`灌入完成：成功 ${ok} / 共 ${results.length}` +
+      (synced ? `、同名已存在 ${synced}` : '') + (skipped ? `、跳过 ${skipped}` : '') +
+      (replaced ? `（其中替换同名旧版 ${replaced} 个）` : ''), '灌入')
     this.job.running = false
-    this.emit('job', { running: false, type: 'import', done: true, summary: { ok, total: results.length, replaced } })
-    return { results, ok, replaced }
+    this.emit('job', { running: false, type: 'import', done: true, summary })
+    return { results, ok, replaced, synced, skipped }
+  }
+
+  /** 单条音源灌入单个平台账号（返回结果对象，含平台归属信息） */
+  async _runImportItem(p, item, codeCache, multi) {
+    const svc = p.svc
+    const e = item.e
+    const name = e.scriptName || e.lxName || e.name
+    // 结果统一带上平台归属：多平台灌入时 UI 才能分清哪条落在哪个账号
+    const base = () => ({
+      id: e.id, name, platformId: svc.acct.id, platformType: svc.type,
+      accountName: svc.acct.name || svc.acct.url
+    })
+    const tag = multi ? `[${p.label}] ` : ''
+    if (item.skip) {
+      this.log(tag + '跳过：' + name + ' — ' + item.skip, '灌入', 'warn')
+      return Object.assign(base(), { status: 'skipped', message: item.skip })
+    }
+    try {
+      let r = null
+      if (item.sameContentServer) {
+        // 服务端已有一份内容相同的音源（同名命中，或按脚本内容指纹比对命中）：不重复上传，
+        // 直接把本地这条挂到服务端那一条上，标记为「已灌入」。
+        const srv = item.sameContentServer
+        this._markImported(e, svc, srv.id, srv.name || name, srv.supportedSources || [], true)
+        this.log(tag + '服务端已有同内容音源，已标记已灌入（跳过上传）：' + name, '灌入', 'info')
+        await sleep(80)
+        return Object.assign(base(), { status: 'synced', lxId: srv.id, message: item.why || '服务端已有内容相同的音源，已标记为已灌入（未重复上传）', platforms: srv.supportedSources || [] })
+      }
+      if (item.replaceServer) {
+        // 同名 + 内容不同 + 开启自动替换（默认）：先删服务端旧版，再传新版本 ——
+        // 这正是 LX 网页端「同名要先删旧才能传新」的操作，猎手自动完成（v1.7.0）。
+        // 删除会触发服务端全量脚本重载，等 2.5s 再传，规避「已存在」。
+        const srv = item.replaceServer
+        const code = codeCache[e.id]
+        const rm = await svc.adapter.remove(svc.acct, srv.id, { owner: srv.owner })
+        if (!rm.success) {
+          this.log(tag + `替换失败：服务端旧版「${srv.name || name}」删除失败（${rm.message}），退回改名上传`, '灌入', 'warn')
+          r = await this._uploadRenamed(svc, code, item.baseName, p.serverByName, p.usedRename)
+          if (r && r.success) r.replacedFallback = 'renamed'
+        } else {
+          this.log(tag + `已删除服务端旧版「${srv.name || name}」（id=${srv.id}），等待服务端重载后上传新版本…`, '灌入')
+          await sleep(2500)
+          r = await svc.adapter.upload(svc.acct, code, name)
+          if (!r.success && r.message && /已存在/.test(r.message)) {
+            await sleep(2500)
+            r = await svc.adapter.upload(svc.acct, code, name)
+          }
+          if (!r.success && r.message && /已存在/.test(r.message)) {
+            // 仍撞名（极少见）：退回改名上传，保证音源至少能进去
+            this.log(tag + '替换上传仍撞名，退回改名上传', '灌入', 'warn')
+            r = await this._uploadRenamed(svc, code, item.baseName, p.serverByName, p.usedRename)
+            if (r && r.success) r.replacedFallback = 'renamed'
+          }
+        }
+        if (r && r.success) {
+          // 清理本地「已灌入」里指向被替换音源的旧记录（服务端那份已不存在）
+          let purged = 0
+          for (const [k, rec] of Object.entries(this.store.imported)) {
+            if (rec && rec.lxId === srv.id) { this._dropPlatformFromImported(k, svc.acct.id); purged++ }
+          }
+          if (purged) { this.store.saveImported(); this.log(tag + `已清理 ${purged} 条指向被替换音源的本地灌入记录`, '灌入', 'info') }
+        }
+      } else if (item.renameServer) {
+        // 同名 + 内容不同 + 用户关闭了自动替换：改名后上传，规避服务端「已存在」
+        const code = codeCache[e.id]
+        r = code
+          ? await this._uploadRenamed(svc, code, item.baseName, p.serverByName, p.usedRename)
+          : await svc.adapter.importUrl(svc.acct, e.url, (e.lxName || e.scriptName || e.name))
+      } else {
+        const code = codeCache[e.id]
+        r = code
+          ? await svc.adapter.upload(svc.acct, code, (e.lxName || e.scriptName || e.name))
+          : await svc.adapter.importUrl(svc.acct, e.url, (e.lxName || e.scriptName || e.name))
+      }
+      if (r && r.success) {
+        this._markImported(e, svc, r.id, r.name || name, r.platforms || [], false)
+        // 把裁决理由带上：用户最常问的就是「为什么这次是替换、那次是改名」
+        const note = item.replaceServer
+          ? (r.replacedFallback === 'renamed'
+            ? '（同名替换失败，已改名上传）'
+            : '（已替换服务端同名旧版：先删后传）' + (item.why ? ' — ' + item.why : ''))
+          : item.renameServer ? '（已改名并存，未删服务端旧版）' + (item.why ? ' — ' + item.why : '')
+            : (item.why ? '（' + item.why + '）' : '')
+        const st = item.replaceServer && r.replacedFallback !== 'renamed' ? 'replaced' : 'success'
+        this.log(tag + `已灌入：${name}${note}（id=${r.id}）`, '灌入')
+        return Object.assign(base(), { status: st, lxId: r.id, message: (r.message || '') + note, platforms: r.platforms || [] })
+      }
+      this.log(tag + '灌入失败：' + name + ' — ' + ((r && r.message) || '导入失败'), '灌入', 'warn')
+      return Object.assign(base(), { status: 'failed', message: (r && r.message) || '导入失败', requireUnsafe: !!(r && r.requireUnsafe) })
+    } catch (err) {
+      const msg = String((err && err.message) || err)
+      this.log(tag + '灌入失败：' + name + ' — ' + msg, '灌入', 'warn')
+      return Object.assign(base(), { status: 'failed', message: msg.slice(0, 160) })
+    }
+  }
+
+  /**
+   * 写「已灌入」记录（v1.8.0 多平台）：顶层的 platformId/accountName 指向最近一次
+   * 灌入的平台，importedTo[] 保留全部平台，撤回时按账号精确摘除而不是整条删掉。
+   */
+  _markImported(e, svc, lxId, name, platforms, synced) {
+    const prev = this.store.imported[e.id]
+    const list = (prev && Array.isArray(prev.importedTo) ? prev.importedTo : [])
+      .filter(x => x && x.platformId !== svc.acct.id)
+    list.push({ platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name || svc.acct.url, lxId, at: Date.now() })
+    this.store.imported[e.id] = {
+      lxId, name: name || (prev && prev.name) || e.name, contentHash: e.contentHash || '',
+      serverUrl: svc.adapter.baseUrl(svc.acct), importedAt: Date.now(),
+      platforms: platforms || [], serverSynced: !!synced,
+      platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name || svc.acct.url,
+      importedTo: list
+    }
+    this.store.saveImported()
+  }
+
+  /** 从灌入记录里摘掉某个平台；该音源在所有平台都没了才整条删除 */
+  _dropPlatformFromImported(eid, platformId) {
+    const rec = this.store.imported[eid]
+    if (!rec) return
+    const rest = Array.isArray(rec.importedTo) ? rec.importedTo.filter(x => x.platformId !== platformId) : []
+    if (!rest.length) { delete this.store.imported[eid]; return }
+    const nx = rest[rest.length - 1]
+    this.store.imported[eid] = Object.assign({}, rec, {
+      lxId: nx.lxId, platformId: nx.platformId, platformType: nx.platformType, accountName: nx.accountName,
+      importedTo: rest   // 必须写回：只改顶层不改数组的话，下次撤回还会以为这个平台仍有一份
+    })
+  }
+
+  /**
+   * 账本对账（v1.8.0）：把「本地记着灌过某账号、但该账号服务端上已经不存在」的记录摘掉。
+   *
+   * 为什么必须做：本地账本一旦和服务端脱节（用户手动删源、换账号、服务端重置），
+   * 「已灌入」的标记会一直挂着 —— 音源库里标着已灌入，「只选未灌入 / 检测并灌入」就会把它
+   * 整体排除，用户重灌时什么都灌不进去（实测反馈）。对账后标记必然跟着服务端走。
+   *
+   * 只做减法（服务端为准，加法由灌入/同步服务端负责），而且**只在列表确实读到、
+   * liveIds 是真实结果时才调用** —— 读列表失败时调用会把整库记录误删，由调用方把关。
+   *
+   * @param {string} platformId 账号 id
+   * @param {string[]} liveIds 该账号服务端此刻真实存在的音源 id
+   * @returns {{changed:boolean, dropped:number, imported:object}}
+   */
+  reconcileImported(platformId, liveIds) {
+    const cfg = this.store.config || {}
+    const pid = platformId || cfg.activePlatformId
+    const out = { changed: false, dropped: 0, imported: this.store.imported || {} }
+    if (!pid || !Array.isArray(liveIds)) return out
+    const live = new Set(liveIds.filter(x => x != null).map(String))
+    const drop = []
+    for (const [eid, rec] of Object.entries(this.store.imported || {})) {
+      if (!rec || !this._recBelongs(rec, pid, cfg.activePlatformId)) continue
+      const lxId = this._recLxIdOn(rec, pid, cfg.activePlatformId)
+      if (lxId == null) continue        // 记录里没有服务端 id（老数据）→ 无从对账，留着
+      if (!live.has(String(lxId))) drop.push(eid)
+    }
+    for (const eid of drop) { this._dropPlatformFromImported(eid, pid); out.dropped++ }
+    if (out.dropped) {
+      this.store.saveImported()
+      out.changed = true
+      out.imported = this.store.imported
+    }
+    return out
+  }
+
+  /** 该记录在指定账号上有没有一份（v1.8.0 前的老记录 platformId 为空 → 归当前选中账号） */
+  _recBelongs(rec, pid, activeId) {
+    if (!rec) return false
+    if (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === pid)) return true
+    const top = rec.platformId == null ? activeId : rec.platformId
+    return top === pid
+  }
+
+  /** 该记录在指定账号上那份的服务端 id（importedTo 优先，退回顶层）；null 表示没有/无 id */
+  _recLxIdOn(rec, pid, activeId) {
+    if (!rec) return null
+    const to = Array.isArray(rec.importedTo) ? rec.importedTo.find(x => x && x.platformId === pid) : null
+    if (to) return to.lxId == null ? null : to.lxId
+    const top = rec.platformId == null ? activeId : rec.platformId
+    return top === pid ? (rec.lxId == null ? null : rec.lxId) : null
+  }
+
+  /**
+   * 某平台账号「已灌入过的内容」指纹表（用于跨批次去重）。
+   * 多平台下必须按账号过滤：只灌过 A 的源，灌 B 时不该被判为「已灌入」而跳过。
+   * 老记录（platformId 为 null，v1.8.0 之前）归入当前选中账号。
+   *
+   * 返回 hash → { name, lxId, sourceId }。带 lxId 是必需的：光有指纹无法判断
+   * 服务端上那条还在不在（用户可能已在网页端手动删过），见 _planImportQueue。
+   */
+  _importedRecsFor(platformId, activeId) {
+    const out = {}
+    for (const [eid, rec] of Object.entries(this.store.imported || {})) {
+      if (!rec || !rec.contentHash) continue
+      const pid = rec.platformId == null ? activeId : rec.platformId
+      const hit = pid === platformId ||
+        (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === platformId))
+      if (!hit) continue
+      // 同一份内容可能对应多条记录：优先保留「服务端上还真的有」的那条
+      const prev = out[rec.contentHash]
+      out[rec.contentHash] = prev || { name: rec.name || eid, lxId: rec.lxId || null, sourceId: eid }
+    }
+    return out
+  }
+
+  /**
+   * 同名音源的裁决规则（纯函数，v1.8.0 抽出并把口径写死在这里，便于单测和排错）。
+   *
+   * 先明确一件事：**「已灌入」不是一个终态，而是「本地账本」**。用户会在网页端手动删源、
+   * 会换内容重新发布、会遇到两个不同作者用了同一个名字。所以本地记录只能用来「提示」，
+   * 不能用来「拦」，真正的依据必须是服务端此刻的实际列表（见 _planImportQueue 传入的 serverIds）。
+   *
+   * 判定顺序（越靠前越硬）：
+   *  1. 字节长度相同            → synced  同名同内容，服务端就是它，标记已灌入即可，不重传
+   *  2. 服务端声明平台数 > 本地实测 → skip    哪个可用平台多用哪个（v1.7.0 用户要求）
+   *  3. 两边版本号都可解析       → 高的赢   本地更高 → replace（删旧装新）；否则 skip（服务端不旧）
+   *  4. 两边都有平台信息但完全无交集 → rename 明显是两个无关脚本撞了名 → 改名并存，不删旧的
+   *  5. 其余（信息不足）         → 按设置    默认 replace（先删后传），设置里关掉则 rename
+   *
+   * 注意 2/4 都要求「两边都拿得到数」：服务端没声明平台、或本地没深检过，就跳过该条规则，
+   * 绝不拿半个信息去猜 —— 猜错要么删掉能用的源，要么把无关脚本覆盖掉，都不可逆。
+   *
+   * @returns {{act:'synced'|'skip'|'replace'|'rename', why:string}}
+   */
+  sameNameVerdict(e, srv, code, cfg) {
+    const c = cfg || {}
+    // 1) 同名同内容 → 服务端就是它，标记已灌入即可，不重传。
+    //    平台能回传脚本内容时（srv.hash）按内容指纹比，最准；不能回传的平台退回比字节长度。
+    const sameHash = !!(e.contentHash && srv.hash && e.contentHash === srv.hash)
+    const sameSize = !!(code && srv.size && Buffer.byteLength(code, 'utf-8') === srv.size)
+    if (sameHash || (!srv.hash && sameSize)) {
+      return { act: 'synced', why: '同名同内容，服务端已有（未重复上传）' }
+    }
+
+    const checked = !!(e.deep && e.deep.checkedAt) && !e.stale
+    const srvPlats = Array.isArray(srv.supportedSources) ? srv.supportedSources.slice() : []
+    const srvN = srvPlats.length
+    const newN = checked ? usableCount(e) : -1
+    const localPlats = checked ? usableKeys(e) : []
+
+    // 2) 本地实测全挂 → 绝不替换（v1.7.0 起就这么定：本地挂掉不代表服务端不能用，
+    //    把服务端能用的源换成本地实测不可用的，是纯损失）。stale 的旧结论不作数。
+    if (checked && newN === 0) {
+      return { act: 'skip', why: '本地实测 0 个可用平台 → 不替换（保留服务端现条目，避免越换越差）' }
+    }
+    // 3) 服务端现条目可用平台更多 → 保留服务端
+    if (srvN > 0 && newN >= 0 && newN < srvN) {
+      return { act: 'skip', why: `服务端现条目支持 ${srvN} 个平台、多于本地实测可用的 ${newN} 个 → 保留服务端（哪个可用多用哪个）` }
+    }
+
+    // 3) 版本号可比 → 版本高的赢
+    const localName = e.scriptName || e.lxName || e.name
+    const lv = versionNum(localName)
+    const sv = versionNum(srv.name)
+    if (lv && sv) {
+      if (lv > sv) {
+        return { act: 'replace', why: `同名，本地版本更高（${localName} > ${srv.name}）→ 更新（删旧装新）` }
+      }
+      return { act: 'skip', why: `同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
+    }
+
+    // 4) 平台重叠：有交集 → 同一音源的新版本；完全无交集 → 明显无关，改名并存
+    if (srvN > 0 && newN > 0) {
+      const overlap = srvPlats.filter(p => localPlats.indexOf(p) >= 0)
+      if (!overlap.length) {
+        return {
+          act: 'rename',
+          why: `同名但平台完全不重叠（服务端 ${srvPlats.join('/')} vs 本地 ${localPlats.join('/')}）→ 视作无关脚本，改名并存（不删旧的）`
+        }
+      }
+      return { act: 'replace', why: `同名且平台有重叠（${overlap.join('/')}）→ 视作同一音源的新版本，更新（删旧装新）` }
+    }
+
+    // 5) 信息不足 → 按设置（默认更新，避免用户升级后同名新版灌不进去）
+    if (c.replaceSameNameOnImport === false) {
+      return { act: 'rename', why: '同名不同内容；设置里关闭了自动替换 → 改名上传（保留服务端旧版）' }
+    }
+    return { act: 'replace', why: '同名不同内容；信息不足以判定为无关脚本 → 按更新处理（删旧装新）' }
   }
 
   /**
    * 灌入前的去重/同名裁决（纯函数，v1.7.0 抽出便于测试）：
-   *  - 服务端原生 / 本地检测未通过（skipUnusable 默认开）/ 与已灌入同内容 / 本次所选内同内容或同名 → skip
-   *  - 服务端同名 + 同内容（字节长度相等）→ sameContentServer：标记已灌入，不重复上传
-   *  - 服务端同名 + 内容不同：
-   *      · 本地深检确认失效（0 可用平台，非 stale）→ skip：不替换，避免把服务端
-   *        能用的源换成本地实测挂掉的（v1.7.0 用户要求同名更新看接口可用度）
-   *      · replaceSameNameOnImport !== false（默认）且有本地内容 → replaceServer：先删后传
-   *      · 否则 → renameServer：改名上传（旧行为）
+   *  - 服务端原生 / 本地检测未通过（skipUnusable 默认开）/ 本次所选内同内容或同名 → skip
+   *  - 「已灌入同内容」→ **只有在服务端上确实还存在那条音源时**才 skip（v1.8.0 修正）：
+   *    用户可能在网页端手动删过，此时本地账本还是旧的，硬跳过会导致「怎么灌都灌不进去」。
+   *  - 服务端同名 → 交给 sameNameVerdict 裁决（synced / skip / replace / rename）
    *  - 其余 → 直接上传
    */
   _planImportQueue(targets, ctx) {
     const cfg = ctx.cfg || {}
     const serverByName = ctx.serverByName || {}
+    const serverIds = ctx.serverIds || null   // 服务端此刻真实存在的 id 集合
+    const serverList = ctx.serverList || []
+    // 服务端已有条目的「内容指纹」表：只有平台会回传脚本正文时才有值
+    // （MusicSync 实测会回传全文 → 能对它做「服务端已有同内容就不重复灌」；
+    //  Songloft / LX Server 只回元信息，表为空，退回账本口径）。
+    const serverByHash = {}
+    for (const s of serverList) if (s && s.hash) serverByHash[s.hash] = s
     const codeCache = ctx.codeCache || {}
-    const importedHashes = ctx.importedHashes || {}
+    // 兼容旧的调用口径：没有 serverIds 时退回「本地账本说了算」
+    const importedRecs = ctx.importedRecs || (ctx.importedHashes
+      ? Object.keys(ctx.importedHashes).reduce((o, h) => { o[h] = { name: ctx.importedHashes[h], lxId: null }; return o }, {})
+      : {})
     const rank = (a, b) => (b.lastModified || 0) - (a.lastModified || 0) || usableCount(b) - usableCount(a) || String(a.id).localeCompare(String(b.id))
     const groups = {}, ngroups = {}, best = {}, nbest = {}
     for (const e of targets) {
@@ -857,46 +1302,85 @@ class Hunter {
       } else if (cfg.skipUnusable !== false && !e.usable && e.deep && !e.stale) {
         // stale（上游内容已变待重下）的旧检测结果不作数，放行到指纹/检测流程重新裁决
         queue.push({ e, skip: '本地检测未通过（无可播放平台），跳过' })
-      } else if (e.contentHash && importedHashes[e.contentHash]) {
-        queue.push({ e, skip: `内容与已灌入的「${importedHashes[e.contentHash]}」相同，跳过` })
+      } else if (e.contentHash && serverByHash[e.contentHash] &&
+                 (!serverIds || serverIds.has(serverByHash[e.contentHash].id))) {
+        // 服务端此刻已有一条内容完全相同的音源（按脚本正文 sha256 比对）。这一条不看本地账本，
+        // 所以「账本丢了 / 用户手动删过又重新同步 / 换了账号」都拦得住重复灌 —— 否则同一个音源
+        // 灌几轮就会在服务端堆出好几份一模一样的（MusicSync 尤其明显：它同名还允许共存）。
+        queue.push({
+          e,
+          sameContentServer: serverByHash[e.contentHash],
+          why: '服务端已有内容完全相同的音源（按脚本内容比对）'
+        })
+      } else if (e.contentHash && importedRecs[e.contentHash] &&
+                 (!serverIds || importedRecs[e.contentHash].lxId == null || serverIds.has(importedRecs[e.contentHash].lxId))) {
+        // 本地账本说「灌过」，且服务端上那条确实还在 → 真的不用再灌。
+        // 若 serverIds 里没有它（网页端已删 / 换了账号 / 服务端重置），落到下面的分支重新灌 ——
+        // 这正是用户反馈的「已灌入的无法二次灌入」。
+        queue.push({ e, skip: `服务端已有同内容音源「${importedRecs[e.contentHash].name}」，无需重复灌入` })
       } else if (e.contentHash && best[e.contentHash] && best[e.contentHash] !== e) {
         queue.push({ e, skip: `与本次所选的「${best[e.contentHash].scriptName || best[e.contentHash].name}」内容相同，跳过` })
       } else if (nm && nbest[nm] && nbest[nm] !== e) {
         queue.push({ e, skip: `与本次所选的「${nbest[nm].scriptName || nbest[nm].name}」同名（视为同一音源新旧版本），跳过` })
       } else if (nm && serverByName[nm]) {
-        // 同名音源：比较字节长度判断内容是否相同。
-        //  - 同内容：不重复上传，直接标记为「已灌入」（服务端已有该音源）
-        //  - 内容不同：默认「替换」——先删服务端旧版再传新版。LX 网页端里同名更新必须
-        //    先删旧才能传新，猎手把这两步自动做完；设置里可关掉，退回改名上传。
-        //    替换的前提是本地检测过且可用（v1.7.0 按用户要求：同名内容更新要看接口
-        //    可用度）——检测确认失效的不替换，避免把服务端能用的源换成本地实测挂掉的。
+        // 同名音源：交给 sameNameVerdict 统一裁决（规则与理由都写在那个函数上）
         const srv = serverByName[nm]
         const code = codeCache[e.id]
-        if (code && Buffer.byteLength(code, 'utf-8') === srv.size) {
-          queue.push({ e, sameContentServer: srv })
-        } else if (cfg.replaceSameNameOnImport !== false && code) {
-          const checked = e.deep && e.deep.checkedAt
-          if (checked && usableCount(e) === 0 && !e.stale) {
-            queue.push({ e, skip: `与服务端同名「${srv.name}」内容不同，但本地检测已失效（0 个可用平台），不替换（保留服务端现条目）` })
-          } else {
-            queue.push({ e, replaceServer: srv, baseName: e.lxName || e.scriptName || e.name })
-          }
-        } else {
-          queue.push({ e, renameServer: srv, baseName: e.lxName || e.scriptName || e.name })
-        }
+        // 同名音源一律走同一套裁决（含 MusicSync）—— 同名/同内容该怎么处理与平台无关，
+        // 区别只有「要不要改名」：名字不是 key 的平台（MusicSync）根本不需要改，
+        // 把本地这份作为独立条目加上去即可（改名不但没用，还会破坏脚本自检）。
+        const v = this.sameNameVerdict(e, srv, code, cfg)
+        const baseName = e.lxName || e.scriptName || e.name
+        if (v.act === 'synced') queue.push({ e, sameContentServer: srv, why: v.why })
+        else if (v.act === 'skip') queue.push({ e, skip: `与服务端同名「${srv.name}」：${v.why}` })
+        else if (v.act === 'rename' && ctx.uniqueName === false) {
+          queue.push({
+            e,
+            why: `同名裁决：${v.why}。该平台同名音源可共存（服务端不按名字区分），直接新增为独立条目（不改名）`
+          })
+        } else if (v.act === 'rename') {
+          // 改名安全阀前置：脚本自检名字的音源改名会变成坏源，规划阶段就说清，别等到上传失败
+          if (code && renameSelfCheck(code, (extractMeta(code) || {}).name || '')) {
+            queue.push({
+              e,
+              skip: `与服务端同名「${srv.name}」：${v.why}，但该脚本内部校验自身名称，改名会让它初始化失败 → 未灌入（请先手动删除服务端同名音源，或开启「同名自动替换」）`
+            })
+          } else queue.push({ e, renameServer: srv, baseName, why: v.why })
+        } else if (code) queue.push({ e, replaceServer: srv, baseName, why: v.why })
+        // 要替换但没有本地脚本内容（只能靠 URL 导入）→ 服务端做不了「先删后传」
+        else if (ctx.uniqueName === false) queue.push({ e, why: '没有本地脚本内容，直接按 URL 新增（该平台同名可共存，无需改名）' })
+        else queue.push({ e, renameServer: srv, baseName, why: '没有本地脚本内容，无法先删后传 → 改为改名上传' })
       } else {
-        queue.push({ e })
+        // 本地账本有此内容、但服务端上已经没了（用户手动删过/服务端重置）→ 重新灌入
+        const rec = e.contentHash ? importedRecs[e.contentHash] : null
+        queue.push(rec ? { e, why: `服务端上已无「${rec.name}」（本地记录保留），本次重新灌入` } : { e })
       }
     }
     return queue
   }
 
-  /** 改名上传（规避服务端 generateId 撞名）：撞名就换名重试，最多 4 次 */
-  async _uploadRenamed(cfg, code, baseName, serverByName, used) {
+  /**
+   * 改名上传（规避服务端 generateId 撞名）：撞名就换名重试，最多 4 次。
+   * 传 svc 而不是 acct：多平台灌入时改名必须打到「当时那个」账号上，
+   * 用 this._active() 会一律打到当前选中账号，把第二个平台的音源灌错地方。
+   */
+  async _uploadRenamed(svc, code, baseName, serverByName, used) {
+    // 安全阀：脚本若自己校验名字，改名会把它改成「初始化失败」的坏源 —— 宁可不灌，
+    // 也不要在服务端留一条看起来正常、实际跑不起来的音源（用户无从分辨）。
+    const origName = (extractMeta(code) || {}).name || ''
+    if (renameSelfCheck(code, origName)) {
+      this.log(`跳过改名：脚本「${origName || baseName}」内部会校验自身名称，改名会让它初始化失败`, '灌入', 'warn')
+      return {
+        success: false,
+        renameUnsafe: true,
+        message: `该脚本内部校验自身名称（@name 被引用 ${String(origName || baseName)}），改名会让它初始化失败 → 未改名上传。` +
+          '处理办法：到设置里保持「同名自动替换」开启（先删旧再传新），或先手动删掉服务端上的同名音源再灌入'
+      }
+    }
     let newName = this._uniqueRename(baseName, serverByName, used)
     for (let attempt = 0; attempt < 4; attempt++) {
       const renamed = renameScriptContent(code, newName)
-      const ur = await lx.upload(cfg, renamed, newName)
+      const ur = await svc.adapter.upload(svc.acct, renamed, newName)
       if (ur.success) return ur
       if (ur.message && /已存在/.test(ur.message)) { newName = this._uniqueRename(baseName, serverByName, used); continue }
       return ur
@@ -907,7 +1391,8 @@ class Hunter {
   /** 巡检里启用/禁用音源的「安全开关」：服务端请求异常（超时/网络抖动）只记日志，不连累整轮巡检崩溃 */
   async _safeToggle(cfg, id, enabled, what, owner) {
     try {
-      const t = await lx.toggle(cfg, id, enabled, { owner })
+      const svc = this._active()
+      const t = await svc.adapter.toggle(svc.acct, id, enabled, { owner })
       if (!t.success) this.log(`巡检${what}失败：${t.message || '服务端未确认'}（不影响其他音源）`, '巡检', 'warn')
       return t
     } catch (err) {
@@ -927,7 +1412,8 @@ class Hunter {
    */
   async _safePlatforms(cfg, id, disabledSources, what, owner) {
     try {
-      const t = await lx.setPlatforms(cfg, id, disabledSources, { owner })
+      const svc = this._active()
+      const t = await svc.adapter.setPlatforms(svc.acct, id, disabledSources, { owner })
       if (!t.success) this.log(`巡检${what}失败：${t.message || '服务端未确认'}（不影响其他音源）`, '巡检', 'warn')
       return t
     } catch (err) {
@@ -964,8 +1450,9 @@ class Hunter {
   async runPatrol() {
     if (this.job.running) throw new Error('已有任务在运行')
     const cfg = this.store.config
+    const svc = this._active()
     let serverList = []
-    try { serverList = await lx.list(cfg) } catch (e) {
+    try { serverList = await svc.adapter.list(svc.acct) } catch (e) {
       throw new Error('无法读取服务端音源列表：' + String((e && e.message) || e))
     }
     const aliveLxIds = new Set((serverList || []).map(s => s && s.id).filter(Boolean))
@@ -1102,11 +1589,12 @@ class Hunter {
   // ---------------- 撤回 ----------------
   async runRevoke(ids) {
     const cfg = this.store.config
+    const svc = this._active()
     // 撤回也要按 owner 路由删除身份：灌入记录若带 owner（同步服务端时记下），
     // 私有源删归属身份那份；v1.6.8 起新灌入都是公开源，走 default
     let serverOwners = new Map()
     try {
-      const list = await lx.list(cfg)
+      const list = await svc.adapter.list(svc.acct)
       serverOwners = new Map((list || []).map(s => [s && s.id, s && s.owner]).filter(([id]) => !!id))
     } catch (e) { /* 读不到列表时按 default 处理（服务端有回退 open 的兜底） */ }
     const results = []
@@ -1116,13 +1604,31 @@ class Hunter {
         results.push({ id, status: 'failed', message: '无本地灌入记录，请到服务端手动删除' })
         continue
       }
+      // 多平台灌入（v1.8.0）后同一音源可能落在多个账号上：撤回只动「当前账号」那份，
+      // 别的账号上的同名音源不能顺手删掉（用户没要求，且那边的服务端状态未知）。
+      const belongs = rec.platformId === svc.acct.id ||
+        (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === svc.acct.id)) ||
+        rec.platformId == null
+      if (!belongs) {
+        const where = (rec.importedTo || []).map(x => x.accountName).filter(Boolean).join('、') || '其他账号'
+        results.push({ id, status: 'failed', name: rec.name, message: `该音源不是灌入到当前账号「${svc.acct.name || svc.acct.url}」的（在：${where}），请先切换到对应账号再撤回` })
+        this.log(`撤回跳过：${rec.name} 不属于当前账号（在：${where}）`, '撤回', 'warn')
+        continue
+      }
       try {
-        const r = await lx.remove(cfg, rec.lxId, { owner: serverOwners.get(rec.lxId) })
+        const r = await svc.adapter.remove(svc.acct, rec.lxId, { owner: serverOwners.get(rec.lxId) })
         if (r.success) {
-          delete this.store.imported[id]
+          this._dropPlatformFromImported(id, svc.acct.id)
           this.store.saveImported()
-          results.push({ id, status: 'success', name: rec.name })
-          this.log('已撤回：' + rec.name, '撤回')
+          const still = this.store.imported[id]
+          if (still) {
+            const n = (still.importedTo || []).length
+            results.push({ id, status: 'success', name: rec.name, message: `已从当前账号撤回（仍存在于另外 ${n} 个平台）` })
+            this.log(`已撤回：${rec.name}（当前账号；其它平台仍保留 ${n} 份）`, '撤回')
+          } else {
+            results.push({ id, status: 'success', name: rec.name })
+            this.log('已撤回：' + rec.name, '撤回')
+          }
         } else {
           results.push({ id, status: 'failed', name: rec.name, message: r.message })
           this.log('撤回失败：' + rec.name + ' — ' + r.message, '撤回', 'warn')
@@ -1143,10 +1649,11 @@ class Hunter {
    */
   async runSyncServer() {
     const cfg = this.store.config
-    const v = await lx.verify(cfg)
-    if (!v.ok) throw new Error('LX 服务不可用：' + v.msg)
+    const svc = this._active()
+    const v = await svc.adapter.verify(svc.acct)
+    if (!v.ok) throw new Error('当前服务平台不可用：' + v.msg)
     let serverList = []
-    try { serverList = await lx.list(cfg) } catch (e) {
+    try { serverList = await svc.adapter.list(svc.acct) } catch (e) {
       throw new Error('读取服务端音源列表失败：' + String((e && e.message) || e))
     }
     if (!serverList.length) {
@@ -1175,8 +1682,9 @@ class Hunter {
       if (local) {
         this.store.imported[local.id] = {
           lxId: s.id, name: s.name, contentHash: local.contentHash || '',
-          serverUrl: lx.baseUrl(cfg), importedAt: Date.now(),
-          platforms: s.supportedSources || [], serverSynced: true
+          serverUrl: svc.adapter.baseUrl(svc.acct), importedAt: Date.now(),
+          platforms: s.supportedSources || [], serverSynced: true,
+          platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name
         }
         local.lxId = s.id
         local.fromServerMatched = true
@@ -1201,8 +1709,9 @@ class Hunter {
         if (!this.store.imported[pid]) {
           this.store.imported[pid] = {
             lxId: s.id, name: s.name, contentHash: '',
-            serverUrl: lx.baseUrl(cfg), importedAt: Date.now(),
-            platforms: s.supportedSources || [], serverSynced: true, serverNative: true
+            serverUrl: svc.adapter.baseUrl(svc.acct), importedAt: Date.now(),
+            platforms: s.supportedSources || [], serverSynced: true, serverNative: true,
+            platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name
           }
           added++
         }
@@ -1224,4 +1733,4 @@ class Hunter {
   }
 }
 
-module.exports = { Hunter, normName, identityMismatch }
+module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum }

@@ -203,8 +203,10 @@ const tStale = mkT('t-stale', { deep: { checkedAt: Date.now(), platforms: {} }, 
 q = h2._planImportQueue([tStale], Object.assign({}, ctx, { codeCache: { 't-stale': codeGood } }))
 ck('stale 条目的旧检测不作为失效依据 → 仍替换', !!q[0].replaceServer)
 // skipUnusable 关闭时，失效条目走到同名裁决也不替换（可用度门禁独立生效）
+// v1.8.0：这条门禁被收进 sameNameVerdict（规则集中管理），措辞从「已失效」改成
+// 「本地实测 0 个可用平台」，判定本身没变 —— 断言里两种说法都认。
 q = h2._planImportQueue([tDead], Object.assign({}, ctx, { cfg: { skipUnusable: false }, codeCache: { 't-dead': codeGood } }))
-ck('skipUnusable 关闭 + 检测失效 → 同名裁决仍拦下（0 平台不替换）', !!q[0].skip && /已失效/.test(q[0].skip), q[0].skip)
+ck('skipUnusable 关闭 + 检测失效 → 同名裁决仍拦下（0 平台不替换）', !!q[0].skip && /0 个可用平台|已失效/.test(q[0].skip), q[0].skip)
 const tSame = mkT('t-same', {})
 ctx.codeCache = { 't-same': 'y'.repeat(100) }   // 与 srv.size 相同 → 同内容
 q = h2._planImportQueue([tSame], ctx)

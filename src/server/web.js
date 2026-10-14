@@ -16,8 +16,8 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const { Store } = require('../core/store')
-const { Hunter } = require('../core/hunter')
-const lx = require('../core/lxservice')
+const { Hunter, formatIntervalHours } = require('../core/hunter')
+const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
 
 const PORT = Number(process.env.PORT || 7970)
 const DATA_DIR = process.env.DATA_DIR || '/data'
@@ -177,11 +177,20 @@ route('POST', '/api/config', guard(async (req, res, ctx) => {
 }))
 
 route('POST', '/api/service/test', guard(async (req, res, ctx) => {
-  const cfg = Object.assign({}, store.config, ctx.body || {})
-  return await lx.verify(cfg)
+  const svc = resolveService(store.config, ctx.body)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.verify(svc.acct)
 }))
 
-route('GET', '/api/service/list', guard(async () => await lx.list(store.config)))
+route('GET', '/api/service/list', guard(async () => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.list(svc.acct)
+}))
+
+// 账本对账：liveIds 由渲染层传（就是它刚展示的那份列表），核心层不再多打一次服务端
+route('POST', '/api/service/reconcile', guard(async (req, res, ctx) =>
+  hunter.reconcileImported(ctx.body.platformId, ctx.body.liveIds)))
 
 route('GET', '/api/sources', guard(() => {
   // 旧库数据没有 failKind（v1.6.5 前的深检结果）：就地补算一次
@@ -203,7 +212,8 @@ route('POST', '/api/logs/clear', guard(() => { logs.length = 0; return true }))
 route('POST', '/api/crawl', guard(async () => await hunter.runCrawl()))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
 route('POST', '/api/hash', guard(async (req, res, ctx) => await hunter.runHash(ctx.body.ids)))
-route('POST', '/api/import', guard(async (req, res, ctx) => await hunter.runImport(ctx.body.ids)))
+// v1.8.0：body.platformIds 可显式指定灌入目标（不给则用设置里标记「参与批量灌入」的账号）
+route('POST', '/api/import', guard(async (req, res, ctx) => await hunter.runImport(ctx.body.ids, { platformIds: ctx.body.platformIds })))
 route('POST', '/api/server/sync', guard(async () => await hunter.runSyncServer()))
 route('POST', '/api/job/cancel', guard(() => ({ cancelled: hunter.requestCancel() })))
 route('GET', '/api/job/state', guard(() => ({ running: hunter.job.running, type: hunter.job.type, progress: hunter.job.progress, step: hunter.job.step })))
@@ -251,51 +261,79 @@ route('POST', '/api/db/import', guard(async (req, res, ctx) => {
 route('POST', '/api/source/validate', guard(async (req, res, ctx) => {
   const entry = store.db.sources[ctx.body.id]
   if (!entry) throw new Error('音源不存在')
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
   const { crawlFetch, readText } = require('../core/net')
   const { res: r } = await crawlFetch(entry.url, null, store.config.timeoutMs, store.config.mirror)
   if (!r || !r.ok) throw new Error('脚本下载失败')
   const code = await readText(r, store.config.timeoutMs)
-  const out = await lx.validate(store.config, code)
+  const out = await svc.adapter.validate(svc.acct, code)
   return { status: out.status, data: out.data, text: out.text }
 }))
 
 route('POST', '/api/import/url', guard(async (req, res, ctx) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
   const { crawlFetch, readText } = require('../core/net')
   const { url, name } = ctx.body
   let r = null
   const { res: fr } = await crawlFetch(url, null, store.config.timeoutMs, store.config.mirror)
   if (fr && fr.ok) {
     const code = await readText(fr, store.config.timeoutMs)
-    r = await lx.upload(store.config, code, name)
+    r = await svc.adapter.upload(svc.acct, code, name)
   } else {
-    r = await lx.importUrl(store.config, url, name)
+    r = await svc.adapter.importUrl(svc.acct, url, name)
   }
   if (r.success) {
     store.imported['manual:' + r.id] = {
       lxId: r.id, name: r.name || name || url, contentHash: '',
-      serverUrl: lx.baseUrl(store.config), importedAt: Date.now(), platforms: r.platforms || []
+      serverUrl: svc.adapter.baseUrl(svc.acct), importedAt: Date.now(), platforms: r.platforms || [],
+      platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name
     }
     store.saveImported()
   }
   return r
 }))
 
-route('POST', '/api/service/toggle', guard(async (req, res, ctx) => await lx.toggle(store.config, ctx.body.id, ctx.body.enabled, { owner: ctx.body.owner })))
-route('POST', '/api/service/remove', guard(async (req, res, ctx) => await lx.remove(store.config, ctx.body.id, { owner: ctx.body.owner })))
-route('POST', '/api/service/platforms', guard(async (req, res, ctx) => await lx.setPlatforms(store.config, ctx.body.id, ctx.body.disabledSources, { owner: ctx.body.owner })))
+route('POST', '/api/service/toggle', guard(async (req, res, ctx) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.toggle(svc.acct, ctx.body.id, ctx.body.enabled, { owner: ctx.body.owner })
+}))
+route('POST', '/api/service/remove', guard(async (req, res, ctx) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.remove(svc.acct, ctx.body.id, { owner: ctx.body.owner })
+}))
+route('POST', '/api/service/platforms', guard(async (req, res, ctx) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  return await svc.adapter.setPlatforms(svc.acct, ctx.body.id, ctx.body.disabledSources, { owner: ctx.body.owner })
+}))
 
 // 公共音源清理（v1.7.4，与桌面版 service:listPublic / service:removePublicBatch 对应）：
-// 只删服务端公开源（_open），绝不碰各账号私有源；批删串行，逐条返回结果
-route('GET', '/api/service/list/public', guard(async () => await lx.listPublic(store.config)))
+// 只删服务端公开源（_open），绝不碰各账号私有源；批删串行，逐条返回结果。
+// 仅 LX Server 平台具备该能力，其他平台返回友好提示。
+route('GET', '/api/service/list/public', guard(async () => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  if (svc.type !== 'lxserver') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server 支持' }
+  return await svc.adapter.listPublic(svc.acct)
+}))
 // 批删串行且每个都要等服务端全量重载：逐个 pushLog（经 SSE 实时到达），
 // 同时发 pub-delete 事件，渲染进程与桌面版一样能显示「第 n/N 个」进度
-route('POST', '/api/service/remove/public', guard(async (req, res, ctx) => await lx.removePublicBatch(store.config, ctx.body.ids, (done, total, item) => {
-  pushLog({
-    msg: `删除公共音源 ${done}/${total}：${item.id}${item.success ? '' : ' — 失败：' + item.message}`,
-    module: '服务', level: item.success ? 'info' : 'warn', at: Date.now()
+route('POST', '/api/service/remove/public', guard(async (req, res, ctx) => {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  if (svc.type !== 'lxserver') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server 支持' }
+  return await svc.adapter.removePublicBatch(svc.acct, ctx.body.ids, (done, total, item) => {
+    pushLog({
+      msg: `删除公共音源 ${done}/${total}：${item.id}${item.success ? '' : ' — 失败：' + item.message}`,
+      module: '服务', level: item.success ? 'info' : 'warn', at: Date.now()
+    })
+    emitAll('pub-delete', { done, total, id: item.id, success: item.success })
   })
-  emitAll('pub-delete', { done, total, id: item.id, success: item.success })
-})))
+}))
 
 // 打开数据目录：Web 版无「资源管理器」概念，返回路径供展示/复制
 route('POST', '/api/datadir', guard(() => ({ path: DATA_DIR })))
@@ -339,15 +377,18 @@ server.listen(PORT, '0.0.0.0', () => {
   })
   console.log(`[web] lx-hunter-pc listening on :${PORT}, dataDir=${DATA_DIR}`)
 
-  // 定时巡检 / 定时爬取（与桌面版同一套「每分钟检查是否到期」逻辑）
+  // 定时巡检 / 定时爬取（与桌面版同一套逻辑，v1.9.0 起爬取可接自动灌入）
+  // 「每分钟检查一次」是**轮询节奏**，不是**执行频率**：到期判据 = 距上次执行 ≥ 设置里的间隔，
+  // 所以设 2 天就是每 2 天跑一次（最多晚 1 分钟），容器需保持运行。
   setInterval(() => {
     try {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.patrolEnabled || hunter.job.running) return
       const last = (store.db.patrol && store.db.patrol.lastRun) || 0
-      const iv = Math.max(1, Number(cfg.patrolIntervalHours) || 12) * 3600 * 1000
-      if (Date.now() - last >= iv) {
+      const hours = Math.max(1, Number(cfg.patrolIntervalHours) || 12)
+      if (Date.now() - last >= hours * 3600 * 1000) {
+        pushLog({ msg: `定时巡检到期（间隔 ${formatIntervalHours(hours)}），开始重测已灌入音源…`, module: '巡检', level: 'info', at: Date.now() })
         hunter.runPatrol().catch(e => pushLog({ msg: '定时巡检失败：' + String((e && e.message) || e), module: '巡检', level: 'error', at: Date.now() }))
       }
     } catch (e) {}
@@ -359,9 +400,14 @@ server.listen(PORT, '0.0.0.0', () => {
       const cfg = store.config
       if (!cfg.crawlScheduleEnabled || hunter.job.running) return
       const last = store.db.lastCrawl || 0
-      const iv = Math.max(1, Number(cfg.crawlIntervalHours) || 24) * 3600 * 1000
-      if (Date.now() - last >= iv) {
-        pushLog({ msg: '定时爬取到期，开始增量爬取（文件树 + Releases 资产）…', module: '爬取', level: 'info', at: Date.now() })
+      const hours = Math.max(1, Number(cfg.crawlIntervalHours) || 24)
+      if (Date.now() - last < hours * 3600 * 1000) return
+      const span = formatIntervalHours(hours)
+      if (cfg.crawlAutoImport) {
+        pushLog({ msg: `定时爬取到期（间隔 ${span}），开始「增量爬取 → 检测 → 自动灌入」…`, module: '爬取', level: 'info', at: Date.now() })
+        hunter.runAutoPipeline().catch(e => pushLog({ msg: '定时任务失败：' + String((e && e.message) || e), module: '爬取', level: 'error', at: Date.now() }))
+      } else {
+        pushLog({ msg: `定时爬取到期（间隔 ${span}），开始增量爬取（文件树 + Releases 资产）…`, module: '爬取', level: 'info', at: Date.now() })
         hunter.runCrawl({ incremental: true }).catch(e => pushLog({ msg: '定时爬取失败：' + String((e && e.message) || e), module: '爬取', level: 'error', at: Date.now() }))
       }
     } catch (e) {}

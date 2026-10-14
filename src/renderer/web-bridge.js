@@ -1,5 +1,5 @@
 /**
- * Web/Docker 版渲染进程桥接（v1.7.4）
+ * Web/Docker 版渲染进程桥接（v1.9.0）
  *
  * 桌面版（Electron）里 window.api 由 preload.js 通过 contextBridge 注入；
  * Web 版没有 preload，这里提供同名同签名的 window.api，把调用转发到
@@ -85,6 +85,7 @@
     configSet: patch => call('/api/config', patch),
     serviceTest: cfg => call('/api/service/test', cfg || {}),
     serviceList: () => call('/api/service/list'),
+    serviceReconcile: (platformId, liveIds) => call('/api/service/reconcile', { platformId, liveIds }),
     sourcesGet: () => call('/api/sources'),
     logsGet: () => call('/api/logs'),
     logsClear: () => call('/api/logs/clear', {}),
@@ -115,5 +116,5 @@
 
   // 角标标注运行形态，避免和桌面版截图混淆
   const brand = document.querySelector('.brand-sub')
-  if (brand) brand.textContent = 'Web/Docker 版 v1.7.4'
+  if (brand) brand.textContent = 'Web/Docker 版 v1.9.0'
 })()

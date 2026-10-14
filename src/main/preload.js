@@ -6,6 +6,7 @@ const api = {
   configSet: (patch) => ipcRenderer.invoke('config:set', patch),
   serviceTest: (cfg) => ipcRenderer.invoke('service:test', cfg),
   serviceList: () => ipcRenderer.invoke('service:list'),
+  serviceReconcile: (platformId, liveIds) => ipcRenderer.invoke('service:reconcile', platformId, liveIds),
   sourcesGet: () => ipcRenderer.invoke('sources:get'),
   logsGet: () => ipcRenderer.invoke('logs:get'),
   logsClear: () => ipcRenderer.invoke('logs:clear'),

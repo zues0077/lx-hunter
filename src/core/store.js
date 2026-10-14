@@ -12,6 +12,14 @@ const DEFAULT_CONFIG = {
   // 若改过 frontend.password，这里要同步改（不要在任何地方硬编码真实口令）。
   adminPassword: '',
   username: 'default',
+  // ---------------- 多平台 / 多账号（v1.8.0） ----------------
+  // 把所有「服务平台账号」统一管理：每个账号一份连接配置，可配置多个平台（lxserver /
+  // songloft / musicsync）、每个平台多个账号，并指定其中一个为「当前选中」（灌入 / 同步 /
+  // 巡检 / 撤回等操作都作用于它）。
+  // 旧版单账号字段（serverUrl / adminPassword / username / serverTimeoutMs）首次启动会
+  // 自动迁移成下面 platforms 数组里的第一个 lxserver 账号（见 Store 构造里的 _migratePlatforms）。
+  platforms: [],
+  activePlatformId: null,
   ghToken: '',
   mirror: 'auto',
   customRepos: [],
@@ -28,6 +36,13 @@ const DEFAULT_CONFIG = {
   crawlScheduleEnabled: false,
   crawlIntervalHours: 24,
   crawlSinceDays: 0,
+  // v1.9.0：定时爬取跑完后自动接上「检测 → 灌入」（全链路无人值守）。
+  // 从属于 crawlScheduleEnabled：定时爬取本身没开，也就无所谓「爬完自动灌」。
+  crawlAutoImport: false,
+  // 同名音源裁决的**兜底**开关（不是全部规则！）：
+  // 灌入时先按 hunter.sameNameVerdict 里那 6 条硬规则判（同名同内容不重传 / 本地全挂不替换 /
+  // 服务端平台更多保留现条目 / 版本高的赢 / 平台无交集则改名并存 / 有交集则替换），
+  // 全都判不出来（两边信息都不足）时才看这里：true=替换服务端旧版（先删后传），false=改名并存。
   replaceSameNameOnImport: true,
   patrolAutoDisable: true,
   enableAfterImport: true,
@@ -56,6 +71,47 @@ class Store {
     // 兜底：清理进程中断残留的「检测中」标记
     for (const k of Object.keys(this.db.sources)) delete this.db.sources[k].checking
     this.imported = this._read(this.importedFile) || {}
+    // 多平台模型迁移：把旧版单账号字段收敛进 platforms 数组，保证向后兼容
+    if (this._migratePlatforms()) this.saveConfig()
+  }
+
+  /**
+   * 旧版 → 多平台迁移（v1.8.0）：
+   *  - platforms 为空且存在旧版 serverUrl → 生成第一个 lxserver 账号；
+   *  - platforms 非空但 activePlatformId 缺失 → 指向第一个账号。
+   * 返回是否有写入过迁移。
+   */
+  _migratePlatforms() {
+    let changed = false
+    if (!Array.isArray(this.config.platforms) || this.config.platforms.length === 0) {
+      if (this.config.serverUrl) {
+        this.config.platforms = [{
+          id: 'p_default',
+          type: 'lxserver',
+          name: '默认 LX 服务',
+          url: this.config.serverUrl || '',
+          username: this.config.username || 'default',
+          password: this.config.adminPassword || '',
+          timeoutMs: this.config.serverTimeoutMs || 25000,
+          enabled: true
+        }]
+        changed = true
+      } else {
+        this.config.platforms = []
+      }
+      this.config.activePlatformId = this.config.platforms.length ? this.config.platforms[0].id : null
+      changed = true
+    } else if (!this.config.activePlatformId || !this.config.platforms.find(p => p.id === this.config.activePlatformId)) {
+      this.config.activePlatformId = this.config.platforms[0].id
+      changed = true
+    }
+    // 给老账号补默认字段，避免适配器读不到
+    for (const p of this.config.platforms) {
+      if (!p.id) { p.id = 'p_' + Math.random().toString(36).slice(2, 9); changed = true }
+      if (typeof p.timeoutMs !== 'number') { p.timeoutMs = 25000; changed = true }
+      if (typeof p.enabled !== 'boolean') { p.enabled = true; changed = true }
+    }
+    return changed
   }
 
   _read(f) {

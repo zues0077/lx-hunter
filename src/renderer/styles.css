@@ -87,6 +87,7 @@ code { background: var(--card-2); padding: 1px 6px; border-radius: 5px; font-siz
 .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
 .view-head h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: .3px; }
 .sub { margin: 0; color: var(--muted); font-size: 12.5px; }
+.sub.warn { color: var(--warn); }   /* 灌入目标为空等需要引起注意的副标题 */
 .head-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 /* ---------- 卡片 ---------- */
@@ -131,6 +132,14 @@ textarea.input { width: 100%; resize: vertical; font-family: inherit; }
 .grow { flex: 1; }
 .muted { color: var(--muted); font-size: 12.5px; }
 .hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+
+/* 灌入规则卡片里「同名裁决顺序」的有序列表（v1.9.0）：
+   把散在 hunter.sameNameVerdict 里的优先级搬到界面上，别让用户对着一个勾选框猜规则 */
+.rules { margin: 10px 0 0; padding-left: 22px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.rules li { margin-bottom: 2px; }
+.rules li strong { color: var(--text-2); }
+.rules li:last-child { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.rules li:last-child strong { color: var(--text); }
 
 .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .seg-btn {
@@ -252,3 +261,27 @@ textarea.input { width: 100%; resize: vertical; font-family: inherit; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 多平台账号管理（v1.8.0） ---------- */
+.acct-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.acct-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--card-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.acct-row.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.acct-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.acct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.acct-dot.lxserver { background: var(--accent); }
+.acct-dot.songloft { background: var(--accent-2); }
+.acct-dot.musicsync { background: var(--ok); }
+.acct-meta { min-width: 0; }
+.acct-name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.acct-sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-ops { display: flex; gap: 6px; flex-shrink: 0; }
+.account-form { margin-top: 12px; background: var(--card-2); }
+.field.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.field.inline > span { color: var(--text-2); font-size: 13px; }
+.badge.plat-tag {
+  display: inline-block; margin-top: 4px; padding: 1px 7px; font-size: 11px;
+  background: var(--card-2); border: 1px solid var(--line); color: var(--text-2); border-radius: 6px;
+}

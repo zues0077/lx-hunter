@@ -1,4 +1,4 @@
-# 音源猎手 Web/Docker 版（v1.7.4）
+# 音源猎手 Web/Docker 版（v1.9.0）
 # 与 PC 桌面版功能一致：爬取 / 沙箱检测 / 灌入 / 巡检 / 导入导出，界面同一套 renderer。
 # 零 npm 依赖（仅用 Node 内置模块），镜像无需 npm install，构建不访问外网仓库。
 FROM node:22-alpine

@@ -38,10 +38,20 @@ const state = {
   page: 1,
   results: [],
   installed: [],
+  // state.installed 是「哪个账号」的服务端列表（统计卡要据此判断口径，避免拿 A 的列表去显示 B）
+  installedFor: null,
+  // 已灌入页排序：key 为空 = 服务端原顺序；目前只有「状态」一列可排（失效/停用排在前面好批量删）
+  insSort: { key: '', dir: 1 },
   // 公共音源清理（v1.7.4）：服务端公开源列表 + 勾选池（只可能是公开源，私有源不在其中）
   pubList: [],
   pubSel: new Set(),
+  // 已灌入列表多选删除（v1.8.0）：勾选池装的是服务端音源 id
+  insSel: new Set(),
   config: null,
+  // 多平台多账号（v1.8.0）：平台账号列表与当前选中账号
+  platforms: [],
+  activePlatformId: null,
+  editingAccountId: null,   // 正在编辑的账号 id（null=新建）
   busy: false,
   // 排序：{ key, dir }，key 为空 = 不排序；localStorage 持久化，重启后保持
   sort: loadSort()
@@ -49,6 +59,126 @@ const state = {
 
 const $ = id => document.getElementById(id)
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+
+// ---------------- 「已灌入」判定（v1.8.0 按灌入目标算） ----------------
+// 为什么不能只看「有没有本地记录」：配了 A、B 两个平台并同时灌入时，只灌过 A 的音源
+// 如果一上来就被标成「已灌入」，它就会被「只选未灌入」「检测并灌入」整体排除，
+// 永远进不了 B —— 用户看到的「批量灌入时部分音源没灌进去」就是这个。所以这里的口径是
+// 「**所有**本次灌入目标账号是否都已有它」，只有全都有才算真的已灌入。
+
+/** 本次灌入的目标账号 id（复用 batchImportTargets，保证与页面上显示的「灌入目标」同一口径） */
+function importTargetIds() {
+  return batchImportTargets().map(p => p.id)
+}
+
+/** 某条灌入记录是否覆盖指定账号（importedTo 优先，兼容 v1.8.0 前只有顶层 platformId 的老记录） */
+function importedOn(rec, pid, activeId) {
+  if (!rec) return false
+  if (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === pid)) return true
+  const top = rec.platformId == null ? activeId : rec.platformId
+  return top === pid
+}
+
+/**
+ * 已灌入状态：'' 没灌过 / 'part' 只灌了部分目标 / 'all' 所有目标都有。
+ * 说明：这只是**本地账本**口径，用来提示和筛选；服务端上到底还在不在，由服务端列表决定
+ * （核心层已改成「服务端上确实还有那条才跳过」，见 hunter._planImportQueue）。
+ */
+function importedState(e) {
+  const rec = state.imported[e.id]
+  if (!rec) return ''
+  const t = importTargetIds()
+  if (!t.length) return 'all'
+  const active = state.activePlatformId
+  const hit = t.filter(pid => importedOn(rec, pid, active)).length
+  if (!hit) return ''
+  return hit === t.length ? 'all' : 'part'
+}
+
+/** 给状态排序用的「真的已灌入」映射（只含所有目标账号都有的那些，垫底排序才准） */
+function importedRankMap() {
+  const out = {}
+  for (const id in state.imported) if (importedState({ id })) out[id] = true
+  return out
+}
+
+/** 已灌入状态徽章文案（part 要写清「还差哪个平台」才不会被误当成已灌完） */
+function importedBadge(e) {
+  const st = importedState(e)
+  if (st === 'all') return '<span class="badge accent">已灌入</span>'
+  if (st === 'part') {
+    const t = importTargetIds()
+    const active = state.activePlatformId
+    const rec = state.imported[e.id]
+    const miss = t.filter(pid => !importedOn(rec, pid, active))
+      .map(pid => { const p = state.platforms.find(x => x.id === pid); return p ? (p.name || p.url) : pid })
+    return `<span class="badge warn" title="只灌入到部分目标账号：还缺 ${esc(miss.join('、'))}。\n「只选未灌入」和「检测并灌入」仍会把它算作待灌入，勾选后会补灌到缺的平台。">已灌入 ${t.length - miss.length}/${t.length}</span>`
+  }
+  return ''
+}
+
+/** 本地账本里「在指定账号上有一份」的音源条数（与服务端列表口径对应，用于统计卡） */
+function ledgerCountFor(pid) {
+  if (!pid) return 0
+  let n = 0
+  for (const id in state.imported) if (importedOn(state.imported[id], pid, state.activePlatformId)) n++
+  return n
+}
+
+/**
+ * 把本地账本对齐到服务端现状（只做减法）：服务端已经不存在的灌入记录摘掉。
+ *
+ * 不这么做的话，「删空服务端 → 重新灌入」这条最常规的路会被走死：库里那枚「已灌入」标记
+ * 一直挂着 → 「只选未灌入 / 检测并灌入」把它整体排除 → 用户点下去什么都没有发生。
+ * list 必须是刚刚成功读到的服务端列表（读失败时不要调用，否则会把整库记录误删）。
+ */
+async function reconcileLedger(pid, list) {
+  if (!pid || !Array.isArray(list)) return
+  try {
+    const r = await api.serviceReconcile(pid, list.map(s => s && s.id).filter(x => x != null))
+    if (r && r.ok && r.data && r.data.changed) {
+      state.imported = r.data.imported || state.imported
+      renderStats()
+      renderTable()   // 音源库里的「已灌入」徽章要跟着消失，否则用户还是选不中
+    }
+  } catch (e) { /* 对账失败不影响列表展示 */ }
+}
+
+/** 服务端音源 id → 本地灌入记录（把巡检结论挂到已灌入页每一行上） */
+function ledgerByLxId() {
+  const m = new Map()
+  for (const rec of Object.values(state.imported || {})) {
+    if (!rec) continue
+    if (rec.lxId != null) m.set(String(rec.lxId), rec)
+    for (const t of (rec.importedTo || [])) if (t && t.lxId != null) m.set(String(t.lxId), rec)
+  }
+  return m
+}
+
+/**
+ * 已灌入行的健康状态（状态列排序 + 批量选中失效音源都用它）：
+ *  rank 0 = 失效 / 异常（巡检判定不通过，或服务端自己报了非 success）
+ *  rank 1 = 已停用（全局禁用，或平台级停用 —— 巡检自动禁用也归这里）
+ *  rank 2 = 正常（已启用）
+ * 「失效」以**巡检结论**为准：巡检就是专门对已灌入音源做服务端侧复测的那件事，
+ * 本地主检的口径（库内那 153 条）不代表服务端上这一条还能不能用。
+ */
+function insRowState(s, byLxId) {
+  const rec = byLxId ? byLxId.get(String(s && s.id)) : null
+  const patrol = rec && rec.lastPatrol
+  // 停用标记要**每种状态都算**：一条既被巡检判失效、又被巡检自动停用的源，
+  // 状态徽章必须同时说清「失效」和「已停用」，不能因为排名靠前就只显示失效。
+  const ds = Array.isArray(s && s.disabledSources) ? s.disabledSources : []
+  const globalOff = !!(s && s.enabled === false)
+  const platformOff = !globalOff && ds.length > 0
+  const patrolBad = !!(patrol && patrol.at && !patrol.ok)
+  const svcBad = !!(s && s.status && s.status !== 'success')
+  const base = { patrol, patrolBad, svcBad, ds, globalOff, platformOff }
+  if (patrolBad || svcBad) return Object.assign(base, { rank: 0, kind: 'bad' })
+  if (globalOff || platformOff) return Object.assign(base, { rank: 1, kind: 'off' })
+  return Object.assign(base, { rank: 2, kind: 'ok' })
+}
+const INS_RANK_LABEL = ['失效', '停用', '正常']
 
 let toastTimer = null
 function toast(msg, kind) {
@@ -89,10 +219,9 @@ async function loadConfig() {
   if (!r.ok) return toast('读取配置失败: ' + r.error, 'err')
   state.config = r.data.config
   const c = state.config
-  $('cfgServer').value = c.serverUrl || ''
-  $('cfgPwd').value = c.adminPassword || ''
-  $('cfgUser').value = c.username || ''
-  $('cfgSrvTmo').value = c.serverTimeoutMs || 25000
+  state.platforms = Array.isArray(c.platforms) ? c.platforms : []
+  state.activePlatformId = c.activePlatformId || (state.platforms[0] && state.platforms[0].id) || null
+  renderPlatforms()
   $('cfgToken').value = c.ghToken || ''
   $('cfgMirror').value = c.mirror || 'auto'
   $('cfgMaxCand').value = c.maxCandidatesPerRepo || 400
@@ -110,20 +239,19 @@ async function loadConfig() {
   $('cfgPatrolHours').value = c.patrolIntervalHours || 12
   $('cfgPatrolDisable').checked = c.patrolAutoDisable !== false
   $('cfgCrawlOn').checked = !!c.crawlScheduleEnabled
+  $('cfgCrawlAutoImport').checked = !!c.crawlAutoImport
   $('cfgCrawlHours').value = c.crawlIntervalHours || 24
   $('cfgCrawlSinceDays').value = Math.max(0, Number(c.crawlSinceDays) || 0)
   $('cfgReplaceSame').checked = c.replaceSameNameOnImport !== false
   $('cfgRepos').value = (c.customRepos || []).join('\n')
-  $('srvUrl').textContent = c.serverUrl || '（未配置）'
+  renderInstalledAccountInfo()
   testConn()
 }
 
 $('btnSaveCfg').addEventListener('click', async () => {
   const patch = {
-    serverUrl: $('cfgServer').value.trim(),
-    adminPassword: $('cfgPwd').value,
-    username: $('cfgUser').value.trim() || 'default',
-    serverTimeoutMs: parseInt($('cfgSrvTmo').value, 10) || 25000,
+    platforms: state.platforms,
+    activePlatformId: state.activePlatformId,
     ghToken: $('cfgToken').value.trim(),
     mirror: $('cfgMirror').value,
     maxCandidatesPerRepo: parseInt($('cfgMaxCand').value, 10) || 400,
@@ -141,6 +269,7 @@ $('btnSaveCfg').addEventListener('click', async () => {
     patrolIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgPatrolHours').value, 10) || 12)),
     patrolAutoDisable: $('cfgPatrolDisable').checked,
     crawlScheduleEnabled: $('cfgCrawlOn').checked,
+    crawlAutoImport: $('cfgCrawlAutoImport').checked,
     crawlIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgCrawlHours').value, 10) || 24)),
     crawlSinceDays: Math.max(0, Math.min(365, parseInt($('cfgCrawlSinceDays').value, 10) || 0)),
     replaceSameNameOnImport: $('cfgReplaceSame').checked,
@@ -150,8 +279,16 @@ $('btnSaveCfg').addEventListener('click', async () => {
   if (!r.ok) return toast('保存失败: ' + r.error, 'err')
   state.config = r.data
   $('cfgRepos').value = (r.data.customRepos || []).join('\n')
-  $('srvUrl').textContent = patch.serverUrl || '（未配置）'
-  toast('设置已保存（仓库地址已自动规范为 owner/repo 格式）', 'ok')
+  renderInstalledAccountInfo()
+  // 保存时把两处「看起来对、实际不会触发」的组合说明白，别让用户以为设好了却没动静：
+  //  ① 自动灌入是从属于定时爬取的（没开定时爬取就不会有「爬取结束」这个时机）；
+  //  ② 一个「参与批量灌入」都没勾时，自动灌入会回退到当前选中账号（这本身合理，但要说清）。
+  const warnAuto = patch.crawlAutoImport && !patch.crawlScheduleEnabled
+    ? '。注意：「爬取结束后自动灌入」需要上面「启用定时爬取」也勾上才会触发' : ''
+  const warnTarget = patch.crawlAutoImport && !(state.platforms || []).some(p => p && p.batchImport === true)
+    ? '。注意：没有账号勾选「参与批量灌入」，自动灌入只会灌到当前选中账号' : ''
+  toast('设置已保存（仓库地址已自动规范为 owner/repo 格式）' + warnAuto + warnTarget,
+    (warnAuto || warnTarget) ? 'warn' : 'ok')
   testConn()
 })
 
@@ -159,13 +296,16 @@ $('btnTestConn').addEventListener('click', () => testConn(true))
 
 async function testConn(explicit) {
   const chip = $('connChip'), txt = $('connText')
+  const active = state.platforms.find(p => p.id === state.activePlatformId)
+  if (!active) {
+    chip.className = 'conn err'
+    txt.textContent = '未配置账号'
+    if (explicit) toast('请先在「服务平台账号」里添加并选中一个账号', 'err')
+    return
+  }
   chip.className = 'conn'
   txt.textContent = '连接中…'
-  const r = await api.serviceTest(explicit ? {
-    serverUrl: $('cfgServer').value.trim(),
-    adminPassword: $('cfgPwd').value,
-    username: $('cfgUser').value.trim() || 'default'
-  } : null)
+  const r = await api.serviceTest(active)
   if (r.ok && r.data && r.data.ok) {
     chip.className = 'conn on'
     txt.textContent = '已连接'
@@ -176,6 +316,211 @@ async function testConn(explicit) {
     if (explicit) toast('连接失败：' + ((r.data && r.data.msg) || r.error), 'err')
   }
 }
+
+// ---------------- 多平台账号管理（v1.8.0） ----------------
+const PLATFORM_TYPES = {
+  lxserver: 'LX Server（自建服务）',
+  songloft: 'Songloft（lxmusic 插件）',
+  musicsync: 'MusicSync（多用户同步）'
+}
+
+async function persistPlatforms() {
+  const r = await api.configSet({ platforms: state.platforms, activePlatformId: state.activePlatformId })
+  if (r.ok) state.config = r.data
+  return r
+}
+
+function renderPlatforms() {
+  const box = $('platformList')
+  if (!box) return
+  box.innerHTML = ''
+  if (!state.platforms.length) {
+    box.innerHTML = '<p class="muted">还没有配置任何服务平台账号。点下方「+ 添加账号」开始。</p>'
+    return
+  }
+  for (const p of state.platforms) {
+    const active = p.id === state.activePlatformId
+    const row = document.createElement('div')
+    row.className = 'acct-row' + (active ? ' active' : '')
+    const typeLabel = PLATFORM_TYPES[p.type] || p.type
+    row.innerHTML = `
+      <div class="acct-main">
+        <span class="acct-dot ${p.type}"></span>
+        <div class="acct-meta">
+          <div class="acct-name">${esc(p.name || p.url)} ${active ? '<span class="badge ok">当前</span>' : ''}${p.batchImport ? '<span class="badge accent" title="已勾选「参与批量灌入」：批量灌入时会同时灌到这个账号">批量灌入</span>' : ''}</div>
+          <div class="acct-sub">${esc(typeLabel)} · ${esc(p.url || '（未填地址）')} · ${esc(p.username || 'default')}</div>
+        </div>
+      </div>
+      <div class="acct-ops">
+        ${active ? '' : '<button class="btn sm" data-act="active" data-id="' + esc(p.id) + '">设为当前</button>'}
+        <button class="btn sm" data-act="edit" data-id="${esc(p.id)}">编辑</button>
+        <button class="btn sm danger-ghost" data-act="del" data-id="${esc(p.id)}">删除</button>
+      </div>`
+    box.appendChild(row)
+  }
+  box.querySelectorAll('button[data-act]').forEach(b => {
+    b.addEventListener('click', () => {
+      const id = b.dataset.id
+      if (b.dataset.act === 'active') setActiveAccount(id)
+      else if (b.dataset.act === 'edit') openAccountForm(id)
+      else if (b.dataset.act === 'del') deleteAccount(id)
+    })
+  })
+}
+
+function openAccountForm(id) {
+  const form = $('accountForm')
+  form.hidden = false
+  state.editingAccountId = id || null
+  const acc = id ? state.platforms.find(p => p.id === id) : null
+  $('accType').value = (acc && acc.type) || 'lxserver'
+  $('accName').value = (acc && acc.name) || ''
+  $('accUrl').value = (acc && acc.url) || ''
+  $('accUser').value = (acc && acc.username) || ''
+  $('accPwd').value = (acc && acc.password) || ''
+  $('accTmo').value = (acc && acc.timeoutMs) || 25000
+  // 「参与批量灌入」：新建时默认勾上（多平台是本版主打用法，勾了才用得上），
+  // 编辑已有账号时以存下来的值为准 —— 老账号没这个字段就不勾，行为与升级前一致。
+  $('accBatch').checked = acc ? acc.batchImport === true : true
+  $('accName').focus()
+}
+
+function closeAccountForm() {
+  $('accountForm').hidden = true
+  state.editingAccountId = null
+}
+
+function validateAccount() {
+  const type = $('accType').value
+  const url = $('accUrl').value.trim()
+  const name = $('accName').value.trim()
+  if (!url) { toast('请填写服务地址', 'err'); return null }
+  return {
+    id: state.editingAccountId || ('p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
+    type,
+    name: name || url,
+    url,
+    username: $('accUser').value.trim(),
+    password: $('accPwd').value,
+    timeoutMs: parseInt($('accTmo').value, 10) || 25000,
+    enabled: true,
+    batchImport: !!$('accBatch').checked
+  }
+}
+
+$('btnAddAccount').addEventListener('click', () => openAccountForm(null))
+$('btnAccCancel').addEventListener('click', closeAccountForm)
+$('btnAccSave').addEventListener('click', async () => {
+  const acc = validateAccount()
+  if (!acc) return
+  const idx = state.platforms.findIndex(p => p.id === acc.id)
+  if (idx >= 0) state.platforms[idx] = acc
+  else state.platforms.push(acc)
+  if (!state.activePlatformId) state.activePlatformId = acc.id
+  renderPlatforms()
+  renderInstalledAccountInfo()
+  closeAccountForm()
+  const r = await persistPlatforms()
+  if (r.ok) toast('账号已保存', 'ok')
+  else toast('保存失败：' + r.error, 'err')
+})
+$('btnAccTest').addEventListener('click', async () => {
+  const acc = validateAccount()
+  if (!acc) return
+  const chip = $('connChip'), txt = $('connText')
+  chip.className = 'conn'; txt.textContent = '连接中…'
+  const r = await api.serviceTest(acc)
+  if (r.ok && r.data && r.data.ok) {
+    chip.className = 'conn on'; txt.textContent = '已连接'
+    toast('连接成功：' + r.data.msg, 'ok')
+  } else {
+    chip.className = 'conn err'; txt.textContent = '未连接'
+    toast('连接失败：' + ((r.data && r.data.msg) || r.error), 'err')
+  }
+})
+
+async function setActiveAccount(id) {
+  state.activePlatformId = id
+  renderPlatforms()
+  renderInstalledAccountInfo()
+  await persistPlatforms()
+  refreshInstalled()
+  testConn()
+}
+
+async function deleteAccount(id) {
+  const acc = state.platforms.find(p => p.id === id)
+  if (!acc) return
+  if (!confirm(`确定删除账号「${acc.name || acc.url}」？\n（仅删除本工具的配置记录，不影响服务端音源）`)) return
+  state.platforms = state.platforms.filter(p => p.id !== id)
+  if (state.activePlatformId === id) state.activePlatformId = state.platforms[0] ? state.platforms[0].id : null
+  renderPlatforms()
+  renderInstalledAccountInfo()
+  await persistPlatforms()
+  refreshInstalled()
+}
+
+// 已灌入页顶部「当前账号」信息 + 公共音源清理卡片可见性 + 灌入页的「灌入目标」提示
+function renderInstalledAccountInfo() {
+  const active = state.platforms.find(p => p.id === state.activePlatformId)
+  const srv = $('srvUrl')
+  if (srv) srv.textContent = active ? `${active.url}（${PLATFORM_TYPES[active.type] || active.type}）` : '（未配置）'
+  const sel = $('insAccountSel')
+  if (sel) renderAccountSelector(sel)
+  const pubCard = $('pubCard')
+  if (pubCard) pubCard.hidden = !(active && active.type === 'lxserver')
+  renderImportTargets()
+  // 音源库里的「已灌入」徽章与「只选未灌入」都是按「本次灌入目标」算的（见 importedState），
+  // 所以切账号 / 改「参与批量灌入」勾选后必须重画表格，否则徽章会停留在旧口径上。
+  if (state.sources.length) renderTable()
+}
+
+/**
+ * 灌入页顶部显示本次会灌到哪些账号（v1.8.0 多平台）：
+ * 与核心的约定保持一致 —— 勾了「参与批量灌入」的账号全上，一个都没勾就只灌当前账号。
+ * 这里只是把同一套规则提前摆在用户眼前，避免「我以为是灌 A，结果灌到了 B」。
+ */
+function batchImportTargets() {
+  const list = (state.platforms || []).filter(p => p && p.enabled !== false)
+  const marked = list.filter(p => p.batchImport === true)
+  if (marked.length) return marked
+  const active = list.find(p => p.id === state.activePlatformId) || list[0]
+  return active ? [active] : []
+}
+
+function renderImportTargets() {
+  const el = $('importTargets')
+  if (!el) return
+  const t = batchImportTargets()
+  if (!t.length) {
+    el.textContent = '灌入目标：—（请先在「设置」里添加服务平台账号）'
+    el.className = 'sub warn'
+    return
+  }
+  const names = t.map(p => p.name || p.url).join('、')
+  const multi = t.length > 1
+  el.textContent = `灌入目标：${names}（${t.length} 个账号${multi ? '，同时灌入' : ''}）`
+  el.className = 'sub'
+  el.title = multi
+    ? '这些账号在「设置 → 服务平台账号」里勾了「参与批量灌入」。同名音源会按哪边可用平台更多来裁决，留多的那个。'
+    : '只灌这一个账号（没有其它账号勾了「参与批量灌入」）。在「设置 → 服务平台账号」里可勾选更多账号。'
+}
+
+function renderAccountSelector(sel) {
+  const cur = state.activePlatformId
+  sel.innerHTML = state.platforms.map(p =>
+    `<option value="${esc(p.id)}"${p.id === cur ? ' selected' : ''}>${esc(p.name || p.url)} · ${esc(PLATFORM_TYPES[p.type] || p.type)}</option>`
+  ).join('') || '<option value="">（未配置账号）</option>'
+}
+
+$('insAccountSel').addEventListener('change', async ev => {
+  state.activePlatformId = ev.target.value || null
+  renderPlatforms()
+  renderInstalledAccountInfo()
+  await persistPlatforms()
+  refreshInstalled()
+  testConn()
+})
 
 // ---------------- 音源库 ----------------
 async function loadSources() {
@@ -217,7 +562,29 @@ function renderStats() {
   // 深检确证失效的不再混进疑似，计入下面的「失效」
   $('stSuspected').textContent = s.filter(e => !e.usable && e.status !== 'dead' && !isDeepDead(e) && (e.suspected || isCheckedNoSource(e))).length
   $('stDead').textContent = s.filter(e => e.status === 'dead' || isDeepDead(e)).length
-  $('stImported').textContent = Object.keys(state.imported).length
+  // 「已灌入」= **当前账号**口径（v1.8.0 用户要求：卡片上的数要和「已灌入」页对得上）。
+  // 三个账号各有一份时，跨账号合计既不是任何单个账号的数、也不是任何一份服务端列表的长度，
+  // 只会让人对不上号。所以：拿到过当前账号的服务端列表就显示它的真实条数；没拿到就退回
+  // 账本里属于该账号的记录数（并在提示里说清这是本机记录，点「已灌入」页刷新可对账）。
+  const impEl = $('stImported')
+  const impCard = impEl.parentNode
+  const lab = impCard.querySelector('.stat-label')
+  const acct = (state.platforms || []).find(p => p.id === state.activePlatformId)
+  const acctName = acct ? (acct.name || acct.url) : ''
+  const totalLedger = Object.keys(state.imported || {}).length
+  if (state.activePlatformId && state.installedFor === state.activePlatformId) {
+    impEl.textContent = (state.installed || []).length
+    impCard.title = `当前账号（${acctName}）服务端上的音源数 —— 与「已灌入」页显示的一致。\n`
+      + `本地账本里属于该账号的记录 ${ledgerCountFor(state.activePlatformId)} 条，全部账号合计 ${totalLedger} 条`
+  } else if (state.activePlatformId) {
+    impEl.textContent = ledgerCountFor(state.activePlatformId)
+    impCard.title = `本地账本里属于当前账号（${acctName}）的灌入记录 ${ledgerCountFor(state.activePlatformId)} 条；`
+      + `全部账号合计 ${totalLedger} 条。\n进「已灌入」页刷新一次即可拉取服务端真实列表并自动对账`
+  } else {
+    impEl.textContent = totalLedger
+    impCard.title = '未选择服务平台账号；这里显示的是本地账本里的灌入记录总数。\n到「设置」里选中一个账号后会按该账号显示'
+  }
+  if (lab) lab.textContent = state.activePlatformId ? '已灌入 · 当前账号' : '已灌入'
 }
 
 function matchFilter(e) {
@@ -233,7 +600,8 @@ function matchFilter(e) {
     // 「未检测」= 完全没跑过检测的；已检测但不是音源脚本的也算已检测
     // 已合并的重复项不算「未检测」：它不需要检测，是内容/名称与保留项重复
     case 'unchecked': if (e.deprecated || e.deep || e.status === 'dead' || isCheckedNoSource(e)) return false; break
-    case 'imported': if (!state.imported[e.id]) return false; break
+    // 「已灌入」= 本次所有灌入目标账号都已有它（只灌过 A 的源，目标含 B 时不算已灌入）
+    case 'imported': if (importedState(e) !== 'all') return false; break
   }
   if (!q) return true
   return [e.scriptName, e.name, e.author, e.repo, e.path].some(v => String(v || '').toLowerCase().includes(q))
@@ -242,7 +610,7 @@ function matchFilter(e) {
 function filtered() {
   const list = state.sources.filter(matchFilter)
   // 排序在筛选之后统一做：分页/全选/勾选池看到的都是同一顺序
-  return sortSources(list, state.sort, state.imported)
+  return sortSources(list, state.sort, importedRankMap())
 }
 
 /** id -> 条目，供「重复项指向保留项」查名 */
@@ -307,7 +675,8 @@ function platCells(e) {
 
 function statusCell(e) {
   if (e.checking) return '<span class="badge accent">检测中…</span>'
-  if (state.imported[e.id]) return '<span class="badge accent">已灌入</span>'
+  const im = importedBadge(e)
+  if (im) return im
   // 去重废弃的重复条目压根没进过检测 —— 显示成「未检测」会让人以为检测坏了。
   // 它的真实状态是「已合并到保留项」，必须这么说。
   if (e.deprecated && !e.deep) return `<span class="badge gray" title="${esc(mergeTip(e))}">重复·已合并</span>`
@@ -530,17 +899,24 @@ $('btnSelectAll').addEventListener('click', () => {
   toast(`已勾选本筛选全部 ${list.length} 条；勾选池共 ${state.selected.size} 条（含其他筛选下的历史勾选，点「已选」页签可查看）`, 'ok')
 })
 // 只选未灌入（v1.7.3）：与状态排序（已灌入垫底）配套——一键排除已灌入/已合并项，
-// 只把当前筛选下的未灌入音源加进勾选池，直接灌入，不用逐条手动勾
-$('btnSelUnimported').addEventListener('click', () => {
+// 只把当前筛选下的未灌入音源加进勾选池，直接灌入，不用逐条手动勾。
+// v1.8.0：口径改成「所有灌入目标账号都有它」才算已灌入 —— 只灌过 A 的源在目标含 B 时
+// 仍会被勾上，否则加了第二个平台后这批源永远补灌不进去。
+$('btnSelUnimported').addEventListener('click', async () => {
+  // 先按服务端现状对账再谈「未灌入」：用户可能刚在服务端网页端把源删了，
+  // 本地那枚「已灌入」标记还挂着的话，这里会把该重灌的源整体排除（点了像没反应）。
+  await syncInstalledQuiet(true)
   const all = filtered()
-  const list = all.filter(e => !state.imported[e.id] && !e.deprecated)
+  const list = all.filter(e => importedState(e) !== 'all' && !e.deprecated)
   if (!list.length) return toast('当前筛选下没有未灌入的音源（已灌入/已合并项已被排除）', 'info')
   state.selected.clear()
   for (const e of list) state.selected.add(e.id)
   syncExportScope()
   renderTable()
   const skipped = all.length - list.length
-  toast(`已勾选未灌入 ${list.length} 条` + (skipped ? `（排除已灌入/已合并 ${skipped} 条）` : '') + '，点「灌入选中的音源」即可', 'ok')
+  const partial = list.filter(e => importedState(e) === 'part').length
+  toast(`已勾选未灌入 ${list.length} 条` + (partial ? `（含 ${partial} 条仅灌入部分平台的，会补灌到缺的平台）` : '') +
+    (skipped ? `；排除已灌入/已合并 ${skipped} 条` : '') + '，点「灌入选中的音源」即可', 'ok')
 })
 $('btnClearSel').addEventListener('click', () => {
   const n = state.selected.size
@@ -630,6 +1006,19 @@ api.onEvent(ev => {
         $('progNum').textContent = `${done}/${total}`
         $('progFill').style.width = Math.min(100, (done / total) * 100) + '%'
       }
+    }
+    return
+  }
+  // 多平台灌入（v1.8.0）：任务开始时后端会先把本次目标账号推过来，
+  // 用它覆盖页面上的静态提示 —— 后端可能因「账号连不上」而少灌几个，这才是实际情况。
+  if (type === 'import-targets') {
+    const el = $('importTargets')
+    if (el) {
+      const t = payload || []
+      el.textContent = t.length
+        ? `灌入目标：${t.map(x => x.name).join('、')}（${t.length} 个账号${t.length > 1 ? '，同时灌入' : ''}）`
+        : '灌入目标：—'
+      el.className = 'sub'
     }
     return
   }
@@ -727,7 +1116,11 @@ $('btnCheckImport').addEventListener('click', async () => {
   const r = await api.checkStart(ids)
   if (!r.ok) { setBusy(false); return toast('检测失败: ' + r.error, 'err') }
   await loadSources()
-  const okIds = state.sources.filter(e => ids.includes(e.id) && e.usable && !e.deprecated && !state.imported[e.id]).map(e => e.id)
+  // 对账后再算「还该灌谁」：服务端上已经被删掉的那条，本地「已灌入」标记必须先摘掉，
+  // 否则「删空服务端再重灌」会被整体排除、点了什么都不发生（用户反馈的「没办法再次灌入」）
+  await syncInstalledQuiet(true)
+  // 同上：只灌过 A 的源在目标含 B 时仍要进等灌入清单（补灌到 B），不能整体排除
+  const okIds = state.sources.filter(e => ids.includes(e.id) && e.usable && !e.deprecated && importedState(e) !== 'all').map(e => e.id)
   if (!okIds.length) {
     setBusy(false)
     return toast(`检测完成：可用 ${r.data.usable} / ${r.data.total}，但本次没有新增可灌入的音源`, 'warn')
@@ -738,7 +1131,7 @@ $('btnCheckImport').addEventListener('click', async () => {
   const ir = await api.importStart(okIds)
   setBusy(false)
   if (ir.ok) {
-    toast(`检测并灌入完成：灌入成功 ${ir.data.ok} / ${ir.data.results.length}（检测可用 ${r.data.usable}）` + (ir.data.replaced ? `，其中替换服务端同名旧版 ${ir.data.replaced} 个` : ''), 'ok')
+    toast(`检测并灌入完成：灌入 ${importSummaryText(ir.data)}（检测可用 ${r.data.usable}）` + (ir.data.replaced ? `，其中替换服务端同名旧版 ${ir.data.replaced} 个` : ''), 'ok')
     loadSources()
     refreshInstalled()
   } else toast('灌入失败: ' + ir.error, 'err')
@@ -827,6 +1220,19 @@ $('btnImportUsable').addEventListener('click', () => {
   startImport(ids)
 })
 
+/** 灌入结果的一句话汇总（多平台时按账号拆开报，否则「有的平台没灌」看起来像失败） */
+function importSummaryText(d) {
+  const s = (d && d.summary) || {}
+  let msg = `成功 ${d.ok} / ${d.results.length}`
+  if (s.synced) msg += `、同名已存在 ${s.synced}`
+  if (s.skipped) msg += `、跳过 ${s.skipped}`
+  const bp = s.byPlatform
+  if (bp && Object.keys(bp).length > 1) {
+    msg += '（' + Object.entries(bp).map(([k, v]) => `${k} ${v.ok}/${v.total}`).join('；') + '）'
+  }
+  return msg
+}
+
 async function startImport(ids) {
   setBusy(true)
   $('progStep').textContent = '开始灌入…'
@@ -835,7 +1241,7 @@ async function startImport(ids) {
   const r = await api.importStart(ids)
   setBusy(false)
   if (r.ok) {
-    toast(`灌入完成：成功 ${r.data.ok} / ${r.data.results.length}`, 'ok')
+    toast('灌入完成：' + importSummaryText(r.data), r.data.ok ? 'ok' : 'warn')
     loadSources()
     refreshInstalled()
   } else toast('灌入失败: ' + r.error, 'err')
@@ -848,7 +1254,10 @@ function renderImportResults() {
     const cls = (r.status === 'success' || r.status === 'replaced') ? 'ok' : r.status === 'failed' ? 'fail' : (r.status === 'synced' ? 'ok' : 'warn')
     const label = r.status === 'success' ? '成功' : r.status === 'replaced' ? '已替换' : r.status === 'failed' ? '失败' : (r.status === 'synced' ? '已同步' : '跳过')
     const tr = document.createElement('tr')
+    // 多平台灌入时补一列「账号」：同名音源在不同平台结果不同，没有这列看不出是谁失败了
+    const acct = r.accountName ? `<span class="badge plat-tag" title="${esc(r.platformType || '')}">${esc(r.accountName)}</span>` : ''
     tr.innerHTML = `<td>${esc(r.name)}</td><td class="repo">${esc(r.lxId || '')}</td>` +
+      `<td>${acct}</td>` +
       `<td><span class="badge ${cls}">${label}</span></td><td class="nm-sub">${esc(r.message || '')}</td>`
     body.appendChild(tr)
   }
@@ -869,8 +1278,19 @@ $('btnManualImport').addEventListener('click', async () => {
 
 // ---------------- 已灌入 ----------------
 async function refreshInstalled() {
-  const r = await api.serviceList()
+  const active = state.platforms.find(p => p.id === state.activePlatformId)
   const body = $('insBody')
+  if (!active) {
+    body.innerHTML = ''
+    const info = $('insInfo')
+    if (info) info.textContent = '未配置服务平台账号'
+    const empty = $('insEmpty')
+    if (empty) { empty.hidden = false; empty.textContent = '请先在「设置 → 服务平台账号」里添加并选中一个账号，再管理其音源' }
+    const pubCard = $('pubCard')
+    if (pubCard) pubCard.hidden = true
+    return
+  }
+  const r = await api.serviceList()
   body.innerHTML = ''
   if (!r.ok) {
     $('insInfo').textContent = '读取失败：' + r.error
@@ -878,47 +1298,89 @@ async function refreshInstalled() {
     return
   }
   state.installed = r.data || []
-  for (const s of state.installed) {
-    const tr = document.createElement('tr')
-    const plats = (s.supportedSources || []).map(p => {
-      const t = PLAT.find(x => x.k === p)
-      return `<span class="plat usable">${t ? t.t : esc(p)}</span>`
-    }).join('') || '<span class="nm-sub">—</span>'
-    // 停用分两种，必须分开说清（v1.6.5 前「已停用」一个词混用两者，用户对照 LX 管理页显示
-    // 「已启用」会以为状态不同步）：
-    //  - 平台级停用（disabledSources）：本工具/巡检写的，只写服务端 states.json，
-    //    LX 管理页里该音源的平台徽章会置灰（删除线）——即网页端可见的停用；
-    //    全局开关仍显示「已启用」是正常的，取歌时这些平台会被跳过
-    //  - 全局禁用（enabled=false）：服务端正式开关，LX 管理页也显示禁用
-    const ds = Array.isArray(s.disabledSources) ? s.disabledSources : []
-    const globalOff = s.enabled === false
-    const platformOff = !globalOff && ds.length > 0
-    const stopped = globalOff || platformOff
-    // 私有源（owner 非 open）：只对同名账号可用，LX 网页端公开列表里根本看不到它 ——
-    // 用户拿着猎手里的停用状态去网页端对不上，就是因为它（v1.6.7 明确标注）
-    const isPrivate = !!(s.owner && s.owner !== 'open' && s.owner !== '_open')
-    const privBadge = isPrivate
-      ? `<span class="badge gray" title="私有音源（归属「${esc(s.owner)}」账号）：只对该账号可用，LX 网页端公开列表里看不到、也管不了——这是正常现象，不是状态不同步。\n停用状态按「${esc(s.owner)}」身份存储，猎手显示与服务端一致。">私有·${esc(s.owner)}</span>`
-      : ''
-    const badge = globalOff
-      ? '<span class="badge gray" title="服务端全局开关为禁用（与 LX 管理页显示一致）">已禁用</span>'
-      : platformOff
-        ? `<span class="badge gray" title="平台级停用（${esc(ds.join(' / '))}）：取歌时这些平台会被跳过。\n${isPrivate ? '私有源：停用按「' + esc(s.owner) + '」身份写入，仅对该身份取歌生效；网页端公开列表看不到此源。' : 'LX 网页端音源管理页该音源的平台徽章会同步置灰（删除线）；全局开关仍显示「已启用」是正常的。'}点「启用」即可恢复。">已停用</span>`
-        : '<span class="badge ok">已启用</span>'
-    tr.innerHTML = `
-      <td><span class="nm">${esc(s.name || s.id)}</span><span class="nm-sub">${esc([s.version, s.author].filter(Boolean).join(' · '))}</span></td>
-      <td class="repo">${esc(s.id)}</td>
-      <td class="c-plat"><div class="plats">${plats}</div></td>
-      <td>${privBadge}${badge}
-          ${s.status === 'success' ? '' : `<span class="badge warn">${esc(s.status || '')}</span>`}</td>
-      <td class="c-op">
-        <button class="btn sm" data-t="${esc(s.id)}" data-stop="${stopped ? 0 : 1}" data-goff="${globalOff ? 1 : 0}" title="${stopped ? '恢复该音源参与解析' : '让该音源不参与解析（不触发服务端重载）'}">${stopped ? '启用' : '停用'}</button>
-        <button class="btn sm" data-del="${esc(s.id)}">删除</button>
-      </td>`
-    body.appendChild(tr)
+  state.installedFor = active.id
+  // 账本对账：服务端已经删掉的音源，本地那条灌入记录跟着摘掉。不做的话，「删空服务端再重灌」
+  // 会被库里那枚「已灌入」标记整体排除 —— 表现为「点了灌入但什么都没发生」（用户实测反馈）。
+  await reconcileLedger(active.id, state.installed)
+  renderInstalledRows()
+  // 顺带刷新「公共音源清理」面板：两者读的是同一份服务端数据，避免要用户点两次
+  loadPublic()
+}
+
+/** 一行已灌入音源（纯 DOM 构造，排序时复用，不重新拉服务端） */
+function installedRow(s, st, active) {
+  const tr = document.createElement('tr')
+  tr.dataset.rank = st.rank
+  const plats = (s.supportedSources || []).map(p => {
+    const t = PLAT.find(x => x.k === p)
+    return `<span class="plat usable">${t ? t.t : esc(p)}</span>`
+  }).join('') || '<span class="nm-sub">—</span>'
+  // 停用分两种，必须分开说清（v1.6.5 前「已停用」一个词混用两者，用户对照 LX 管理页显示
+  // 「已启用」会以为状态不同步）：
+  //  - 平台级停用（disabledSources）：本工具/巡检写的，只写服务端 states.json，
+  //    LX 管理页里该音源的平台徽章会置灰（删除线）——即网页端可见的停用；
+  //    全局开关仍显示「已启用」是正常的，取歌时这些平台会被跳过
+  //  - 全局禁用（enabled=false）：服务端正式开关，LX 管理页也显示禁用
+  const ds = st.ds || []
+  const globalOff = !!st.globalOff
+  const platformOff = !!st.platformOff
+  const stopped = globalOff || platformOff
+  // 私有源（owner 非 open）：只对同名账号可用，LX 网页端公开列表里根本看不到它 ——
+  // 用户拿着猎手里的停用状态去网页端对不上，就是因为它（v1.6.7 明确标注）
+  const isPrivate = !!(s.owner && s.owner !== 'open' && s.owner !== '_open')
+  const privBadge = isPrivate
+    ? `<span class="badge gray" title="私有音源（归属「${esc(s.owner)}」账号）：只对该账号可用，LX 网页端公开列表里看不到、也管不了——这是正常现象，不是状态不同步。\n停用状态按「${esc(s.owner)}」身份存储，猎手显示与服务端一致。">私有·${esc(s.owner)}</span>`
+    : ''
+  const badge = globalOff
+    ? '<span class="badge gray" title="服务端全局开关为禁用（与 LX 管理页显示一致）">已禁用</span>'
+    : platformOff
+      ? `<span class="badge gray" title="平台级停用（${esc(ds.join(' / '))}）：取歌时这些平台会被跳过。\n${isPrivate ? '私有源：停用按「' + esc(s.owner) + '」身份写入，仅对该身份取歌生效；网页端公开列表看不到此源。' : 'LX 网页端音源管理页该音源的平台徽章会同步置灰（删除线）；全局开关仍显示「已启用」是正常的。'}点「启用」即可恢复。">已停用</span>`
+      : '<span class="badge ok">已启用</span>'
+  // 巡检结论（只有巡检跑过的音源才有）：这是判断「这条还能不能用」最直接的依据，
+  // 直接摆到状态列上，用户点表头把失效排到最前就能批量挑出来删掉
+  let patrolBadge = ''
+  const p = st.patrol
+  if (p && p.at) {
+    const when = new Date(p.at).toLocaleString('zh-CN', { hour12: false })
+    patrolBadge = p.ok
+      ? `<span class="badge ok" title="巡检通过（${esc(when)}）">巡检正常</span>`
+      : `<span class="badge dead" title="巡检判定失效（${esc(when)}）：${esc(p.note || '')}\n通常已被巡检自动停用；确认不需要了就勾选删除。可点「健康巡检」重测一次。">巡检失效</span>`
   }
-  $('insEmpty').hidden = state.installed.length > 0
-  const privN = state.installed.filter(s => s.owner && s.owner !== 'open' && s.owner !== '_open').length
+  const svcBadge = s.status && s.status !== 'success' ? `<span class="badge warn">${esc(s.status)}</span>` : ''
+  // 私有源也要能勾（本页删的是「服务端上该账号可见的音源」，公共清理才只碰公开源）；
+  // 但删除时按各自的 owner 路由身份，否则对私有源不生效
+  tr.innerHTML = `
+    <td><input type="checkbox" data-ins="${esc(s.id)}"${state.insSel.has(s.id) ? ' checked' : ''} title="勾选后可点上方「删除选中」批量删除"></td>
+    <td><span class="nm">${esc(s.name || s.id)}</span><span class="nm-sub">${esc([s.version, s.author].filter(Boolean).join(' · '))}</span><br><span class="badge plat-tag" title="所属平台账号（当前选中）">${esc(active.name || active.url)}</span></td>
+    <td class="repo">${esc(s.id)}</td>
+    <td class="c-plat"><div class="plats">${plats}</div></td>
+    <td>${privBadge}${patrolBadge}${badge}${svcBadge}</td>
+    <td class="c-op">
+      <button class="btn sm" data-t="${esc(s.id)}" data-stop="${stopped ? 0 : 1}" data-goff="${globalOff ? 1 : 0}" title="${stopped ? '恢复该音源参与解析' : '让该音源不参与解析（不触发服务端重载）'}">${stopped ? '启用' : '停用'}</button>
+      <button class="btn sm" data-del="${esc(s.id)}">删除</button>
+    </td>`
+  return tr
+}
+
+/**
+ * 已灌入列表渲染（排序 + 勾选收敛）。
+ * 排序只重排本地数组，不再打服务端 —— 点表头来回切不会一次次触发全量脚本重载。
+ */
+function renderInstalledRows() {
+  const body = $('insBody')
+  if (!body) return
+  const active = state.platforms.find(p => p.id === state.activePlatformId) || { name: '', url: '' }
+  const byLxId = ledgerByLxId()
+  const rows = (state.installed || []).map((s, i) => ({ s, i, st: insRowState(s, byLxId) }))
+  if (state.insSort.key === 'istatus') {
+    const dir = state.insSort.dir === 'desc' ? -1 : 1
+    rows.sort((a, b) => (a.st.rank - b.st.rank) * dir || a.i - b.i)
+  }
+  body.innerHTML = ''
+  for (const { s, st } of rows) body.appendChild(installedRow(s, st, active))
+  const list = state.installed || []
+  $('insEmpty').hidden = list.length > 0
+  const privN = list.filter(s => s.owner && s.owner !== 'open' && s.owner !== '_open').length
   const insUser = $('insUser')
   if (insUser) {
     insUser.textContent = privN ? `· 含 ${privN} 个私有音源` : ''
@@ -926,17 +1388,130 @@ async function refreshInstalled() {
       ? `有 ${privN} 个音源是私有源（归属某个账号）：只对该账号可用，LX 网页端公开列表里看不到、也管不了——这是正常现象。其停用状态按归属身份存储，猎手显示与服务端一致`
       : ''
   }
-  $('insInfo').textContent = `共 ${state.installed.length} 个自定义音源`
-  // 顺带刷新「公共音源清理」面板：两者读的是同一份服务端数据，避免要用户点两次
-  loadPublic()
+  const badN = rows.filter(r => r.st.rank === 0).length
+  const offN = rows.filter(r => r.st.rank === 1).length
+  $('insInfo').textContent = `共 ${list.length} 个自定义音源`
+    + (badN ? ` · 巡检失效 ${badN} 个` : '')
+    + (offN ? ` · 已停用 ${offN} 个` : '')
+  // 勾选池收敛：服务端已经删掉的 id 要跟着消失（否则会重复删、报一堆失败）
+  const liveIds = new Set(list.map(s => s.id))
+  for (const id of Array.from(state.insSel)) if (!liveIds.has(id)) state.insSel.delete(id)
+  renderInsSelInfo()
+  renderInsSortHeads()
+  renderStats()   // 「已灌入 · 当前账号」卡片跟着这份列表走
 }
+
+/**
+ * 静默同步当前账号的服务端列表（启动时调用）：只更新统计卡与账本对账，不打扰用户。
+ * 已经有该账号的列表就不重复拉（切到「已灌入」页 / 同步服务端时自然会刷新）。
+ */
+async function syncInstalledQuiet(force) {
+  const active = state.platforms.find(p => p.id === state.activePlatformId)
+  if (!active) return
+  if (!force && state.installedFor === active.id) return
+  const r = await api.serviceList()
+  if (!r || !r.ok) return
+  state.installed = r.data || []
+  state.installedFor = active.id
+  await reconcileLedger(active.id, state.installed)
+  renderInstalledRows()
+}
+
+/** 已灌入页表头排序箭头（只有「状态」一列可排） */
+function renderInsSortHeads() {
+  document.querySelectorAll('#insTable th.sortable').forEach(th => {
+    const on = state.insSort.key === th.dataset.k
+    th.classList.toggle('sorted', on)
+    th.setAttribute('aria-sort', on ? (state.insSort.dir === 'asc' ? 'ascending' : 'descending') : 'none')
+    const ar = th.querySelector('.sort-arrow')
+    if (ar) ar.textContent = on ? (state.insSort.dir === 'asc' ? '▲' : '▼') : ''
+  })
+}
+
+/** 已灌入列表的勾选状态：计数文案 + 全选框三态 */
+function renderInsSelInfo() {
+  const total = (state.installed || []).length
+  const n = state.insSel.size
+  const info = $('insSelInfo')
+  if (info) {
+    let extra = ''
+    if (n) {
+      const byLxId = ledgerByLxId()
+      let bad = 0, off = 0
+      for (const s of (state.installed || [])) {
+        if (!state.insSel.has(s.id)) continue
+        const st = insRowState(s, byLxId)
+        if (st.rank === 0) bad++
+        else if (st.rank === 1) off++
+      }
+      const parts = []
+      if (bad) parts.push(`巡检失效 ${bad}`)
+      if (off) parts.push(`已停用 ${off}`)
+      if (parts.length) extra = `（${parts.join('、')}）`
+    }
+    info.textContent = n ? `已勾选 ${n} 个${extra}` : ''
+    info.title = n ? '点上方「删除选中」批量删除（串行执行，服务端逐个重载脚本）' : '勾选左侧复选框后可批量删除'
+  }
+  const btn = $('btnInsDelSel')
+  if (btn) btn.disabled = n === 0
+  const chkAll = $('insChkAll')
+  if (chkAll) {
+    chkAll.checked = total > 0 && n === total
+    chkAll.indeterminate = n > 0 && n < total
+    chkAll.disabled = total === 0
+  }
+}
+
+// 勾选/取消 + 全选（事件委托，避免每行重复绑定）
+$('insBody').addEventListener('change', ev => {
+  const cb = ev.target.closest('input[data-ins]')
+  if (!cb) return
+  if (cb.checked) state.insSel.add(cb.dataset.ins)
+  else state.insSel.delete(cb.dataset.ins)
+  renderInsSelInfo()
+})
+$('insChkAll').addEventListener('change', ev => {
+  const on = ev.target.checked
+  state.insSel.clear()
+  if (on) for (const s of (state.installed || [])) state.insSel.add(s.id)
+  // 重渲染一次让每行的勾选态跟上（全选后行内 checkbox 也要打勾）
+  document.querySelectorAll('#insBody input[data-ins]').forEach(cb => { cb.checked = on })
+  renderInsSelInfo()
+})
+
+// 已灌入页「状态」列排序（v1.8.0）：默认把失效/停用排在最前面，方便一眼看出哪些该清掉。
+// 只重排本地数组、不重新拉服务端 —— 来回点表头不会一次次触发服务端的全量脚本重载。
+document.querySelectorAll('#insTable th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const k = th.dataset.k
+    if (!k) return
+    if (state.insSort.key === k) state.insSort.dir = state.insSort.dir === 'asc' ? 'desc' : 'asc'
+    else { state.insSort.key = k; state.insSort.dir = 'asc' }
+    renderInstalledRows()
+  })
+})
+
+// 一键勾选「失效 / 停用」的音源：用户拿它批量清掉服务端上已经用不了的已灌入音源
+$('btnInsSelFailed').addEventListener('click', () => {
+  const byLxId = ledgerByLxId()
+  const hit = (state.installed || []).filter(s => insRowState(s, byLxId).rank <= 1)
+  state.insSel.clear()
+  if (hit.length) for (const s of hit) state.insSel.add(s.id)
+  document.querySelectorAll('#insBody input[data-ins]').forEach(cb => { cb.checked = state.insSel.has(cb.dataset.ins) })
+  renderInsSelInfo()
+  if (!hit.length) return toast('当前账号没有失效 / 停用的音源', 'info')
+  const bad = hit.filter(s => insRowState(s, byLxId).rank === 0).length
+  const off = hit.length - bad
+  toast(`已勾选 ${hit.length} 个` + (bad || off ? `（${[bad ? `巡检失效 ${bad}` : '', off ? `已停用 ${off}` : ''].filter(Boolean).join('、')}）` : '')
+    + '，确认后点「删除选中」', 'ok')
+})
 
 // 已灌入页操作在途锁：这些操作都会触发服务端「整轮脚本重载」，旧版服务端可能长时间无响应。
 // 没有忙态保护时用户连点会叠加多次全量重载，把服务端进一步拖垮（表现为只能重启容器）。
 let insBusy = false
 function setInsBusy(on) {
   insBusy = !!on
-  document.querySelectorAll('#insBody button[data-t], #insBody button[data-del], #btnPubRefresh, #btnPubDelSel, #btnPubDelAll').forEach(b => { b.disabled = !!on })
+  document.querySelectorAll('#insBody button[data-t], #insBody button[data-del], #insBody input[data-ins], #insChkAll, #btnInsDelSel, #btnInsSelFailed, #btnPubRefresh, #btnPubDelSel, #btnPubDelAll').forEach(el => { el.disabled = !!on })
 }
 // 超时/中断类错误给出可诊断的提示（而不是冷冰冰一句 abort）
 function serverErrHint(msg) {
@@ -944,6 +1519,22 @@ function serverErrHint(msg) {
   return /abort|timeout|timed out|超时/i.test(m)
     ? `${m}（服务端长时间无响应，通常是 LX 服务端正在全量重载脚本卡住；请看服务端日志，必要时重启容器）`
     : m
+}
+
+/**
+ * 平台侧「业务态」卡住导致的失败：给可操作指引。
+ * 实测（Songloft lxmusic 插件）：脚本初始化失败的音源会一直停在「音源正在检测」，
+ * 此时删除和切换状态都会被拒 —— 用户看到这句原始报错只会一头雾水。
+ */
+function delBizHint(msg) {
+  const m = String(msg || '')
+  if (/正在检测/.test(m)) {
+    return `${m}（该平台正在检测这个音源，稍后重试；一直失败就到平台的音源管理页手动删除，或重启该平台的服务/容器）`
+  }
+  if (/plugin execution failed|初始化失败/i.test(m)) {
+    return `${m}（脚本在服务端初始化失败。常见原因：脚本内部校验自身名称，改名后失效 —— 用「同名自动替换」重新灌入原版脚本可恢复）`
+  }
+  return m
 }
 
 // 让某个音源彻底不参与解析，需要把它支持的每个平台都写进 disabledSources。
@@ -1159,8 +1750,95 @@ $('insBody').addEventListener('click', async ev => {
       const target = (state.installed || []).find(x => x.id === d.dataset.del)
       const r = await api.serviceRemove(d.dataset.del, target && target.owner)
       if (r.ok && r.data.success) { toast('已删除', 'ok'); refreshInstalled() }
-      else toast('删除失败：' + serverErrHint((r.data && r.data.message) || r.error), 'err')
+      else toast('删除失败：' + delBizHint(serverErrHint((r.data && r.data.message) || r.error)), 'err')
     } finally { setInsBusy(false) }
+  }
+})
+
+/**
+ * 批量删除已灌入列表里勾选的音源（v1.8.0）
+ *
+ * 与单行删除的差别只在「批量」，风险处理方式完全沿用公共音源清理踩过的坑：
+ *  1. 串行执行 —— 服务端每删一个就全量重载脚本，并发会把服务端拖到假死；
+ *  2. 在途锁（insBusy）+ 逐条进度，用户看得到第 n/N 个，不会以为卡死；
+ *  3. 失败不中断，最后对账（成功/失败逐条），已不在服务端的算「无需删除」；
+ *  4. 删除前强确认，明说「删除」与「停用」的代价差异。
+ * 删除按每条音源各自的 owner 路由身份 —— 私有源若按 default 身份删会删不掉。
+ */
+$('btnInsDelSel').addEventListener('click', async () => {
+  if (insBusy) return toast('上一个服务端操作仍在处理中，请稍候…')
+  const picked = (state.installed || []).filter(s => state.insSel.has(s.id))
+  if (!picked.length) return toast('还没有勾选任何音源', 'info')
+
+  const active = state.platforms.find(p => p.id === state.activePlatformId)
+  const isLx = active && active.type === 'lxserver'
+  const privN = picked.filter(s => s.owner && s.owner !== 'open' && s.owner !== '_open').length
+
+  const preview = '  · ' + picked.slice(0, 8).map(s => s.name || s.id).join('\n  · ') +
+    (picked.length > 8 ? `\n  · …等共 ${picked.length} 个` : '')
+  // lxserver 每删一个都要全量重载（约 30s）+ 保护间隔；其余平台是秒级，别按这个吓唬人
+  const gapMs = isLx
+    ? ((state.config && state.config.serverDeleteIntervalMs != null) ? Number(state.config.serverDeleteIntervalMs) : 5000)
+    : 200
+  const mins = isLx ? Math.max(1, Math.round(picked.length * (30 + gapMs / 1000) / 60)) : 0
+  const cost = isLx
+    ? `- 每删一个都会让 LX 服务端全量重载脚本，${picked.length} 个约需 ${mins} 分钟以上，期间服务端可能无响应；`
+    : `- 当前平台（${active ? (PLATFORM_TYPES[active.type] || active.type) : '—'}）删除较快，逐个串行执行；`
+  const risk = (isLx && picked.length > 10)
+    ? `\n- 数量较多：连续重载有假死风险，已自动在每个删除之间留 ${Math.round(gapMs / 1000)} 秒；中途出现网络超时会自动停止，未删的可稍后重删。`
+    : ''
+  if (!confirm(
+    `将从服务端删除 ${picked.length} 个音源（账号：${active ? (active.name || active.url) : '—'}）：\n${preview}\n\n` +
+    `${cost}\n` +
+    `- 若只是不想让它们参与解析，请用「停用」（不触发重载，秒级完成）；\n` +
+    `- 删除不可撤销，音源脚本会真正从服务端移除。${risk}\n\n确定删除？`
+  )) return
+
+  setInsBusy(true)
+  const info = $('insSelInfo')
+  const say = t => { if (info) info.textContent = t }
+  const done = [], failed = [], gone = []
+  try {
+    for (let i = 0; i < picked.length; i++) {
+      const s = picked[i]
+      say(`正在删除 ${i + 1}/${picked.length}：${s.name || s.id}`)
+      let r
+      try {
+        r = await api.serviceRemove(s.id, s.owner)
+      } catch (e) {
+        r = { ok: false, error: String((e && e.message) || e) }
+      }
+      const okDel = r.ok && r.data && r.data.success
+      const msg = (r.data && r.data.message) || r.error || ''
+      // 服务端已无此源（比如页面上 stale 或并发删过）：不算失败，算「无需删除」
+      if (okDel) done.push(s)
+      else if (/不存在|not found|404/i.test(msg)) gone.push(s)
+      else failed.push({ s, msg: delBizHint(msg) })
+      // 网络级故障（超时/连接被拒）说明服务端已经在重载或假死，继续删只会更糟 —— 中止
+      if (!okDel && /abort|timeout|timed out|超时|ECONNREFUSED|fetch failed/i.test(msg)) {
+        const rest = picked.length - i - 1
+        say(`中止：服务端响应异常，剩余 ${rest} 个未删`)
+        toast(`服务端响应异常，已中止：成功 ${done.length}、失败 ${failed.length}，剩余 ${rest} 个未删。请先在服务端确认状态（必要时重启容器），稍后重删剩余项`, 'err')
+        break
+      }
+      if (i < picked.length - 1) await new Promise(res => setTimeout(res, gapMs))
+    }
+    if (done.length + gone.length + failed.length === picked.length) {
+      const parts = [`成功 ${done.length}`]
+      if (gone.length) parts.push(`无需删除 ${gone.length}（服务端已无此源）`)
+      if (failed.length) parts.push(`失败 ${failed.length}`)
+      toast(`删除完成：${parts.join('、')}`, failed.length ? 'warn' : 'ok')
+      if (failed.length) {
+        console.warn('[已灌入] 批量删除失败明细：', failed.map(f => ({ id: f.s.id, name: f.s.name, msg: f.msg })))
+      }
+    }
+    // 无论成败都刷新：勾选池会在 refreshInstalled 里按服务端现状收敛
+    state.insSel.clear()
+    await refreshInstalled()
+    loadSources()
+  } finally {
+    setInsBusy(false)
+    renderInsSelInfo()
   }
 })
 
@@ -1232,9 +1910,18 @@ async function autoSyncServer() {
 }
 
 $('btnRevokeSelected').addEventListener('click', async () => {
-  const ids = Object.keys(state.imported)
-  if (!ids.length) return toast('没有本工具灌入的记录')
-  if (!confirm(`将撤回本工具灌入的 ${ids.length} 个音源（从服务端删除），继续？`)) return
+  const active = state.platforms.find(p => p.id === state.activePlatformId)
+  if (!active) return toast('请先在「服务平台账号」里选中一个账号', 'err')
+  // 撤回只针对「当前账号」灌入的记录（按 importedTo / platformId 归类），不误删其他账号的音源。
+  // 判定口径必须和核心层 runRevoke 一致，否则这里点得到、那边却说「不属于当前账号」。
+  const ids = Object.keys(state.imported).filter(id => {
+    const rec = state.imported[id]
+    return rec && (rec.platformId == null ||
+      rec.platformId === active.id ||
+      (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === active.id)))
+  })
+  if (!ids.length) return toast('当前账号没有本工具灌入的记录', 'info')
+  if (!confirm(`将撤回本工具在账号「${active.name || active.url}」灌入的 ${ids.length} 个音源（从服务端删除），继续？`)) return
   const r = await api.revoke(ids)
   if (!r.ok) return toast('撤回失败: ' + r.error, 'err')
   const ok = (r.data || []).filter(x => x.status === 'success').length
@@ -1267,7 +1954,8 @@ function matchScope(e, k) {
     case 'dead': return e.status === 'dead' || isDeepDead(e)
     // 已合并的重复项不该出现在「导出未检测」里：它们不是漏检，是重复
     case 'unchecked': return !e.deprecated && !e.deep && e.status !== 'dead' && !isCheckedNoSource(e)
-    case 'imported': return !!state.imported[e.id]
+    // 导出「已灌入」同样按灌入目标口径：只灌过 A 的源在目标含 B 时不算已灌入（还需补灌）
+    case 'imported': return importedState(e) === 'all'
     default: return true
   }
 }
@@ -1305,7 +1993,8 @@ function clampPage() {
   await loadConfig()
   await loadSources()
   syncExportScope()      // 初始化导出范围下拉（首次进入默认跟随页签）
-  autoSyncServer()   // 静默同步服务端已有音源 → 纳入「已灌入」管理
+  await autoSyncServer() // 静默同步服务端已有音源 → 纳入「已灌入」管理
+  await syncInstalledQuiet()  // 静默对账：统计卡的「已灌入」要显示当前账号服务端上的真实条数
   const lr = await api.logsGet()
   if (lr.ok) {
     const box = $('logBox')

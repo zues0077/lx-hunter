@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.7.5</div>
+        <div class="brand-sub">PC 版 v1.9.0</div>
       </div>
     </div>
     <nav class="nav">
@@ -130,7 +130,8 @@
       <header class="view-head">
         <div>
           <h1>灌入 LX MUSIC 服务</h1>
-          <p class="sub">把库里检测通过的音源批量灌入自建服务，并自动启用</p>
+          <p class="sub">把库里检测通过的音源批量灌入服务平台，并自动启用</p>
+          <p class="sub" id="importTargets">灌入目标：—</p>
         </div>
         <div class="head-actions">
           <button class="btn primary" id="btnImportSelected">灌入选中的音源</button>
@@ -152,7 +153,7 @@
         <h3 class="card-title">灌入结果</h3>
         <div class="table-wrap">
           <table class="table" id="impTable">
-            <thead><tr><th class="c-name">音源</th><th>服务端 id</th><th>结果</th><th>说明</th></tr></thead>
+            <thead><tr><th class="c-name">音源</th><th>服务端 id</th><th>平台账号</th><th>结果</th><th>说明</th></tr></thead>
             <tbody id="impBody"></tbody>
           </table>
         </div>
@@ -176,23 +177,32 @@
       <div class="card">
         <div class="toolbar">
           <span class="muted" id="patrolInfo">尚未巡检</span>
+          <label class="field inline"><span>当前账号</span>
+            <select class="input" id="insAccountSel" style="max-width:280px" title="切换「当前选中账号」：下方列表与所有服务端操作都只针对它"></select>
+          </label>
           <span class="muted" id="insInfo"></span>
           <span class="muted" id="insUser"></span>
+          <span class="muted" id="insSelInfo"></span>
           <div class="grow"></div>
           <button class="btn ghost" id="btnEnableAll" title="把所有平台级停用的音源恢复启用（只清服务端 disabledSources，不触发脚本重载；可用于清理历史误禁）">全部恢复启用</button>
-          <button class="btn danger-ghost" id="btnRevokeSelected">撤回本工具灌入的全部</button>
+          <button class="btn ghost" id="btnInsSelFailed" title="一键勾选「巡检失效」和「已停用」的音源，确认后点「删除选中」批量清理">选中失效/停用</button>
+          <button class="btn danger-ghost" id="btnInsDelSel" title="删除勾选的音源（串行执行，逐个上报进度）">删除选中</button>
+          <button class="btn danger-ghost" id="btnRevokeSelected">撤回当前账号灌入的全部</button>
         </div>
         <div class="table-wrap">
           <table class="table" id="insTable">
-            <thead><tr><th class="c-name">音源</th><th>id</th><th class="c-plat">平台</th><th>状态</th><th class="c-op">操作</th></tr></thead>
+            <thead><tr>
+              <th class="c-chk"><input type="checkbox" id="insChkAll" title="全选 / 取消全选（只勾选当前列表里可见的音源）"></th>
+              <th class="c-name">音源</th><th>id</th><th class="c-plat">平台</th><th class="sortable" data-k="istatus" title="点击按状态排序：失效 → 停用 → 正常（再点反向）。失效/停用排在最前面，方便用上方「选中失效/停用」批量挑出来删掉">状态<span class="sort-arrow"></span></th><th class="c-op">操作</th>
+            </tr></thead>
             <tbody id="insBody"></tbody>
           </table>
         </div>
         <div class="empty" id="insEmpty">服务端暂无自定义音源</div>
       </div>
 
-      <!-- 公共音源清理（v1.7.4）：只删服务端公开源，绝不碰账号私有源 -->
-      <div class="card">
+      <!-- 公共音源清理（v1.7.4）：只删服务端公开源，绝不碰账号私有源；仅 LX Server 支持 -->
+      <div class="card" id="pubCard">
         <div class="toolbar">
           <h3 class="card-title" style="margin:0">公共音源清理</h3>
           <span class="muted" id="pubInfo">未读取</span>
@@ -231,15 +241,35 @@
       </header>
 
       <div class="card">
-        <h3 class="card-title">LX MUSIC 服务</h3>
-        <div class="grid-form">
-          <label class="field"><span>服务地址</span><input class="input" id="cfgServer" placeholder="http://你的服务地址:7968"></label>
-          <label class="field"><span>管理员密码（frontend.password）</span><input class="input" id="cfgPwd" type="password" placeholder="lxserver 的 frontend.password"></label>
-          <label class="field"><span>用户名</span><input class="input" id="cfgUser" placeholder="default"></label>
-          <label class="field"><span>服务超时 (ms)</span><input class="input" id="cfgSrvTmo" type="number" placeholder="25000"></label>
+        <h3 class="card-title">服务平台账号</h3>
+        <p class="hint">可配置多个平台、多个账号（如自建 LX Server、Songloft 内 lxmusic 插件、MusicSync）。<b>同步 / 巡检 / 撤回 / 公共音源清理 / 已灌入列表只作用于「当前选中账号」；只有灌入可以多选</b>——在账号详情里勾「参与批量灌入」后，灌入会同时打进所有勾了的账号（同名音源会对比哪边可用平台更多，留多的那个）。灌入记录按平台分账号保存。点账号右侧「设为当前」即可切换。</p>
+        <div id="platformList" class="acct-list"></div>
+        <button class="btn" id="btnAddAccount">+ 添加账号</button>
+        <div class="card account-form" id="accountForm" hidden>
+          <h4 class="card-title">账号详情</h4>
+          <div class="grid-form">
+            <label class="field"><span>平台类型</span>
+              <select class="input" id="accType">
+                <option value="lxserver">LX Server（自建服务）</option>
+                <option value="songloft">Songloft（lxmusic 插件）</option>
+                <option value="musicsync">MusicSync（多用户同步）</option>
+              </select>
+            </label>
+            <label class="field"><span>账号名称</span><input class="input" id="accName" placeholder="如：家里 NAS / 备用机 / 主账号"></label>
+            <label class="field"><span>服务地址</span><input class="input" id="accUrl" placeholder="http://地址:端口"></label>
+            <label class="field"><span>用户名</span><input class="input" id="accUser" placeholder="lxserver 填 default 或账号名；Songloft/MusicSync 填登录账号"></label>
+            <label class="field"><span>密码</span><input class="input" id="accPwd" type="password" placeholder="lxserver 填 frontend.password；Songloft/MusicSync 填登录密码"></label>
+            <label class="field"><span>超时 (ms)</span><input class="input" id="accTmo" type="number" placeholder="25000"></label>
+          </div>
+          <div class="field-row">
+            <label class="chk"><input type="checkbox" id="accBatch"><span><strong>参与批量灌入</strong>（勾了才会被「灌入选中的音源 / 灌入全部可用」以及「定时爬取后自动灌入」同时灌入；一个都不勾时只灌当前选中账号）</span></label>
+          </div>
+          <div class="row-form">
+            <button class="btn primary" id="btnAccSave">保存账号</button>
+            <button class="btn" id="btnAccTest">测试连接</button>
+            <button class="btn ghost" id="btnAccCancel">取消</button>
+          </div>
         </div>
-        <p class="hint">管理员密码即服务端配置里的 <code>frontend.password</code>（Web 端设置页可查看/修改），不是登录账号密码。<br>
-        「用户名」是<strong>灌入目标身份</strong>（v1.7.5 起）：填 <code>default</code> = 灌入<strong>公开源</strong>（所有账号可用、LX Music 网页端「音源管理」可见）；填具体账号名（如 admin）= 灌入<strong>该账号的私有源列表</strong>（网页端公共列表看不到，只有该账号登录后可见可用）。「已灌入」页合并显示两个空间，删除/停用/平台设置按每条音源各自的归属路由，不会串。公共音源清理始终只删公开源，绝不触碰账号私有源。</p>
       </div>
 
       <div class="card">
@@ -263,8 +293,6 @@
           <label class="field"><span>取链超时 (ms)</span><input class="input" id="cfgLinkTmo" type="number"></label>
         </div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgEnableAfter"><span>灌入后自动启用</span></label>
-          <label class="chk"><input type="checkbox" id="cfgSkipUnusable"><span>跳过本地检测未通过的音源</span></label>
           <label class="chk"><input type="checkbox" id="cfgAutoUnsafe"><span>脚本要求 VM 模式时自动放行（有安全风险）</span></label>
         </div>
         <div class="field-row">
@@ -278,14 +306,37 @@
       </div>
 
       <div class="card">
+        <h3 class="card-title">灌入规则（同名音源怎么处理）</h3>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgReplaceSame"><span>同名且无法判定是否同一音源时，<strong>自动替换服务端旧版</strong>（先删后传；关闭则改名并存上传）</span></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgEnableAfter"><span>灌入后自动启用</span></label>
+          <label class="chk"><input type="checkbox" id="cfgSkipUnusable"><span>跳过本地检测未通过的音源</span></label>
+        </div>
+        <p class="hint">灌入时会拿<strong>本地这一份</strong>和<strong>服务端同名的那个</strong>按顺序比对，前 6 条是<strong>硬规则</strong>（不可配置，全部为了「不越换越差」），只有 6 条都判不出来时才轮到上面那个勾选项兜底：</p>
+        <ol class="rules">
+          <li><strong>同名同内容</strong> → 不重传，直接标记「已灌入」（能拿到脚本正文的平台按内容指纹比，拿不到才退回比字节长度）</li>
+          <li><strong>本地实测 0 个可用平台</strong> → 保留服务端那条，不替换（本地挂掉 ≠ 服务端不能用）</li>
+          <li><strong>服务端那条可用平台更多</strong> → 保留服务端（哪个平台可用多用哪个）</li>
+          <li><strong>两边版本号都能解析</strong> → 版本高的赢：本地更高就删旧装新，否则保留服务端</li>
+          <li><strong>两边平台完全不重叠</strong> → 判定为两个无关脚本撞了名 → 改名并存，不删旧的</li>
+          <li><strong>同名且平台有重叠</strong> → 判定为同一音源的新版本 → 删旧装新</li>
+          <li><strong>信息不足（上面 6 条都判不出来）</strong> → 看<strong>本卡片第一个勾选项</strong>：勾了 = 删旧装新，没勾 = 改名并存</li>
+        </ol>
+        <p class="hint">注意「自动替换服务端同名旧版」<strong>只在第 7 条生效</strong>，它不是「所有同名都替换 —— 前 6 条命中哪条就按哪条走。另外：名字不作为服务端主键的平台（MusicSync）同名本来就能共存，第 5、7 条会直接新增为独立条目，不做无意义的改名。</p>
+      </div>
+
+      <div class="card">
         <h3 class="card-title">健康巡检（已灌入音源定期重测）</h3>
         <div class="grid-form">
           <label class="field"><span>巡检间隔（小时）</span><input class="input" id="cfgPatrolHours" type="number" min="1" max="720"></label>
         </div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（应用运行期间每分钟检查是否到期）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（按上面的间隔自动重测已灌入音源）</span></label>
           <label class="chk"><input type="checkbox" id="cfgPatrolDisable"><span>巡检失效的音源自动禁用（脚本被删/五平台全部取链失败才判定，网络抖动不误杀）</span></label>
         </div>
+        <p class="hint"><strong>「启用定时巡检」就是定时巡检的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次巡检是否已够间隔」，够了才真正开跑 —— <strong>实际触发比设定间隔最多晚 1 分钟</strong>，且<strong>软件必须保持运行</strong>。</p>
         <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
       </div>
 
@@ -296,10 +347,12 @@
           <label class="field"><span>只爬近期更新的仓库（天，0=不限）</span><input class="input" id="cfgCrawlSinceDays" type="number" min="0" max="365"></label>
         </div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgCrawlOn"><span>启用定时爬取（应用运行期间每分钟检查是否到期）</span></label>
-          <label class="chk"><input type="checkbox" id="cfgReplaceSame"><span>灌入时自动替换服务端同名旧版（先删后传；关闭则改名上传）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgCrawlOn"><span>启用定时爬取（按上面的间隔自动增量爬取）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgCrawlAutoImport"><span><strong>爬取结束后自动灌入</strong>（爬完先检测新音源，再把可用的灌到「灌入目标」账号）</span></label>
         </div>
-        <p class="hint">定时爬取为<strong>增量模式</strong>：同时读取仓库<strong>文件树</strong>与 <strong>Releases 资产</strong>（lx-ikun-music-sources 等仓库只把音源发在 release 里，旧版本不读 release 永远抓不到）；zip 压缩包自动下载解压。已抓取的按 blob sha / 资产标识判重<strong>跳过不重抓</strong>；内容有变化的标记「有更新」并重置检测结果，重新检测后灌入时会<strong>替换服务端同名旧版</strong>（LX 里上传同名音源必须先删旧的，猎手自动完成这两步；删除会触发服务端短暂重载，批量替换时留意服务端负载）。</p>
+        <p class="hint"><strong>「启用定时爬取」就是定时爬取的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次爬取是否已够间隔」（判据就是上面填的小时数），够了才真正开跑。所以设 2 天就是<strong>每 2 天跑一次</strong>，<strong>实际触发比设定间隔最多晚 1 分钟</strong>——「每分钟」只是核对节奏，不是爬取频率，两者不冲突；同时<strong>软件必须保持运行</strong>，关掉软件就不会跑。下面的「自动灌入」依赖它，上面没勾时不会触发。</p>
+        <p class="hint">勾了「爬取结束后自动灌入」后，每轮定时任务变成全自动三连：<strong>增量爬取 → 检测新增/内容变化的音源 → 把通过检测的灌入「灌入目标」账号</strong>。灌入目标与手动「检测并灌入」完全一致（设置里勾了「参与批量灌入」的账号，一个都没勾则用当前选中账号）；已经灌好的不会重复灌，脚本自检名字等保护规则照常生效。全过程在「运行日志」里以「定时」模块记录，可随时点停止按钮中断。</p>
+        <p class="hint">定时爬取为<strong>增量模式</strong>：同时读取仓库<strong>文件树</strong>与 <strong>Releases 资产</strong>（lx-ikun-music-sources 等仓库只把音源发在 release 里，旧版本不读 release 永远抓不到）；zip 压缩包自动下载解压。已抓取的按 blob sha / 资产标识判重<strong>跳过不重抓</strong>；内容有变化的标记「有更新」并重置检测结果，重新检测后灌入时按上面「灌入规则」卡片处理同名旧版（LX 里上传同名音源必须先删旧的，需要替换时猎手自动完成这两步；删除会触发服务端短暂重载，批量替换时留意服务端负载）。</p>
         <p class="hint"><strong>时间窗</strong>：设为 60 表示只爬 60 天内有提交的仓库（静默仓库整仓跳过，省 GitHub 配额），新发布的 release 资产也只收时间窗内的；<strong>树内文件不受此限制</strong>——活跃仓库里老文件的变更仍靠内容判重发现。填 0 关闭。</p>
       </div>
 

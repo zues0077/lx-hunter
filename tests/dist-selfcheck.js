@@ -46,11 +46,17 @@ console.log('\n== v1.6.8 灌入即公开源 + 开关/删除按 owner 路由 ==')
 const mainSrc = read('src/main/index.js')
 const lxSrc8 = read('src/core/lxservice.js')
 const upM = lxSrc8.match(/async function upload[\s\S]*?\n}/)
-ck('upload 固定 username=default（灌入即公开）', !!upM && /username: 'default'/.test(upM[0]) && !/cfg\.username/.test(upM[0]))
+// v1.8.0 起 username 统一由 targetUsername(cfg) 归一：'default'/'open'/'_open'/空 → 'default'，
+// 其余账号名原样下发（决定灌入落点）。断言改成检查唯一口径，别把实现细节锁死。
+ck('upload 走统一口径 targetUsername（灌入落点）', !!upM && /username: targetUsername\(cfg\)/.test(upM[0]) && !/cfg\.username\b/.test(upM[0]))
 const imM = lxSrc8.match(/async function importUrl[\s\S]*?\n}/)
-ck('importUrl 固定 username=default', !!imM && /username: 'default'/.test(imM[0]) && !/cfg\.username/.test(imM[0]))
+ck('importUrl 走统一口径 targetUsername', !!imM && /username: targetUsername\(cfg\)/.test(imM[0]))
 const vaM = lxSrc8.match(/async function validate[\s\S]*?\n}/)
-ck('validate 与灌入口径一致', !!vaM && /username: 'default'/.test(vaM[0]))
+ck('validate 与灌入口径一致', !!vaM && /username: targetUsername\(cfg\)/.test(vaM[0]))
+ck('targetUsername 归一 default/open/_open/空', (() => {
+  const m = lxSrc8.match(/function targetUsername\(cfg\)[\s\S]*?\n}/)
+  return !!m && /return 'default'/.test(m[0]) && /open/.test(m[0]) && /_open/.test(m[0])
+})())
 ck('toggle 按 owner 路由', (() => {
   const m = lxSrc8.match(/async function toggle\(cfg, id, enabled, opts\)[\s\S]*?\n}/)
   return !!m && /const username = \(owner && owner !== 'open'/.test(m[0])
@@ -76,7 +82,8 @@ ck('setPlatforms 按 owner 路由 username', (() => {
   return !!m && /const username = \(owner && owner !== 'open'/.test(m[0]) && /\n    username\n  \}/.test(m[0])
 })())
 ck('私有源写入路由注释完整', has(lxSrc2, /私有源（owner=admin 等）带 owner 字段返回，停用写入时按它路由身份/))
-ck('_safePlatforms 透传 owner', has(huntSrc, /async _safePlatforms\(cfg, id, disabledSources, what, owner\)/) && has(huntSrc, /lx\.setPlatforms\(cfg, id, disabledSources, \{ owner \}\)/))
+// v1.8.0 起 hunter 不再直调 lxservice，改为经适配器路由；owner 仍必须原样透传下去
+ck('_safePlatforms 透传 owner', has(huntSrc, /async _safePlatforms\(cfg, id, disabledSources, what, owner\)/) && has(huntSrc, /adapter\.setPlatforms\(svc\.acct, id, disabledSources, \{ owner \}\)/))
 ck('巡检建 ownerMap 并传入三处调用', (() => {
   const m = huntSrc.match(/const ownerById = new Map[\s\S]{0,200}/)
   return !!m && /ownerById\.get\(rec\.lxId\)/.test(huntSrc) && (huntSrc.match(/ownerById\.get\(rec\.lxId\)/g) || []).length === 3
@@ -210,7 +217,8 @@ ck('设置页有定时爬取开关', has(html, /cfgCrawlOn/) && has(html, /cfgCr
 ck('爬取信息位（上次爬取时间）', has(html, /crawlInfo/) && has(appSrc, /renderCrawlInfo/))
 ck('同名裁决以接口可用度为准（betterKeeper 深检比较）', has(huntSrc, /betterKeeper\(a, b\)/) && has(huntSrc, /deep\.checkedAt/) && has(huntSrc, /na !== nb/))
 ck('检测后同名翻案（更新版实测失效→恢复旧版）', has(huntSrc, /同名版本（此版本已失效）/) && has(huntSrc, /翻案|二次裁决/))
-ck('灌入同名替换门禁：检测失效不替换', has(huntSrc, /本地检测已失效（0 个可用平台），不替换/))
+// v1.8.0：这条门禁被收进 sameNameVerdict（规则集中在一处，措辞统一为「0 个可用平台」）
+ck('灌入同名替换门禁：检测失效不替换', has(huntSrc, /本地实测 0 个可用平台 → 不替换/))
 ck('灌入 stale 门禁豁免（旧检测不作数）', has(huntSrc, /!e\.usable && e\.deep && !e\.stale/))
 ck('releases 资产镜像回退（isGhAssetUrl）', has(netSrc, /isGhAssetUrl/))
 ck('版本标记与包版本一致', new RegExp('PC 版 v' + pkg.version.replace(/\./g, '\\.')).test(html) && pkg.version === require('../package.json').version)
@@ -236,14 +244,15 @@ ck('四列排序键与方向定义', has(sortSrc, /SORT_KEYS = \['name', 'plat',
 ck('状态权重：已灌入 60 垫底', has(sortSrc, /if \(imported && imported\[e\.id\]\) return 60/))
 ck('状态权重与徽章口径一致（dead 优先于疑似）', /if \(e\.status === 'dead'\) return 40[\s\S]{0,200}if \(e\.suspected \|\| isCheckedNoSource\(e\)\) return 20/.test(sortSrc))
 ck('平台可用性计分（可用平台数 + 整体可用 100）', has(sortSrc, /\(e\.usable \? 100 : 0\) \+ n/))
-ck('filtered 接入排序', has(appSrc, /return sortSources\(list, state\.sort, state\.imported\)/))
+// v1.8.0：排序用的「已灌入」改成按灌入目标算过的映射（只灌过 A 的源不该垫底装成已灌完）
+ck('filtered 接入排序（已灌入口径按目标）', has(appSrc, /return sortSources\(list, state\.sort, importedRankMap\(\)\)/))
 ck('表头四列可点排序（data-k）', (html.match(/class="[^"]*sortable" data-k="(name|plat|repo|status)"/g) || []).length === 4)
 ck('表头点击切换/反向', has(appSrc, /state\.sort\.key === k\) state\.sort\.dir = state\.sort\.dir === 'asc' \? 'desc' : 'asc'/))
 ck('排序箭头与 aria-sort 渲染', has(appSrc, /function renderSortHeads/) && has(appSrc, /aria-sort/))
 ck('排序选择持久化（localStorage）', has(appSrc, /lxh-sort/) && has(appSrc, /function saveSort/))
 ck('排序变化重置到第一页', has(appSrc, /saveSort\(\)\n    state\.page = 1/))
 ck('状态/平台排序下单行更新后重排（防位置漂移）', has(appSrc, /if \(state\.sort\.key === 'status' \|\| state\.sort\.key === 'plat'\) scheduleTableRefresh\(\)/))
-ck('「只选未灌入」按钮（排除已灌入/已合并）', has(html, /btnSelUnimported/) && has(appSrc, /btnSelUnimported/) && has(appSrc, /!state\.imported\[e\.id\] && !e\.deprecated/))
+ck('「只选未灌入」按钮（排除已灌入/已合并）', has(html, /btnSelUnimported/) && has(appSrc, /btnSelUnimported/) && has(appSrc, /importedState\(e\) !== 'all' && !e\.deprecated/))
 // 顺序要求：sorters.js → web-bridge.js（Web 版注入 window.api）→ app.js
 // （v1.7.3 起中间多了 web-bridge.js，不能用「紧邻」正则，改按出现位置判断）
 ck('renderer 脚本顺序：sorters → web-bridge → app', (() => {
@@ -308,6 +317,131 @@ ck('业务失败（源不存在）不中止', has(lxSvcSrc, /单条业务失败�
 ck('UI 中止提示（引导确认服务端状态）', has(appSrc, /d\.aborted/) && has(appSrc, /必要时重启容器/))
 ck('UI 大批量风险提示（连删假死）', has(appSrc, /连续重载脚本有假死风险/))
 ck('版本标记 v1.7.4（或更高）', pkg.version >= '1.7.4' && has(html, new RegExp('PC 版 v' + pkg.version.replace(/\./g, '\\.'))))
+
+// ---- v1.8.0：多平台账号 + 同时灌入 + 已灌入口径 ----
+console.log('\n== v1.8.0 多平台账号与灌入 ==')
+const svcIndexSrc = read('src/core/services/index.js')
+const storeSrc2 = read('src/core/store.js')
+ck('服务适配器分层（lxserver / songloft / musicsync）',
+  has(svcIndexSrc, /require\('\.\/songloft'\)/) && has(svcIndexSrc, /require\('\.\/musicsync'\)/) && has(svcIndexSrc, /require\('\.\/lxserver'\)/))
+ck('按「当前选中账号」路由（没有账号 → NO_ACCOUNT_ERR）',
+  has(svcIndexSrc, /function getActiveService/) && has(svcIndexSrc, /NO_ACCOUNT_ERR/))
+ck('配置含 platforms / activePlatformId', has(storeSrc2, /platforms: \[\]/) && has(storeSrc2, /activePlatformId/))
+ck('老配置自动迁移成第一个 lxserver 账号（老用户升级无感）', has(storeSrc2, /_migratePlatforms/))
+ck('批量灌入目标：勾了的全上，一个没勾退回当前账号',
+  has(svcIndexSrc, /function getBatchImportAccounts/) && has(svcIndexSrc, /p\.batchImport === true/))
+ck('灌入目标提示（防「以为是灌 A 结果灌到 B」）', has(appSrc, /灌入目标：/) && has(appSrc, /function batchImportTargets/))
+ck('灌入结果带平台归属（多平台才分得清落在哪）',
+  has(huntSrc, /platformId: svc\.acct\.id, platformType: svc\.type/) && has(html, /平台账号/))
+ck('已灌入记录按平台记账（importedTo[]）',
+  has(huntSrc, /importedTo: list/) && has(huntSrc, /_dropPlatformFromImported/))
+ck('摘除平台时数组要写回（否则撤回后仍以为该平台有份）', has(huntSrc, /importedTo: rest/))
+ck('改名上传按 svc 路由（原来用 _active() 会把第二平台灌错地方）', has(huntSrc, /async _uploadRenamed\(svc, code, baseName/))
+ck('同名裁决抽成纯函数（规则可测可排错）', has(huntSrc, /sameNameVerdict\(e, srv, code, cfg\)/))
+ck('同名可比时才比可用平台数（拿不到数不瞎拦）', has(huntSrc, /srvN > 0 && newN >= 0 && newN < srvN/))
+ck('同名平台零交集 → 改名并存（不删服务端旧条）', has(huntSrc, /完全不重叠/))
+ck('已灌入不硬跳过：服务端上还在才 skip', has(huntSrc, /serverIds\.has\(importedRecs\[e\.contentHash\]\.lxId\)/))
+ck('读不到服务端列表时退回本地账本（防抖动重灌一库）', has(huntSrc, /同名保护与「是否已灌入」判定将退回本地记录/))
+ck('已灌入账本按账号过滤（老记录归当前账号）', has(huntSrc, /_importedRecsFor\(platformId, activeId\)/))
+// 渲染层的「已灌入」口径必须跟着灌入目标走，否则只灌过 A 的源加了 B 之后永远补灌不进去
+ck('库内「已灌入」按灌入目标判定', has(appSrc, /case 'imported': if \(importedState\(e\) !== 'all'\) return false; break/))
+ck('「只选未灌入」不排除仅灌入部分平台的源', has(appSrc, /importedState\(e\) !== 'all' && !e\.deprecated/))
+ck('「检测并灌入」同样按目标口径筛', has(appSrc, /!e\.deprecated && importedState\(e\) !== 'all'\)\.map\(e => e\.id\)/))
+ck('导出「已灌入」范围同口径', has(appSrc, /case 'imported': return importedState\(e\) === 'all'/))
+ck('部分灌入的徽章写清还缺哪个账号', has(appSrc, /已灌入 \$\{t\.length - miss\.length\}\/\$\{t\.length\}/))
+ck('切账号 / 改批量勾选后重画表格（否则徽章停留旧口径）', has(appSrc, /if \(state\.sources\.length\) renderTable\(\)/))
+ck('已灌入列表只看当前账号（不做全账号合并视图）', !has(huntSrc, /listInstalledAll/))
+ck('撤回判定与核心层一致（importedTo 也算）', has(appSrc, /rec\.importedTo\.some\(x => x && x\.platformId === active\.id\)/))
+ck('已灌入页支持多选删除（串行 + 逐条进度 + 全选框）',
+  has(appSrc, /btnInsDelSel/) && has(appSrc, /insChkAll/) && has(html, /id="insChkAll"/))
+ck('删除按每条音源各自的 owner 路由（否则私有源删不掉）', has(appSrc, /api\.serviceRemove\([^)]*owner/))
+ck('删不存在的源算「无需删除」而非失败', has(appSrc, /status: 'gone'/) || has(appSrc, /无需删除/))
+// ---- 平台「名字是否 key」+ 改名安全阀（真实服务端实测后补的护栏）----
+ck('适配器声明「名字是否 key」（MusicSync false：同名可共存）',
+  has(read('src/core/services/musicsync.js'), /uniqueName: false/) &&
+  has(read('src/core/services/songloft.js'), /uniqueName: true/))
+ck('名字不是 key 的平台：同名直接上新条目（不删不改他人的源）',
+  has(huntSrc, /ctx\.uniqueName === false/) && has(huntSrc, /可共存/))
+ck('规划阶段就按平台能力传 uniqueName', has(huntSrc, /uniqueName: p\.svc\.adapter\.uniqueName !== false/))
+ck('改名安全阀：脚本自检名字时拒绝改名（改名会变坏源）',
+  has(huntSrc, /function renameSelfCheck/) && has(huntSrc, /renameUnsafe: true/))
+ck('执行阶段二次兜底（宁可不灌也不上传坏源）',
+  has(huntSrc, /const origName = \(extractMeta\(code\) \|\| \{\}\)\.name/) && has(huntSrc, /改名会让它初始化失败/))
+ck('平台侧业务态失败给可操作指引（正在检测 / 初始化失败）',
+  has(appSrc, /function delBizHint/) && has(appSrc, /音源正在检测|正在检测/))
+
+// ---- 第三轮反馈：统计口径 / 账本对账 / MusicSync 不重复堆源 / 已灌入页排序 ----
+ck('MusicSync 列表回传脚本指纹（内容级判重的前提）',
+  has(read('src/core/services/musicsync.js'), /hash: typeof s\.script === 'string'/) &&
+  has(read('src/core/services/musicsync.js'), /size: typeof s\.script === 'string'/))
+ck('MusicSync 优先用服务端解析出的平台（sources）',
+  has(read('src/core/services/musicsync.js'), /platKeysOf\(s\.sources\)/))
+ck('服务端已有同内容 → 不重复灌（按脚本正文指纹，不看本地账本）',
+  has(huntSrc, /serverByHash\[e\.contentHash\]/) && has(huntSrc, /服务端已有内容完全相同的音源/))
+ck('有内容指纹时以指纹为准（长度相同内容不同不算同内容）',
+  has(huntSrc, /const sameHash = !!\(e\.contentHash && srv\.hash/))
+ck('同名裁决对 MusicSync 也生效（区别只在不需要改名）',
+  has(huntSrc, /v\.act === 'rename' && ctx\.uniqueName === false/))
+ck('账本对账（服务端已不存在 → 摘掉本地记录）', has(huntSrc, /reconcileImported\(platformId, liveIds\)/))
+ck('对账只在读到列表时做（读失败不能删记录）', has(huntSrc, /if \(p\.serverIds\) \{/))
+ck('对账接线完整（preload / IPC / Web 路由 / Web 桥）',
+  has(read('src/main/preload.js'), /serviceReconcile/) &&
+  has(read('src/main/index.js'), /'service:reconcile'/) &&
+  has(read('src/server/web.js'), /\/api\/service\/reconcile/) &&
+  has(read('src/renderer/web-bridge.js'), /serviceReconcile/))
+ck('统计卡「已灌入」按当前账号口径（拿服务端列表的真实条数）',
+  has(appSrc, /installedFor === state\.activePlatformId/) && has(appSrc, /已灌入 · 当前账号/))
+ck('已灌入页刷新即对账 + 启动静默对账',
+  has(appSrc, /await reconcileLedger\(active\.id, state\.installed\)/) && has(appSrc, /function syncInstalledQuiet/))
+ck('已灌入页状态列可排序（失效/停用在前）',
+  has(html, /data-k="istatus"/) && has(appSrc, /state\.insSort/) && has(appSrc, /function renderInstalledRows/))
+ck('一键选中失效/停用音源（便于批量删除）',
+  has(html, /id="btnInsSelFailed"/) && has(appSrc, /btnInsSelFailed/) && has(appSrc, /巡检失效/))
+ck('行内显示巡检结论（巡检失效徽章）', has(appSrc, /function insRowState/) && has(appSrc, /badge dead/))
+
+// ---- v1.9.0：定时爬取后自动灌入 + 设置页定时/灌入语义澄清 ----
+console.log('\n== v1.9.0 定时爬取后自动灌入 + 设置页语义 ==')
+const webSrc9 = read('src/server/web.js')
+const storeSrc9 = read('src/core/store.js')
+ck('新增配置 crawlAutoImport（默认关 → 升级后行为不变）', has(storeSrc9, /crawlAutoImport: false/))
+ck('「同名自动替换」注释写死为兜底语义（只管第 7 条）',
+  has(storeSrc9, /同名音源裁决的\*\*兜底\*\*开关/))
+ck('全链路入口 runAutoPipeline（爬取 → 检测 → 灌入）',
+  has(huntSrc, /async runAutoPipeline\(\)/) && has(huntSrc, /定时任务：开始增量爬取…/))
+ck('爬取前拍快照，只检测新增/变化/从未测过的条目（不整库重测）',
+  has(huntSrc, /const isNew = !prev/) &&
+  has(huntSrc, /const changed = !!prev && \(prev\.hash !== \(e\.contentHash \|\| ''\) \|\| e\.stale\)/))
+ck('灌入候选粗筛：目标账号都灌过才排除，部分灌过仍进候选补灌',
+  has(huntSrc, /_importedEverywhere\(eid, targetIds, activeId\)/) &&
+  has(huntSrc, /targetIds\.every\(id => got\.has\(id\)\)/))
+ck('自动灌入复用批量灌入目标口径（不另开一套目标规则）',
+  has(huntSrc, /const targets = getBatchImportAccounts\(cfg\)/))
+ck('空转短路：没有新条目 / 没有可灌入的都不白跑',
+  has(huntSrc, /out\.skipped = 'no-new-sources'/) && has(huntSrc, /out\.skipped = 'nothing-to-import'/))
+ck('检测抛错时主动放开任务锁（否则紧随其后的灌入会被自己挡住）',
+  has(huntSrc, /先把任务锁放开/))
+ck('桌面版 + Web 版定时器都按 crawlAutoImport 分流到 runAutoPipeline',
+  has(mainSrc, /cfg\.crawlAutoImport/) && has(mainSrc, /runAutoPipeline\(\)/) &&
+  has(webSrc9, /cfg\.crawlAutoImport/) && has(webSrc9, /runAutoPipeline\(\)/))
+ck('两版都保持「每分钟核对、够了间隔才跑」（间隔 ≠ 轮询节奏）',
+  has(mainSrc, /Date\.now\(\) - last < hours \* 3600 \* 1000\) return/) &&
+  has(webSrc9, /Date\.now\(\) - last < hours \* 3600 \* 1000\) return/))
+ck('间隔在日志里说人话（48 → 2 天（48 小时））', has(huntSrc, /function formatIntervalHours/))
+ck('设置页新增「爬取结束后自动灌入」开关并完整接线',
+  has(html, /id="cfgCrawlAutoImport"/) && has(appSrc, /crawlAutoImport: \$\('cfgCrawlAutoImport'\)\.checked/))
+ck('同名替换开关已搬进独立「灌入规则」卡片（不再挂在定时爬取卡片里）',
+  html.indexOf('灌入规则（同名音源怎么处理）') < html.indexOf('id="cfgReplaceSame"') &&
+  html.indexOf('id="cfgReplaceSame"') < html.indexOf('定时爬取（增量发现新音源）'))
+ck('灌入后自动启用 / 跳过未通过 也归入「灌入规则」',
+  html.indexOf('id="cfgEnableAfter"') > html.indexOf('灌入规则（同名音源怎么处理）') &&
+  html.indexOf('id="cfgSkipUnusable"') > html.indexOf('灌入规则（同名音源怎么处理）'))
+ck('界面直接印出同名裁决 7 条顺序，并标明自动替换只管第 7 条',
+  has(html, /<ol class="rules">/) && has(html, /只在第 7 条生效/))
+ck('定时/巡检勾选文案讲明「总开关 + 每分钟只是核对节奏」',
+  has(html, /就是定时爬取的总开关/) && has(html, /就是定时巡检的总开关/) && has(html, /每分钟<\/strong>只是核对节奏|「每分钟」只是核对节奏/))
+ck('保存设置的联动提示（自动灌入依赖定时爬取 / 没有批量目标）',
+  has(appSrc, /需要上面「启用定时爬取」也勾上才会触发/) && has(appSrc, /自动灌入只会灌到当前选中账号/))
+ck('「参与批量灌入」说明已覆盖定时自动灌入', has(html, /以及「定时爬取后自动灌入」同时灌入/))
 
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)
