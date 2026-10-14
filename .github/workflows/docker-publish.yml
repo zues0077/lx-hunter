@@ -58,8 +58,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 只保留带 tag 的当前版本；删除历史推送遗留的无 tag digest，
-  # 避免旧 digest 仍可被匿名按 digest 拉取。
+  # 删除「未被任何当前 tag 引用的孤儿 digest」。
+  # 关键点：GHCR 里多架构镜像的 amd64/arm64 子清单是独立的「无 tag 版本」，
+  # 但它们被 latest/1.7.5/1.7/main 的索引引用——必须保留，否则索引悬空 → pull 报 manifest unknown。
+  # 所以先算出「保留集合」= 各 tag 索引本身 + 它们递归引用的所有子 digest，再只删集合外的。
   cleanup:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -68,29 +70,45 @@ jobs:
       packages: write
       contents: read
     steps:
-      - name: Delete untagged package versions
+      - name: Delete orphaned package versions only
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API: https://api.github.com
+          REG: https://ghcr.io
           PKG: ${{ env.IMAGE_NAME }}
           OWNER: ${{ github.repository_owner }}
         run: |
           set -uo pipefail
           NAME="${PKG#*/}"
+          ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
           echo "== 清理 $OWNER 的 container 包：$NAME =="
-          LIST=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
+          KEEP=$(mktemp)
+          # 1) 各 tag 索引本身的 digest（来自 docker-content-digest 响应头）
+          for T in latest 1.7.5 1.7 main; do
+            H=$(curl -sS -D - -o /dev/null -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+              "$REG/v2/$NAME/manifests/$T" | grep -i 'docker-content-digest' | tr -d '\r' | sed 's/.*: //')
+            [ -n "$H" ] && echo "$H" >> "$KEEP"
+            # 2) 索引递归引用的子 digest（amd64/arm64 镜像清单等）
+            curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" "$REG/v2/$NAME/manifests/$T" \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const m=JSON.parse(s);const ds=[];(m.manifests||[]).forEach(x=>ds.push(x.digest));if(m.config&&m.config.digest)ds.push(m.config.digest);ds.forEach(d=>console.log(d))}catch(e){}})'
+          done | sort -u >> "$KEEP"
+          sort -u "$KEEP" -o "$KEEP"
+          echo "保留集合（$(wc -l < "$KEEP") 个 digest）："; cat "$KEEP"
+          # 3) 删除「name 形如 sha256 且不在保留集合」的版本
+          LIST=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "$API/users/$OWNER/packages/container/$NAME/versions?per_page=100")
-          echo "$LIST" | jq -r 'if type=="array" then .[] | select((.metadata.container.tags // []) | length == 0) | .id else empty end' \
-            | while read -r id; do
-              [ -z "$id" ] && continue
+          echo "$LIST" | jq -r '.[] | "\(.id) \(.name)"' | while read -r id nm; do
+            case "$nm" in sha256:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) continue ;; esac
+            if ! grep -qx "$nm" "$KEEP"; then
               code=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
                 "$API/users/$OWNER/packages/container/$NAME/versions/$id")
-              echo "删除无 tag 版本 $id -> HTTP $code"
-            done
+              echo "删除孤儿版本 $id ($nm) -> HTTP $code"
+            else
+              echo "保留 $id ($nm)"
+            fi
+          done
           echo "== 剩余版本 =="
           curl -sS -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
