@@ -84,10 +84,13 @@ jobs:
   # 保留集合 = 所有「带 tag」的版本 digest + 递归引用的子 digest/config/layers，只删集合外的。
   # tag 名单从 Packages API 动态获取（分页拉全），不硬编码，版本号变化也不会漏。
   #
-  # 历史事故记录（2026-10-14）：
-  #   清理 job 曾把 manifest URL 写成 /v2/<name>/（漏了 owner），所有请求 400 NAME_INVALID，
-  #   递归展开静默零输出，保留集合只剩索引本身 → 子清单被当孤儿删光 → 索引悬空 →
-  #   NAS 拉取报 manifest unknown。修复：URL 必须用完整的 owner/name。
+  # 历史事故记录（2026-10-14，两个 bug 都踩过）：
+  #   bug1：manifest URL 写成 /v2/<name>/（漏了 owner）→ 全部 400 NAME_INVALID，
+  #         node 解析错误 JSON 不报错、只是没有输出 → 递归静默失效 → 子清单被当孤儿删光 →
+  #         索引悬空 → NAS 拉取报 manifest unknown。
+  #   bug2：GITHUB_TOKEN 直接 Bearer 调 ghcr.io /v2/ → 403 UNAUTHORIZED（docker login 能用
+  #         是因为守护进程自动去 token 端点换了令牌）。递归同样静默失效，靠年龄保护才没误删。
+  #   修复：URL 用完整 owner/name；先用 Basic 认证经 token 端点换取 REG_TOKEN 并预检，失败即终止。
   cleanup:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -125,6 +128,25 @@ jobs:
             echo "::error::版本列表 API 返回异常，终止清理"; exit 1
           fi
 
+          # 0.5) 换取 registry token：GITHUB_TOKEN 不能直接 Bearer 调 ghcr.io /v2/
+          #      （会 403 UNAUTHORIZED——docker login 能用是因为守护进程自动去 token 端点换了令牌）。
+          #      必须经 token 端点 Basic 认证换取，换不到就直接终止，绝不在认证存疑时继续。
+          REG_TOKEN=$(curl -sS -m 20 "https://ghcr.io/token?scope=repository:${PKG}:pull&service=ghcr.io" \
+            -u "${OWNER}:${GH_TOKEN}" | jq -r '.token // empty')
+          if [ -z "$REG_TOKEN" ]; then
+            echo "::error::无法获取 ghcr.io registry token，终止清理（不做任何删除）"; exit 1
+          fi
+          # 0.6) 令牌预检：拉第一个带 tag 的索引，非 200 即终止（此时还没有任何删除动作）
+          PROBE=$(echo "$LIST" | jq -r '.[] | select((.metadata.container.tags // []) | length > 0) | .name' | head -1)
+          if [ -n "$PROBE" ]; then
+            PC=$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $REG_TOKEN" -H "Accept: $ACCEPT" \
+              "$REG/v2/$PKG/manifests/$PROBE")
+            if [ "$PC" != "200" ]; then
+              echo "::error::registry 令牌预检失败（$PROBE -> HTTP $PC），终止清理"; exit 1
+            fi
+            echo "registry 令牌预检通过（$PROBE -> 200）"
+          fi
+
           # 1) 保留集合种子 = 所有「带 tag」的版本 digest（不硬编码 tag 名，版本号变化也不会漏）
           KEEP=$(mktemp); QUEUE=$(mktemp)
           echo "$LIST" | jq -r '.[] | select((.metadata.container.tags // []) | length > 0) | .name' > "$QUEUE"
@@ -145,7 +167,7 @@ jobs:
               echo "$D" >> "$KEEP"
               BODY=$(mktemp)
               CODE=$(curl -sS -o "$BODY" -w "%{http_code}" \
-                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+                -H "Authorization: Bearer $REG_TOKEN" -H "Accept: $ACCEPT" \
                 "$REG/v2/$PKG/manifests/$D")
               if [ "$CODE" != "200" ]; then
                 echo "::warning::manifest $D 拉取失败 HTTP $CODE，跳过递归"
@@ -183,7 +205,7 @@ jobs:
             case "$D" in sha256:*) ;; *) continue ;; esac
             BODY=$(mktemp)
             CODE=$(curl -sS -o "$BODY" -w "%{http_code}" \
-              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+              -H "Authorization: Bearer $REG_TOKEN" -H "Accept: $ACCEPT" \
               "$REG/v2/$PKG/manifests/$D")
             if [ "$CODE" != "200" ]; then
               echo "::error::带 tag 索引 $D 不可达 HTTP $CODE"; BAD=1; rm -f "$BODY"; continue
@@ -193,7 +215,7 @@ jobs:
             while read -r S; do
               case "$S" in sha256:*) ;; *) continue ;; esac
               SC=$(curl -sS -o /dev/null -w "%{http_code}" \
-                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+                -H "Authorization: Bearer $REG_TOKEN" -H "Accept: $ACCEPT" \
                 "$REG/v2/$PKG/manifests/$S")
               if [ "$SC" != "200" ]; then
                 echo "::error::索引 $D 的子清单 $S 不可达 HTTP $SC（悬空！）"; BAD=1
