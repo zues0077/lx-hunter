@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      retag_version:
+        description: '把版本号 tag（取 package.json 的 version，如 1.7.5 / 1.7）重新指向本次构建；用于修复悬空索引后重新打 tag'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -36,6 +41,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract version from package.json
+        id: ver
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if [ -z "$V" ]; then echo "::error::无法从 package.json 读取 version"; exit 1; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "mm=$(echo "$V" | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -46,6 +59,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ inputs.retag_version == true }}
+            type=raw,value=${{ steps.ver.outputs.mm }},enable=${{ inputs.retag_version == true }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -60,8 +75,9 @@ jobs:
 
   # 删除「未被任何当前 tag 引用的孤儿 digest」。
   # 关键点：GHCR 里多架构镜像的 amd64/arm64 子清单是独立的「无 tag 版本」，
-  # 但它们被 latest/1.7.5/1.7/main 的索引引用——必须保留，否则索引悬空 → pull 报 manifest unknown。
-  # 所以先算出「保留集合」= 各 tag 索引本身 + 它们递归引用的所有子 digest，再只删集合外的。
+  # 但它们被各版本 tag 的索引引用——必须保留，否则索引悬空 → pull 报 manifest unknown。
+  # 保留集合 = 所有「带 tag」的版本 digest + 递归引用的子 digest/config/layers，只删集合外的。
+  # tag 名单从 Packages API 动态获取（分页拉全），不硬编码，版本号变化也不会漏。
   cleanup:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -83,21 +99,40 @@ jobs:
           NAME="${PKG#*/}"
           ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
           echo "== 清理 $OWNER 的 container 包：$NAME =="
-          KEEP=$(mktemp)
-          # 1) 各 tag 索引本身的 digest（来自 docker-content-digest 响应头）
-          for T in latest 1.7.5 1.7 main; do
-            H=$(curl -sS -D - -o /dev/null -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
-              "$REG/v2/$NAME/manifests/$T" | grep -i 'docker-content-digest' | tr -d '\r' | sed 's/.*: //')
-            [ -n "$H" ] && echo "$H" >> "$KEEP"
-            # 2) 索引递归引用的子 digest（amd64/arm64 镜像清单等）
-            curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" "$REG/v2/$NAME/manifests/$T" \
-              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const m=JSON.parse(s);const ds=[];(m.manifests||[]).forEach(x=>ds.push(x.digest));if(m.config&&m.config.digest)ds.push(m.config.digest);ds.forEach(d=>console.log(d))}catch(e){}})'
-          done | sort -u >> "$KEEP"
-          sort -u "$KEEP" -o "$KEEP"
+          # 0) 分页拉全量版本列表（带 tag 的版本不一定落在第一页，必须翻完再算保留集合）
+          PDIR=$(mktemp -d); PAGE=1
+          while :; do
+            curl -sS -o "$PDIR/$PAGE.json" -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$API/users/$OWNER/packages/container/$NAME/versions?per_page=100&page=$PAGE"
+            N=$(jq 'length' "$PDIR/$PAGE.json" 2>/dev/null || echo 0)
+            [ "$N" -lt 100 ] && break
+            PAGE=$((PAGE+1)); [ "$PAGE" -gt 20 ] && break
+          done
+          LIST=$(jq -s 'add' "$PDIR"/*.json)
+          if ! echo "$LIST" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "::error::版本列表 API 返回异常，终止清理"; exit 1
+          fi
+          # 1) 保留集合种子 = 所有「带 tag」的版本 digest（不硬编码 tag 名，版本号变化也不会漏）
+          KEEP=$(mktemp); QUEUE=$(mktemp)
+          echo "$LIST" | jq -r '.[] | select((.metadata.container.tags // []) | length > 0) | .name' > "$QUEUE"
+          # 2) 递归展开：索引 -> 子清单（amd64/arm64/attestation）-> config/layers
+          while [ -s "$QUEUE" ]; do
+            NEXT=$(mktemp)
+            while read -r D; do
+              case "$D" in sha256:*) ;; *) continue ;; esac
+              grep -qxF "$D" "$KEEP" && continue
+              echo "$D" >> "$KEEP"
+              curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" "$REG/v2/$NAME/manifests/$D" \
+                | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const m=JSON.parse(s);(m.manifests||[]).forEach(x=>console.log(x.digest));if(m.config&&m.config.digest)console.log(m.config.digest);(m.layers||[]).forEach(x=>console.log(x.digest))}catch(e){}})'
+            done < "$QUEUE" >> "$NEXT"
+            sort -u "$NEXT" -o "$NEXT"; mv "$NEXT" "$QUEUE"
+          done
+          # 保险：保留集合为空说明 API 出了故障，此时删任何东西都是灾难，直接终止
+          if [ ! -s "$KEEP" ]; then
+            echo "::error::保留集合为空（无任何带 tag 的版本），终止清理"; exit 1
+          fi
           echo "保留集合（$(wc -l < "$KEEP") 个 digest）："; cat "$KEEP"
           # 3) 删除「name 形如 sha256 且不在保留集合」的版本
-          LIST=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-            "$API/users/$OWNER/packages/container/$NAME/versions?per_page=100")
           echo "$LIST" | jq -r '.[] | "\(.id) \(.name)"' | while read -r id nm; do
             case "$nm" in sha256:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) continue ;; esac
             if ! grep -qx "$nm" "$KEEP"; then
