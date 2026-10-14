@@ -13,6 +13,11 @@ on:
         type: boolean
         default: false
 
+# 同一 ref 上的运行串行化：避免两次构建的清理 job 并发互删对方刚推的子清单
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -78,6 +83,11 @@ jobs:
   # 但它们被各版本 tag 的索引引用——必须保留，否则索引悬空 → pull 报 manifest unknown。
   # 保留集合 = 所有「带 tag」的版本 digest + 递归引用的子 digest/config/layers，只删集合外的。
   # tag 名单从 Packages API 动态获取（分页拉全），不硬编码，版本号变化也不会漏。
+  #
+  # 历史事故记录（2026-10-14）：
+  #   清理 job 曾把 manifest URL 写成 /v2/<name>/（漏了 owner），所有请求 400 NAME_INVALID，
+  #   递归展开静默零输出，保留集合只剩索引本身 → 子清单被当孤儿删光 → 索引悬空 →
+  #   NAS 拉取报 manifest unknown。修复：URL 必须用完整的 owner/name。
   cleanup:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -87,7 +97,6 @@ jobs:
       contents: read
     steps:
       - name: Delete orphaned package versions only
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API: https://api.github.com
@@ -96,9 +105,12 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -uo pipefail
+          # PKG  = zues0077/lx-hunter（完整 owner/name，registry manifest URL 必须用它）
+          # NAME = lx-hunter（仅用于 Packages API 路径，owner 在 URL 里单独一段）
           NAME="${PKG#*/}"
           ACCEPT="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
-          echo "== 清理 $OWNER 的 container 包：$NAME =="
+          echo "== 清理 $OWNER 的 container 包：$NAME（registry 路径：$PKG）=="
+
           # 0) 分页拉全量版本列表（带 tag 的版本不一定落在第一页，必须翻完再算保留集合）
           PDIR=$(mktemp -d); PAGE=1
           while :; do
@@ -112,29 +124,47 @@ jobs:
           if ! echo "$LIST" | jq -e 'type == "array"' >/dev/null 2>&1; then
             echo "::error::版本列表 API 返回异常，终止清理"; exit 1
           fi
+
           # 1) 保留集合种子 = 所有「带 tag」的版本 digest（不硬编码 tag 名，版本号变化也不会漏）
           KEEP=$(mktemp); QUEUE=$(mktemp)
           echo "$LIST" | jq -r '.[] | select((.metadata.container.tags // []) | length > 0) | .name' > "$QUEUE"
+          # 保险：保留集合为空说明 API 出了故障，此时删任何东西都是灾难，直接终止
+          if [ ! -s "$QUEUE" ]; then
+            echo "::error::没有任何带 tag 的版本，终止清理"; exit 1
+          fi
+
           # 2) 递归展开：索引 -> 子清单（amd64/arm64/attestation）-> config/layers
+          #    ⚠️ manifest URL 必须是 $REG/v2/$PKG/manifests/... （完整 owner/name）。
+          #       写成 $NAME（缺 owner）会 400 NAME_INVALID，且 node 解析错误 JSON 不报错、
+          #       只是没有输出——递归会静默失效，进而误删全部子清单。
           while [ -s "$QUEUE" ]; do
             NEXT=$(mktemp)
             while read -r D; do
               case "$D" in sha256:*) ;; *) continue ;; esac
               grep -qxF "$D" "$KEEP" && continue
               echo "$D" >> "$KEEP"
-              curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" "$REG/v2/$NAME/manifests/$D" \
-                | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const m=JSON.parse(s);(m.manifests||[]).forEach(x=>console.log(x.digest));if(m.config&&m.config.digest)console.log(m.config.digest);(m.layers||[]).forEach(x=>console.log(x.digest))}catch(e){}})'
+              BODY=$(mktemp)
+              CODE=$(curl -sS -o "$BODY" -w "%{http_code}" \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+                "$REG/v2/$PKG/manifests/$D")
+              if [ "$CODE" != "200" ]; then
+                echo "::warning::manifest $D 拉取失败 HTTP $CODE，跳过递归"
+                rm -f "$BODY"; continue
+              fi
+              node -e 'let s=require("fs").readFileSync(process.argv[1],"utf8");try{const m=JSON.parse(s);(m.manifests||[]).forEach(x=>console.log(x.digest));if(m.config&&m.config.digest)console.log(m.config.digest);(m.layers||[]).forEach(x=>console.log(x.digest))}catch(e){}' "$BODY"
+              rm -f "$BODY"
             done < "$QUEUE" >> "$NEXT"
             sort -u "$NEXT" -o "$NEXT"; mv "$NEXT" "$QUEUE"
           done
-          # 保险：保留集合为空说明 API 出了故障，此时删任何东西都是灾难，直接终止
-          if [ ! -s "$KEEP" ]; then
-            echo "::error::保留集合为空（无任何带 tag 的版本），终止清理"; exit 1
-          fi
           echo "保留集合（$(wc -l < "$KEEP") 个 digest）："; cat "$KEEP"
-          # 3) 删除「name 形如 sha256 且不在保留集合」的版本
-          echo "$LIST" | jq -r '.[] | "\(.id) \(.name)"' | while read -r id nm; do
-            case "$nm" in sha256:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) continue ;; esac
+
+          # 3) 删除「name 形如 sha256、不在保留集合、且创建超过 5 分钟」的版本。
+          #    5 分钟年龄保护：避免与并发/刚完成的推送竞态，误删尚未被索引引用到的子清单。
+          CUTOFF=$(( $(date +%s) - 300 ))
+          echo "$LIST" | jq -r --argjson cutoff "$CUTOFF" \
+            '.[] | select((.created_at | fromdateiso8601) < $cutoff) | "\(.id) \(.name)"' \
+          | while read -r id nm; do
+            case "$nm" in sha256:[0-9a-f]*) ;; *) continue ;; esac
             if ! grep -qx "$nm" "$KEEP"; then
               code=$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
                 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
@@ -144,8 +174,33 @@ jobs:
               echo "保留 $id ($nm)"
             fi
           done
-          echo "== 剩余版本 =="
-          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$API/users/$OWNER/packages/container/$NAME/versions?per_page=100" \
-            | jq -r '.[] | "\(.id)  tags=\(.metadata.container.tags // [])  \(.created_at)"'
+
+          # 4) 悬空自检：每个带 tag 的索引，其子清单必须全部可达。
+          #    有任何悬空即 ::error:: 并以非零退出——宁可构建红，也不要静默留坏镜像。
+          echo "== 悬空自检 =="
+          BAD=0
+          while read -r D; do
+            case "$D" in sha256:*) ;; *) continue ;; esac
+            BODY=$(mktemp)
+            CODE=$(curl -sS -o "$BODY" -w "%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+              "$REG/v2/$PKG/manifests/$D")
+            if [ "$CODE" != "200" ]; then
+              echo "::error::带 tag 索引 $D 不可达 HTTP $CODE"; BAD=1; rm -f "$BODY"; continue
+            fi
+            SUBS=$(node -e 'let s=require("fs").readFileSync(process.argv[1],"utf8");try{const m=JSON.parse(s);(m.manifests||[]).forEach(x=>console.log(x.digest))}catch(e){}' "$BODY")
+            rm -f "$BODY"
+            while read -r S; do
+              case "$S" in sha256:*) ;; *) continue ;; esac
+              SC=$(curl -sS -o /dev/null -w "%{http_code}" \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: $ACCEPT" \
+                "$REG/v2/$PKG/manifests/$S")
+              if [ "$SC" != "200" ]; then
+                echo "::error::索引 $D 的子清单 $S 不可达 HTTP $SC（悬空！）"; BAD=1
+              fi
+            done <<< "$SUBS"
+          done < <(echo "$LIST" | jq -r '.[] | select((.metadata.container.tags // []) | length > 0) | .name')
+          if [ "$BAD" = "1" ]; then
+            echo "::error::存在悬空 tag，需要重建或 retag 修复"; exit 1
+          fi
+          echo "自检通过：所有带 tag 的镜像结构完整"
