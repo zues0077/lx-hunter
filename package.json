@@ -1,6 +1,6 @@
 {
   "name": "lx-hunter-pc",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "description": "音源猎手 PC 版 — GitHub 洛雪音源爬取、沙箱可用性检测、批量灌入自建 LX MUSIC 服务",
   "main": "src/main/index.js",
   "author": "lx-hunter-pc",

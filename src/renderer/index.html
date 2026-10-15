@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.0</div>
+        <div class="brand-sub">PC 版 v1.9.2</div>
       </div>
     </div>
     <nav class="nav">
@@ -27,6 +27,7 @@
     <div class="sidebar-foot">
       <div class="conn" id="connChip"><span class="dot"></span><span id="connText">未连接</span></div>
       <button class="btn-link" id="themeBtn">切换主题</button>
+      <a class="btn-link gh-link" id="ghLink" href="https://github.com/zues0077/lx-hunter" target="_blank" rel="noopener noreferrer" title="音源猎手源码（GitHub）">⌨ GitHub · lx-hunter</a>
     </div>
   </aside>
 
@@ -242,7 +243,7 @@
 
       <div class="card">
         <h3 class="card-title">服务平台账号</h3>
-        <p class="hint">可配置多个平台、多个账号（如自建 LX Server、Songloft 内 lxmusic 插件、MusicSync）。<b>同步 / 巡检 / 撤回 / 公共音源清理 / 已灌入列表只作用于「当前选中账号」；只有灌入可以多选</b>——在账号详情里勾「参与批量灌入」后，灌入会同时打进所有勾了的账号（同名音源会对比哪边可用平台更多，留多的那个）。灌入记录按平台分账号保存。点账号右侧「设为当前」即可切换。</p>
+        <p class="hint">可配置多个平台、多个账号（如自建 LX Server、Geelonn LX Server、Songloft 内 lxmusic 插件、MusicSync）。<b>同步 / 巡检 / 撤回 / 公共音源清理 / 已灌入列表只作用于「当前选中账号」；只有灌入可以多选</b>——在账号详情里勾「参与批量灌入」后，灌入会同时打进所有勾了的账号（同名音源会对比哪边可用平台更多，留多的那个）。灌入记录按平台分账号保存。点账号右侧「设为当前」即可切换。</p>
         <div id="platformList" class="acct-list"></div>
         <button class="btn" id="btnAddAccount">+ 添加账号</button>
         <div class="card account-form" id="accountForm" hidden>
@@ -251,6 +252,7 @@
             <label class="field"><span>平台类型</span>
               <select class="input" id="accType">
                 <option value="lxserver">LX Server（自建服务）</option>
+                <option value="geelonn">Geelonn LX Server（gefl24/lxserver）</option>
                 <option value="songloft">Songloft（lxmusic 插件）</option>
                 <option value="musicsync">MusicSync（多用户同步）</option>
               </select>
@@ -258,7 +260,7 @@
             <label class="field"><span>账号名称</span><input class="input" id="accName" placeholder="如：家里 NAS / 备用机 / 主账号"></label>
             <label class="field"><span>服务地址</span><input class="input" id="accUrl" placeholder="http://地址:端口"></label>
             <label class="field"><span>用户名</span><input class="input" id="accUser" placeholder="lxserver 填 default 或账号名；Songloft/MusicSync 填登录账号"></label>
-            <label class="field"><span>密码</span><input class="input" id="accPwd" type="password" placeholder="lxserver 填 frontend.password；Songloft/MusicSync 填登录密码"></label>
+            <label class="field"><span>密码</span><input class="input" id="accPwd" type="password" placeholder="LX Server / Geelonn LX Server 填 frontend.password；Songloft/MusicSync 填登录密码"></label>
             <label class="field"><span>超时 (ms)</span><input class="input" id="accTmo" type="number" placeholder="25000"></label>
           </div>
           <div class="field-row">

@@ -2,11 +2,12 @@
 /**
  * 多平台适配器工厂（v1.8.0）
  *
- * 把「自建 LX 服务（lxserver）」「Songloft 平台内 lxmusic 插件」「MusicSync」
- * 三个平台统一成同一组接口，供 hunter.js / main / web 按「当前选中的平台账号」路由。
+ * 把「自建 LX 服务（lxserver）」「Geelonn LX Server（gefl24/lxserver）」「Songloft 平台内
+ * lxmusic 插件」「MusicSync」四个平台统一成同一组接口，供 hunter.js / main / web 按
+ * 「当前选中的平台账号」路由。
  *
  * 账号对象（存于 config.platforms）：
- *   { id, type:'lxserver'|'songloft'|'musicsync', name, url, username, password, timeoutMs, enabled }
+ *   { id, type:'lxserver'|'geelonn'|'songloft'|'musicsync', name, url, username, password, timeoutMs, enabled }
  *
  * 统一接口（每个适配器都实现）：
  *   verify(acct) → {ok, msg}
@@ -23,13 +24,15 @@
  * isPublicSource / targetUsername（公共音源清理能力，仅 lxserver 有）。
  */
 const lxserver = require('./lxserver')
+const geelonn = require('./geelonn')
 const songloft = require('./songloft')
 const musicsync = require('./musicsync')
 
-const REGISTRY = { lxserver, songloft, musicsync }
+const REGISTRY = { lxserver, geelonn, songloft, musicsync }
 
 const TYPE_LABELS = {
   lxserver: 'LX Server（自建服务）',
+  geelonn: 'Geelonn LX Server（gefl24/lxserver）',
   songloft: 'Songloft（lxmusic 插件）',
   musicsync: 'MusicSync（多用户同步）'
 }

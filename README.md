@@ -44,10 +44,13 @@ docker run -d --name lx-hunter \
 | 平台 | 地址填什么 | 账号 / 密码 |
 | --- | --- | --- |
 | **LX Server**（自建服务） | 形如 `http://<IP>:7968` | 用户名 = 灌入落点（见下表）；密码 = 服务端配置里的 `frontend.password`——**不是**网页登录账号的密码，两套体系互不相通 |
+| **Geelonn LX Server**（gefl24/lxserver） | 形如 `http://<IP>:8195` | 与 LX Server 完全一致：`frontend.password` + 用户名 = 灌入落点。它是 LX Music Sync Server 的魔改 fork，核心自定义音源 API（`/api/custom-source/*` + `x-frontend-auth`）沿用原版，故猎手直接复用 LX Server 适配器 |
 | **Songloft**（平台内 lxmusic 插件） | Songloft 站点地址 | Songloft 的登录账号密码（插件的音源管理要先登录才能用） |
 | **MusicSync** | MusicSync 站点地址 | MusicSync 的登录账号密码 |
 
 另外还有一个选填项：**GitHub Token**，把 API 限额从 60 次/小时提到 5000。
+
+界面左下角常驻 **GitHub · lx-hunter** 链接，可一键跳到项目仓库（PC 桌面版与 Web/Docker 版共用同一前端，均已添加）。
 
 旧版本只有「服务地址 / 管理员密码 / 用户名」三项的配置，升级后会自动变成第一个 LX Server 账号，不用重新填。
 
@@ -62,11 +65,12 @@ docker run -d --name lx-hunter \
 
 ### 各平台能力差异
 
-| 能力 | LX Server | Songloft | MusicSync |
-| --- | --- | --- | --- |
-| 灌入 / 删除 / 启停 | ✅ | ✅ | ✅ |
-| 平台级停用（只停某个音乐平台） | ✅ | 降级为全局禁启用 | 降级为全局禁启用 |
-| 公开源 / 私有源区分 | ✅ | 按账号隔离，无此维度 | 按账号隔离，无此维度 |
+| 能力 | LX Server | Geelonn LX Server | Songloft | MusicSync |
+| --- | --- | --- | --- | --- |
+| 灌入 / 删除 / 启停 | ✅ | ✅ | ✅ | ✅ |
+| 平台级停用（只停某个音乐平台） | ✅ | ✅ | 降级为全局禁启用 | 降级为全局禁启用 |
+| 公开源 / 私有源区分 | ✅ | ✅ | 按账号隔离，无此维度 | 按账号隔离，无此维度 |
+| 公共音源清理（只删公开源） | ✅ | ✅ | ❌ | ❌ |
 | 公共音源清理 | ✅ | 不支持（界面自动隐藏该卡片） | 不支持（界面自动隐藏该卡片） |
 
 灌入记录会按平台账号分类保存，撤回时只撤回当前账号灌入的那些，不会误删其他账号的音源。

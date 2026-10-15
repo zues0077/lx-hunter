@@ -73,10 +73,10 @@ function testRouting() {
   assert.strictEqual(cur.preview, false)
   ok('resolveService(无 override) → 取当前选中账号')
 
-  // 三种平台都注册了
-  assert.deepStrictEqual(svc.SUPPORTED_TYPES.slice().sort(), ['lxserver', 'musicsync', 'songloft'])
+  // 四种平台都注册了（含 geelonn/lxserver）
+  assert.deepStrictEqual(svc.SUPPORTED_TYPES.slice().sort(), ['geelonn', 'lxserver', 'musicsync', 'songloft'])
   for (const t of svc.SUPPORTED_TYPES) assert.strictEqual(svc.getService(t).kind, t)
-  ok('SUPPORTED_TYPES 三平台齐全，且 kind 自述正确')
+  ok('SUPPORTED_TYPES 四平台齐全，且 kind 自述正确')
 }
 
 // ---------------------------------------------------------------- Songloft
@@ -236,12 +236,44 @@ async function testLxserver() {
     '未按账号身份拉取：' + seen.map(s => s.url).join(' , '))
   ok('list：按账号 username 拉取（保留 lxserver 公开+私有合并的口径）')
 
-  // 只有 lxserver 有公共音源清理能力
+  // 只有 lxserver / geelonn 有公共音源清理能力
   assert.strictEqual(typeof a.listPublic, 'function')
   assert.strictEqual(typeof a.removePublicBatch, 'function')
+  assert.strictEqual(typeof svc.getService('geelonn').listPublic, 'function')
   assert.strictEqual(svc.getService('songloft').listPublic, undefined)
   assert.strictEqual(svc.getService('musicsync').listPublic, undefined)
-  ok('公共音源清理仅 lxserver 提供（songloft/musicsync 不暴露，避免误删）')
+  ok('公共音源清理仅 lxserver / geelonn 提供（songloft/musicsync 不暴露，避免误删）')
+}
+
+// ---------------------------------------------------------------- geelonn 薄包装
+async function testGeelonn() {
+  console.log('\n[geelonn 薄包装]')
+  // geelonn/lxserver 是 lxserver 的魔改 fork，核心 custom-source API 完全一致，
+  // 适配器应产出与 lxserver 等价的请求（相同端点 + 相同 x-frontend-auth 头）。
+  const acct = { id: 'g', type: 'geelonn', url: 'http://geelonn:8195/', username: 'default', password: 'gpw', timeoutMs: 25000 }
+  const seen = []
+  net.fetchWithTimeout = async (url, init) => {
+    seen.push({ url: String(url), init })
+    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, list: [] }) }
+  }
+  const a = reloadServices().getService('geelonn')
+  assert.strictEqual(a.kind, 'geelonn')
+  await a.verify(acct)
+  const first = seen[0]
+  assert.strictEqual(first.url, 'http://geelonn:8195/api/admin/verify')
+  assert.strictEqual(first.init.headers['x-frontend-auth'], 'gpw')
+  ok('verify：geelonn 字段正确映射为 lxservice 的 cfg（与 lxserver 同款端点 + 头）')
+
+  seen.length = 0
+  await a.list(acct)
+  assert.ok(seen.some(s => String(s.url).includes('username=default')),
+    '未按账号身份拉取：' + seen.map(s => s.url).join(' , '))
+  ok('list：按账号 username 拉取（公开+私有合并视图，与 lxserver 一致）')
+
+  // 公共音源清理能力齐备
+  assert.strictEqual(typeof a.listPublic, 'function')
+  assert.strictEqual(typeof a.removePublicBatch, 'function')
+  ok('geelonn 暴露公共音源清理能力（fork 保留同一套 custom-source 存储）')
 }
 
 // ---------------------------------------------------------------- 配置迁移
@@ -308,6 +340,7 @@ function testMigration() {
   await testSongloft()
   await testMusicSync()
   await testLxserver()
+  await testGeelonn()
   testMigration()
   console.log(`\n全部通过：${pass} 项断言组`)
 })().catch(e => { console.error('\n✗ 失败：', e && e.message); process.exit(1) })

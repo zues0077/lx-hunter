@@ -366,18 +366,18 @@ ipcMain.handle('service:platforms', guard(async (e, id, disabledSources, owner) 
 }))
 
 // 公共音源清理（v1.7.4）：只删服务端公开源（_open），绝不碰各账号私有源；
-// 仅 LX Server 平台具备该能力，其他平台（Songloft / MusicSync）返回友好提示。
+// 仅 LX Server / Geelonn LX Server 平台具备该能力，其他平台（Songloft / MusicSync）返回友好提示。
 ipcMain.handle('service:listPublic', guard(async () => {
   const svc = getActiveService(store.config)
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
-  if (svc.type !== 'lxserver') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server 支持' }
+  if (svc.type !== 'lxserver' && svc.type !== 'geelonn') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server / Geelonn LX Server 支持' }
   return await svc.adapter.listPublic(svc.acct)
 }))
 // 批量删除：服务端每次 delete 都会全量重载脚本（几十秒），串行执行并逐个上报进度
 ipcMain.handle('service:removePublicBatch', guard(async (e, ids) => {
   const svc = getActiveService(store.config)
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
-  if (svc.type !== 'lxserver') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server 支持' }
+  if (svc.type !== 'lxserver' && svc.type !== 'geelonn') return { ok: false, error: '当前平台（' + TYPE_LABELS[svc.type] + '）不支持公共音源清理，仅 LX Server / Geelonn LX Server 支持' }
   return await svc.adapter.removePublicBatch(svc.acct, ids, (done, total, item) => {
     emitAll('log', {
       msg: `删除公共音源 ${done}/${total}：${item.id}${item.success ? '' : ' — 失败：' + item.message}`,

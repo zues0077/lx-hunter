@@ -324,6 +324,7 @@ async function testConn(explicit) {
 // ---------------- 多平台账号管理（v1.8.0） ----------------
 const PLATFORM_TYPES = {
   lxserver: 'LX Server（自建服务）',
+  geelonn: 'Geelonn LX Server（gefl24/lxserver）',
   songloft: 'Songloft（lxmusic 插件）',
   musicsync: 'MusicSync（多用户同步）'
 }
@@ -472,7 +473,7 @@ function renderInstalledAccountInfo() {
   const sel = $('insAccountSel')
   if (sel) renderAccountSelector(sel)
   const pubCard = $('pubCard')
-  if (pubCard) pubCard.hidden = !(active && active.type === 'lxserver')
+  if (pubCard) pubCard.hidden = !(active && (active.type === 'lxserver' || active.type === 'geelonn'))
   renderImportTargets()
   // 音源库里的「已灌入」徽章与「只选未灌入」都是按「本次灌入目标」算的（见 importedState），
   // 所以切账号 / 改「参与批量灌入」勾选后必须重画表格，否则徽章会停留在旧口径上。
@@ -1775,7 +1776,7 @@ $('btnInsDelSel').addEventListener('click', async () => {
   if (!picked.length) return toast('还没有勾选任何音源', 'info')
 
   const active = state.platforms.find(p => p.id === state.activePlatformId)
-  const isLx = active && active.type === 'lxserver'
+  const isLx = active && (active.type === 'lxserver' || active.type === 'geelonn')
   const privN = picked.filter(s => s.owner && s.owner !== 'open' && s.owner !== '_open').length
 
   const preview = '  · ' + picked.slice(0, 8).map(s => s.name || s.id).join('\n  · ') +
