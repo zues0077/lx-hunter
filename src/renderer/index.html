@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.4</div>
+        <div class="brand-sub">PC 版 v1.9.5</div>
       </div>
     </div>
     <nav class="nav">
@@ -305,7 +305,7 @@
           <label class="chk"><input type="checkbox" id="cfgHashDedupe"><span>爬取后先做内容指纹去重（只下载算哈希、不进沙箱），检测直接跳过重复项</span></label>
         </div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>自动剔除<strong>重度混淆</strong>脚本（安全建议，依据 lx-ikun issue#8：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门；剔除发生在检测阶段，局部混淆只标注不剔除）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>每次灌入自动剔除<strong>高危混淆/反调试</strong>脚本（安全建议，依据 lx-ikun issue#8 与 NAS CPU 占用实测：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门，<strong>空转死循环 while(!![]){}、混淆自调度定时器等反调试特征会独吞 CPU</strong>；检测与灌入阶段都会剔除，局部混淆只标注不剔除）</span></label>
         </div>
       </div>
 
@@ -398,6 +398,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=27"></script>
-<script src="app.js?v=27"></script>
+<script src="app.js?v=28"></script>
 </body>
 </html>

@@ -523,9 +523,12 @@ class Hunter {
     // 静默过滤是「点了检测却毫无反应」的根源：重复合并项/无脚本地址的服务端音源本来就不该本地检测，
     // 但用户不知道，只会以为功能坏了。这里必须说清楚跳过了多少、为什么。
     let excluded = picked.length - list.length
-    // 混淆剔除（v1.7.1，默认关）：开启后检测阶段直接拒绝重度混淆脚本——
-    // 音源脚本没有混淆的必要，重度混淆常用于藏木马/后门（lx-ikun issue#8 科普）。
-    // 只剔 high（密度远超防和谐所需的局部混淆），mid 级标注不剔除，由用户自行判断。
+    // 混淆剔除（v1.7.1 引入，默认开；v1.9.5 扩充判级）：开启后检测阶段直接拒绝高危脚本——
+    // 音源脚本没有混淆的必要，重度混淆常用于藏木马/后门（lx-ikun issue#8 科普）；
+    // v1.9.5 起判级还包含反调试硬特征（while(!![]){} 空转死循环 / 混淆自调度定时器 /
+    // jsjiami 标识），依据 2026-10-15 NAS 实测：jsjiami.com.v7 混淆的脚本独吞 60%+ CPU。
+    // 只剔 high（密度超高阈值或命中硬特征），mid 级标注不剔除，由用户自行判断。
+    // 注意：灌入阶段（runImport）还有一道同样的闸门，兜住「开关前检测的老条目」与「手动直灌」。
     let obfRejected = 0
     if (cfg.excludeHighRiskObfuscated) {
       const kept = []
@@ -930,6 +933,45 @@ class Hunter {
     }
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => dlWorker()))
 
+    // 混淆剔除闸门（v1.9.5）：灌入前按当前设置再过一遍高危混淆/反调试特征。
+    // 检测阶段（runCheck）已经剔过一轮，但有两条路径会绕开它：
+    //  ① 库里的老条目 —— 当初检测时这个开关还没开（或从没重新检测过）；
+    //  ② 用户手动勾选直接灌入 —— 压根没过检测。
+    // 用户要求「勾选后每次灌入都自动剔除」，所以这里兜底，判级与检测阶段完全同一标准
+    // （obfuscationRisk：密度超高阈值，或命中空转死循环/混淆自调度/jsjiami 标识）。
+    let obfRejected = 0
+    if (cfg.excludeHighRiskObfuscated) {
+      const kept = []
+      for (const e of targets) {
+        const code = codeCache[e.id] || (typeof e.code === 'string' && e.code ? e.code : '') || ''
+        if (code) {
+          const risk = obfuscationRisk(code)
+          if (risk.level === 'high') {
+            e.status = 'dead'
+            e.error = '重度混淆脚本，已按设置剔除'
+            e.obfLevel = 'high'
+            e.obfHits = risk.hits
+            e.usable = false
+            obfRejected++
+            this.emit('source-updated', e)
+            continue
+          }
+        }
+        kept.push(e)
+      }
+      if (obfRejected) {
+        targets.length = 0
+        targets.push(...kept)
+        this.log(`灌入前剔除 ${obfRejected} 条高危混淆脚本（重度混淆/反调试特征，建议拒绝使用；可在设置里关闭此剔除）`, '安全', 'warn')
+        this.store.saveDb()
+      }
+      if (!targets.length) {
+        this.job.running = false
+        this.emit('job', { running: false, type: 'import', done: true, summary: { ok: 0, replaced: 0, synced: 0, skipped: 0, total: 0, obfRejected } })
+        return { results: [], ok: 0, replaced: 0, synced: 0, skipped: 0, total: 0, obfRejected }
+      }
+    }
+
     // 去重与同名裁决规划（纯函数 _planImportQueue，便于单测）——每个账号各规划一份：
     // 同名冲突取决于该服务端自己的现状，改名池也要按账号分开（否则第二个平台会
     // 以为名字已被占用而继续往后加后缀）
@@ -978,7 +1020,7 @@ class Hunter {
     const replaced = results.filter(r => r.status === 'replaced').length
     const synced = results.filter(r => r.status === 'synced').length
     const skipped = results.filter(r => r.status === 'skipped').length
-    const summary = { ok, replaced, synced, skipped, total: results.length }
+    const summary = { ok, replaced, synced, skipped, total: results.length, obfRejected }
     if (multi) {
       const byPlat = {}
       for (const r of results) {
@@ -992,10 +1034,11 @@ class Hunter {
     }
     this.log(`灌入完成：成功 ${ok} / 共 ${results.length}` +
       (synced ? `、同名已存在 ${synced}` : '') + (skipped ? `、跳过 ${skipped}` : '') +
-      (replaced ? `（其中替换同名旧版 ${replaced} 个）` : ''), '灌入')
+      (replaced ? `（其中替换同名旧版 ${replaced} 个）` : '') +
+      (obfRejected ? `、高危混淆剔除 ${obfRejected} 条` : ''), '灌入')
     this.job.running = false
     this.emit('job', { running: false, type: 'import', done: true, summary })
-    return { results, ok, replaced, synced, skipped }
+    return { results, ok, replaced, synced, skipped, obfRejected }
   }
 
   /** 单条音源灌入单个平台账号（返回结果对象，含平台归属信息） */

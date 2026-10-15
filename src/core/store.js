@@ -57,7 +57,13 @@ const DEFAULT_CONFIG = {
   autoAllowUnsafeVM: false,
   allowUnsafeVM: false,
   skipUnusable: true,
-  excludeHighRiskObfuscated: false,
+  // 自动剔除高危混淆/反调试脚本（v1.7.1 引入时默认关，v1.9.5 起默认开）：
+  // 开启后检测阶段与每次灌入前都会拒绝 high 级脚本——密度超高阈值，或命中反调试硬特征
+  // （while(!![]){} 空转死循环 / 混淆自调度定时器 / jsjiami 标识）。
+  // 依据：lx-ikun issue#8（音源脚本没有混淆的必要）+ 2026-10-15 NAS CPU 占用实测
+  // （jsjiami.com.v7 混淆的「洛雪音乐源.js」独吞 63%~67% 单核 + 270MB，其余 45 个源合计≈0%）。
+  // mid 级（局部混淆）只标注不剔除，由用户自行甄别。
+  excludeHighRiskObfuscated: true,
   // 批量删除公开源时，每个删除之间的间隔（毫秒）。
   // 背景：lxserver 每次 delete 都会全量重载所有脚本，连续删除会把服务端拖到假死
   // （v1.6.8 教训：12 连删导致 Docker 重启）。留间隔让服务端喘口气。

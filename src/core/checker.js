@@ -104,12 +104,26 @@ function classifyEntry(path, content) { return scoreEntry(path, content) >= 4 }
 /**
  * 混淆风险评估（v1.7.1，依据 lx-ikun-music-sources issue#8 的科普）：
  * 音源脚本没必要混淆 —— 混淆的主要用途是藏代码（木马/后门/统计上报）。
- * 用三个特征判级，阈值按实测样本标定（23 个真实音源扫描）：
+ * 用三类特征判级，阈值按实测样本标定（23 个真实音源扫描）：
  *  - _0x 十六进制变量名：重混淆样本 37~52 个/KB，良性偶用 < 1 个/KB
  *  - \uXXXX unicode 转义：独家V5 样本 14 个/KB，正常脚本 ≈ 0
  *  - 阿拉伯/异体 Unicode 字符（参与运算的小语种字符）：独家V5 47 个/KB，正常 ≈ 0
+ *
+ * v1.9.5 增补「反调试 / 自调度」硬特征（依据 2026-10-15 NAS CPU 占用定位实测）：
+ * lxserver 上 44 音源实例单核 60%+、内存 513MB，二分定位到 jsjiami.com.v7 混淆的
+ * 「洛雪音乐源.js」独吞 63%~67% 单核 + 270MB；其余 45 个音源合计 ≈ 0%。
+ * 该脚本的三个签名正常音源一个都不该有（46 个真实音源全量扫描验证，零误报）：
+ *  - while(!![]){} 空转死循环：混淆器反调试标准套路（检测到调试器就卡死线程），
+ *    直接表现就是持续吃满一个核；
+ *  - 混淆自调度定时器：setTimeout/setInterval 被字符串数组间接调用，真实形态
+ *    _0x10ce4b[_0x1ff486(0x2dd,'NbSd')](_0x2bcf9e,0x7d0)（每 2s 自调一次）——
+ *    所以直接 grep setInterval/setTimeout 是 0 命中，必须按调用形态识别；
+ *  - jsjiami.com.v7 混淆器标识串（var version_ = 'jsjiami.com.v7'）。
+ * 注意：while(!![]) 只匹配**空函数体**——带函数体的 while(!![]){switch…} 是混淆器
+ * 字符串数组解码器的正常工作方式，46 音源里 10 个脚本都有（含干净音源 KuwoDES.js），
+ * 误伤它们会直接把好音源判死，所以空转判定必须限定 `\{\s*\}`。
  * 判级：
- *  - 'high'  重度混淆：任何一项密度超过高阈值 —— 建议直接拒绝使用
+ *  - 'high'  重度混淆/高危：密度超高阈值，或命中任意反调试硬特征 —— 建议直接拒绝使用
  *  - 'mid'   局部混淆：轻度命中 —— 有风险，需自行甄别（issue 里 Hei Music 属此类）
  *  - ''      未检出混淆特征
  */
@@ -123,10 +137,26 @@ function obfuscationRisk(content) {
   const nExotic = count(/[\u0600-\u06FF\uFB50-\uFEFF]/g)
   // eval / new Function 动态执行：混淆脚本的常用执行出口，单独计数供 tooltip
   const nEval = count(/\beval\s*\(|new\s+Function\s*\(/g)
-  const hits = { perKb0x: n0x / kb, perKbUni: nUni / kb, perKbExotic: nExotic / kb, evalCalls: nEval, total0x: n0x, totalUni: nUni, totalExotic: nExotic }
+  // 反调试/自调度硬特征（v1.9.5，见上方注释）：空转死循环 + 混淆自调度 + 混淆器标识
+  const nSpin = count(/while\s*\(\s*(?:!!\s*\[\s*\]|!0x0|!0|true)\s*\)\s*\{\s*\}/g)
+  const nSelfSched = count(/_0x[0-9a-f]{4,6}\s*(?:\[[^\]\r\n]{1,80}\])?\s*\(\s*_0x[0-9a-f]{4,6}\s*,\s*0x[0-9a-f]{3,5}\s*\)/gi)
+  const nJsjiami = count(/jsjiami/gi)
+  const hits = {
+    perKb0x: n0x / kb, perKbUni: nUni / kb, perKbExotic: nExotic / kb,
+    evalCalls: nEval, total0x: n0x, totalUni: nUni, totalExotic: nExotic,
+    spinLoops: nSpin, selfSchedCalls: nSelfSched, jsjiamiMarks: nJsjiami
+  }
+  // 硬特征优先：空转死循环/混淆自调度没有任何正当用途，与密度无关，命中即 high
+  if (nSpin >= 1 || nSelfSched >= 1) {
+    return { level: 'high', hits }
+  }
   const HIGH_0X = 20, HIGH_UNI = 8, HIGH_EXOTIC = 20
   const MID_0X = 2, MID_UNI = 1, MID_EXOTIC = 2
   if (hits.perKb0x >= HIGH_0X || hits.perKbUni >= HIGH_UNI || hits.perKbExotic >= HIGH_EXOTIC) {
+    return { level: 'high', hits }
+  }
+  // 混淆器标识 + 已达局部混淆密度 → high：整份文件过一遍混淆器，不可能只混几行
+  if (nJsjiami >= 1 && (hits.perKb0x >= MID_0X || hits.perKbUni >= MID_UNI || hits.perKbExotic >= MID_EXOTIC)) {
     return { level: 'high', hits }
   }
   if (hits.perKb0x >= MID_0X || hits.perKbUni >= MID_UNI || hits.perKbExotic >= MID_EXOTIC) {
@@ -141,6 +171,9 @@ function obfuscationTip(risk) {
   const h = risk.hits
   const parts = [`_0x 变量名 ${Math.round(h.perKb0x)}/KB`, `unicode 转义 ${h.perKbUni.toFixed(1)}/KB`, `异体字符 ${Math.round(h.perKbExotic)}/KB`]
     .filter((s, i) => [h.perKb0x >= 2, h.perKbUni >= 1, h.perKbExotic >= 2][i])
+  if (h.spinLoops) parts.push(`空转死循环 while(!![]){} ${h.spinLoops} 处（反调试套路，会持续吃满 CPU）`)
+  if (h.selfSchedCalls) parts.push(`混淆自调度定时器 ${h.selfSchedCalls} 处（setTimeout/setInterval 经字符串数组间接调用）`)
+  if (h.jsjiamiMarks) parts.push(`jsjiami 混淆器标识 ${h.jsjiamiMarks} 处`)
   if (h.evalCalls) parts.push(`动态执行 eval/new Function ${h.evalCalls} 处`)
   return risk.level === 'high'
     ? `重度混淆脚本（${parts.join('、')}）：音源脚本没有混淆的必要，混淆常用于隐藏恶意代码，建议拒绝使用`

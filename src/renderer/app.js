@@ -685,6 +685,9 @@ function obfTip(e) {
   if (h.perKb0x >= 2) parts.push(`_0x 变量名 ${Math.round(h.perKb0x)}/KB`)
   if (h.perKbUni >= 1) parts.push(`unicode 转义 ${h.perKbUni.toFixed(1)}/KB`)
   if (h.perKbExotic >= 2) parts.push(`异体字符 ${Math.round(h.perKbExotic)}/KB`)
+  if (h.spinLoops) parts.push(`空转死循环 while(!![]){} ${h.spinLoops} 处（反调试套路，会持续吃满 CPU）`)
+  if (h.selfSchedCalls) parts.push(`混淆自调度定时器 ${h.selfSchedCalls} 处（setTimeout/setInterval 经字符串数组间接调用）`)
+  if (h.jsjiamiMarks) parts.push(`jsjiami 混淆器标识 ${h.jsjiamiMarks} 处`)
   if (h.evalCalls) parts.push(`动态执行 ${h.evalCalls} 处`)
   const detail = parts.length ? '（' + parts.join('、') + '）' : ''
   return e.obfLevel === 'high'

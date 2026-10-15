@@ -84,9 +84,9 @@ ck('setPlatforms 按 owner 路由 username', (() => {
 ck('私有源写入路由注释完整', has(lxSrc2, /私有源（owner=admin 等）带 owner 字段返回，停用写入时按它路由身份/))
 // v1.8.0 起 hunter 不再直调 lxservice，改为经适配器路由；owner 仍必须原样透传下去
 ck('_safePlatforms 透传 owner', has(huntSrc, /async _safePlatforms\(cfg, id, disabledSources, what, owner\)/) && has(huntSrc, /adapter\.setPlatforms\(svc\.acct, id, disabledSources, \{ owner \}\)/))
-ck('巡检建 ownerMap 并传入三处调用', (() => {
+ck('巡检建 ownerMap 并传入调用点（重新启用/自动禁用/自动删除/恢复启用）', (() => {
   const m = huntSrc.match(/const ownerById = new Map[\s\S]{0,200}/)
-  return !!m && /ownerById\.get\(rec\.lxId\)/.test(huntSrc) && (huntSrc.match(/ownerById\.get\(rec\.lxId\)/g) || []).length === 3
+  return !!m && (huntSrc.match(/ownerById\.get\(rec\.lxId\)/g) || []).length >= 3
 })())
 ck('service:platforms IPC 透传 owner', has(mainSrc, /service:platforms', guard\(async \(e, id, disabledSources, owner\)/))
 ck('preload servicePlatforms 透传 owner', has(preSrc, /servicePlatforms: \(id, disabledSources, owner\)/))
@@ -228,7 +228,7 @@ ck('obfuscationRisk 三特征评估', has(chkSrc, /function obfuscationRisk/) &&
 ck('分级阈值按实测标定（high/mid）', has(chkSrc, /HIGH_0X = 20/) && has(chkSrc, /MID_0X = 2/))
 ck('checkBasic 两条路径都评估混淆', (chkSrc.match(/assessObfuscation\(entry/g) || []).length >= 2)
 ck('eval/new Function 计数进 tooltip', has(chkSrc, /evalCalls/) && has(chkSrc, /new\\s\+Function|new\s\+Function/))
-ck('检测阶段剔除开关（默认关）', has(huntSrc, /excludeHighRiskObfuscated/) && has(storeSrc, /excludeHighRiskObfuscated: false/))
+ck('检测阶段剔除开关（v1.9.5 起默认开）', has(huntSrc, /excludeHighRiskObfuscated/) && has(storeSrc, /excludeHighRiskObfuscated: true/))
 ck('剔除只针对 high 级', has(huntSrc, /risk\.level === 'high'/))
 ck('高危徽章 ⚠混淆高危', has(appSrc, /⚠混淆高危/) && has(appSrc, /function obfTip/))
 ck('设置页剔除开关', has(html, /cfgExcludeObf/))
@@ -442,6 +442,34 @@ ck('定时/巡检勾选文案讲明「总开关 + 每分钟只是核对节奏」
 ck('保存设置的联动提示（自动灌入依赖定时爬取 / 没有批量目标）',
   has(appSrc, /需要上面「启用定时爬取」也勾上才会触发/) && has(appSrc, /自动灌入只会灌到当前选中账号/))
 ck('「参与批量灌入」说明已覆盖定时自动灌入', has(html, /以及「定时爬取后自动灌入」同时灌入/))
+
+// ---- v1.9.5：灌入前自动剔除高危混淆/反调试脚本（默认开） ----
+// 背景：2026-10-15 NAS CPU 占用定位实测——jsjiami.com.v7 混淆的「洛雪音乐源.js」
+// 独吞 63%~67% 单核 + 270MB，其余 45 个音源合计 ≈ 0%。该脚本签名：空转死循环
+// while(!![]){} + 混淆自调度 _0xK[_0xK(..)](_0xFN,0x7d0) + jsjiami 标识。
+console.log('\n== v1.9.5 灌入前自动剔除高危混淆/反调试脚本（默认开） ==')
+const chkSrc5 = read('src/core/checker.js')
+ck('obfuscationRisk 新增反调试硬特征（空转死循环/自调度/jsjiami）',
+  has(chkSrc5, /const nSpin = count\(/) &&
+  has(chkSrc5, /const nSelfSched = count\(/) &&
+  has(chkSrc5, /const nJsjiami = count\(/) &&
+  has(chkSrc5, /spinLoops: nSpin, selfSchedCalls: nSelfSched, jsjiamiMarks: nJsjiami/))
+ck('硬特征命中即 high（与 _0x 密度无关）',
+  has(chkSrc5, /if \(nSpin >= 1 \|\| nSelfSched >= 1\)/) &&
+  has(chkSrc5, /return \{ level: 'high', hits \}/))
+ck('只匹配空函数体死循环（带函数体的解码器循环不误伤）',
+  chkSrc5.indexOf('!0x0|!0|true)') >= 0 && chkSrc5.indexOf('KuwoDES') >= 0)
+ck('obfuscationTip 带新特征措辞', has(chkSrc5, /空转死循环 while\(!!\[\]\)\{\}/) && has(chkSrc5, /混淆自调度定时器/))
+ck('runImport 灌入前剔除闸门（下载后、队列规划前）',
+  has(huntSrc, /灌入前剔除 \$\{obfRejected\} 条高危混淆脚本/) &&
+  has(huntSrc, /const risk = obfuscationRisk\(code\)/) &&
+  has(huntSrc, /重度混淆脚本，已按设置剔除/))
+ck('灌入完成日志报剔除数 + 返回 obfRejected',
+  has(huntSrc, /高危混淆剔除 \$\{obfRejected\} 条/) && has(huntSrc, /return \{ results, ok, replaced, synced, skipped, obfRejected \}/))
+ck('DEFAULT_CONFIG 默认开启（v1.9.5 起）', has(storeSrc9, /excludeHighRiskObfuscated: true/))
+ck('设置页开关文案更新（每次灌入 + 反调试特征）',
+  has(html, /每次灌入自动剔除/) && has(html, /空转死循环 while\(!!\[\]\)\{\}/))
+ck('renderer obfTip 同步新特征描述', has(appSrc, /空转死循环 while\(!!\[\]\)\{\}/) && has(appSrc, /混淆自调度定时器/))
 
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)
