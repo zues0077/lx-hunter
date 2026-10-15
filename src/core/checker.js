@@ -596,7 +596,7 @@ function patrolJudge(d, ctx) {
         (d.hint ? '；建议：' + String(d.hint).slice(0, 80) : '')
     }
   }
-  if (d.deadDomain === true) return { verdict: 'dead', fatal: true, note: '接口域名已失效（公共 DNS 确认不存在）' }
+  if (d.deadDomain === true) return { verdict: 'dead', fatal: true, streak: (Number(c.prevStreak) || 0) + 1, note: '接口域名已失效（公共 DNS 确认不存在）' }
   const streak = (Number(c.prevStreak) || 0) + 1
   const need = Math.max(1, Number(c.threshold) || 2)
   const brief = d.hint ? String(d.hint).slice(0, 90) : (firstMsg ? '如 ' + firstMsg.slice(0, 60) : '五平台真实取链全部失败')

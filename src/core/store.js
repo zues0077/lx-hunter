@@ -45,6 +45,14 @@ const DEFAULT_CONFIG = {
   // 全都判不出来（两边信息都不足）时才看这里：true=替换服务端旧版（先删后传），false=改名并存。
   replaceSameNameOnImport: true,
   patrolAutoDisable: true,
+  // v1.9.1：巡检连续失效「自动删除音源」。
+  // 与 patrolAutoDisable（自动禁用）的区别：禁用只是把该音源在五个平台上的开关关掉、
+  // 音源本体仍留在库里；自动删除则是从服务端 + 本地库一并移除（服务端每次 delete 都会全量
+  // 重载脚本，故删除需严格串行化并保留 serverDeleteIntervalMs 间隔，避免服务端假死）。
+  // patrolAutoDelete=false（默认）时仅禁用不删；开启后连续 patrolDeleteAfter 次（默认 3）
+  // 巡检判定 dead 才走删除。注意：本地（未灌入服务端）的音源无论开关如何都只禁用、不删。
+  patrolAutoDelete: false,
+  patrolDeleteAfter: 3,
   enableAfterImport: true,
   autoAllowUnsafeVM: false,
   allowUnsafeVM: false,

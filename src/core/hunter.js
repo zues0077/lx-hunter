@@ -123,6 +123,20 @@ function identityMismatch(cfg, serverList) {
   return `服务端有 ${privates.length} 个私有音源（归属 ${owners}）：它们只对同名账号可用，LX 网页端公开列表里看不到（也管不了），属正常现象。其停用状态按 ${owners} 身份存储，猎手显示与服务端一致`
 }
 
+/**
+ * 巡检「自动删除」决策（纯函数，便于测试与复用，v1.9.1）。
+ * 只在开启 patrolAutoDelete 且连续失效次数达到 patrolDeleteAfter（默认 3）时返回 true。
+ * 注意：本地未灌入服务端（无 lxId）的音源不该走删除（runPatrol 已用 aliveLxIds 过滤），
+ * 这里只负责「阈值判定」，不负责「能不能删」。
+ * @param {object} cfg 配置（含 patrolAutoDelete / patrolDeleteAfter）
+ * @param {number} streak 连续失效次数（rec.patrolFailStreak）
+ */
+function patrolAutoDeleteWanted(cfg, streak) {
+  if (!cfg || cfg.patrolAutoDelete !== true) return false
+  const deleteThreshold = Number(cfg.patrolDeleteAfter) > 0 ? Number(cfg.patrolDeleteAfter) : 3
+  return Number(streak) >= deleteThreshold
+}
+
 class Hunter {
   constructor(store, emit) {
     this.store = store
@@ -1428,6 +1442,33 @@ class Hunter {
     }
   }
 
+  /**
+   * 巡检期服务端写操作串行化队列（v1.9.1，缓解巡检把 lxserver 打假死）。
+   * 全部「禁用 / 启用 / 删除」服务端动作都收口到这条串行链，绝不同时发多个写请求：
+   *  - delete 会触发服务端全量重载脚本；v1.6.8 教训——并发 delete 直接把 Docker 拖到重启；
+   *  - 故 delete（kind='delete'）前后都强制 serverDeleteIntervalMs（默认 5s）间隔，让服务端消化。
+   * 非重操作（disable/enable）仅串行执行、不额外加间隔，避免几十个源巡检拖到几十分钟。
+   * 链内每个动作独立 try；单个失败不阻断后续（链尾 absorb 错误）。
+   * @param {'disable'|'enable'|'delete'} kind
+   */
+  async _patrolEnqueueServerWrite(kind, fn) {
+    if (!this._patrolWriteChain) this._patrolWriteChain = Promise.resolve()
+    const cfg = this.store.config
+    const gap = Number(cfg.serverDeleteIntervalMs) > 0 ? Number(cfg.serverDeleteIntervalMs) : 5000
+    const prevHeavy = !!this._patrolPrevHeavy         // 上一个入队动作是否为重操作（delete）
+    const heavy = kind === 'delete'
+    this._patrolPrevHeavy = heavy                       // 记录本动作，供下一个动作判断「上一个是否重」
+    const run = async () => {
+      // 本次或上次是重操作 → 先歇 gap，给服务端喘口气再发下一个写请求
+      if (heavy || prevHeavy) await new Promise(r => setTimeout(r, gap))
+      return await fn()
+    }
+    const p = this._patrolWriteChain.then(run, run)
+    // 链尾 absorb 错误，避免一个动作失败把后续动作全部 reject 掉
+    this._patrolWriteChain = p.then(() => {}, () => {})
+    return p
+  }
+
   /** 为「同名不同内容」生成不与服务端撞名的展示名（用于改名上传） */
   _uniqueRename(baseName, serverByName, used) {
     const orig = normName(baseName)
@@ -1467,7 +1508,7 @@ class Hunter {
       const e = this.store.db.sources[srcId]
       // 无脚本地址的跳过：手动灌入无本地记录，或服务端原生音源未留存 sourceUrl（无法下载重测）
       if (!e || !e.url) continue
-      items.push({ e, rec })
+      items.push({ srcId, e, rec })
     }
     if (!items.length) {
       this.log('没有可巡检的已灌入音源（仅支持「本工具灌入且本地有对应记录」的音源）', '巡检', 'warn')
@@ -1478,17 +1519,21 @@ class Hunter {
     this.emit('job', { running: true, type: 'patrol' })
     this.log(`开始健康巡检：${items.length} 个已灌入音源（并发 ${Math.max(1, Math.min(8, cfg.concurrency || 8))}）…`, '巡检')
     this.mirrorPref = null
+    // 巡检期服务端写操作串行化（v1.9.1）：每条写请求走同一条链，delete 前后保持
+    // serverDeleteIntervalMs 间隔，避免把 lxserver 打假死（即本次 bug 连带的二次事故）
+    this._patrolWriteChain = null
+    this._patrolPrevHeavy = false
     // 巡检并发刻意压得比主检低：几十个聚合源同时重测，打到的是同一批后端接口，
     // 并发太高会把对方打到限流，整批「全平台失败」，看起来就像集体失效
     const conc = Math.max(1, Math.min(3, cfg.concurrency || 8))
-    let idx = 0, ok = 0, disabled = 0, unknown = 0, reEnabled = 0
+    let idx = 0, ok = 0, disabled = 0, unknown = 0, reEnabled = 0, deleted = 0
 
     const worker = async () => {
       while (true) {
         if (this.cancelRequested) return
         const i = idx++
         if (i >= items.length) return
-        const { e, rec } = items[i]
+        const { srcId, e, rec } = items[i]
         const name = rec.name || e.scriptName || e.name
         e.checking = true
         this.emit('source-updated', e)
@@ -1543,13 +1588,42 @@ class Hunter {
           ok++
           rec.patrolFailStreak = 0
           if (rec.disabledByPatrol) {
-            // 停用/启用均走「平台级」接口，不触发服务端全量重载（覆盖本工具已知的全部平台）
-            const t = await this._safePlatforms(cfg, rec.lxId, [], '重新启用', ownerById.get(rec.lxId))
+            // 重新启用走「平台级」接口（不触发服务端全量重载）；收口到串行队列降低对服务端冲击
+            const t = await this._patrolEnqueueServerWrite('enable', () => this._safePlatforms(cfg, rec.lxId, [], '重新启用', ownerById.get(rec.lxId)))
             if (t.success) { delete rec.disabledByPatrol; reEnabled++; this.log(`巡检恢复正常，已重新启用：${name}`, '巡检') }
           }
         } else if (verdict === 'dead') {
-          if (cfg.patrolAutoDisable !== false) {
-            const t = await this._safePlatforms(cfg, rec.lxId, ['wy', 'tx', 'kw', 'kg', 'mg'], '自动禁用', ownerById.get(rec.lxId))
+          // 自动删除优先于自动禁用：开启 patrolAutoDelete 且连续失效达阈值时，从服务端+本地一并移除。
+          // 本地未灌入服务端（无 lxId / 服务端已不存在）的源不删，只禁用。
+          // delete 会触发服务端全量重载，必须走串行队列 + serverDeleteIntervalMs 间隔（防 v1.6.8 式假死）。
+          const streak = Number(rec.patrolFailStreak) || 0
+          const wantDelete = patrolAutoDeleteWanted(cfg, streak)
+          if (wantDelete) {
+            try {
+              const r = await this._patrolEnqueueServerWrite('delete', async () => {
+                const s = this._active()
+                return await s.adapter.remove(s.acct, rec.lxId, { owner: ownerById.get(rec.lxId) })
+              })
+              if (r && r.success) {
+                delete this.store.imported[srcId]
+                if (this.store.db.sources[srcId]) delete this.store.db.sources[srcId]
+                this.store.saveImported(); this.store.saveDb()
+                deleted++
+                this.log(`巡检连续 ${streak} 次失效，已按配置自动删除音源：${name} — ${note}`, '巡检', 'warn')
+              } else if (r && r.message) {
+                this.log(`巡检失效需自动删除，但服务端删除失败：${name} — ${r.message}（本次仍按禁用处理）`, '巡检', 'warn')
+              }
+            } catch (err) {
+              this.log(`巡检失效需自动删除，但请求异常：${String((err && err.message) || err).slice(0, 80)}（${name}）`, '巡检', 'warn')
+            }
+            // 删除成功 → 本地记录已删，无需再禁用；失败 → 退化为禁用，保证状态有反馈
+            if (this.store.imported[srcId]) {
+              const t = await this._patrolEnqueueServerWrite('disable', () => this._safePlatforms(cfg, rec.lxId, ['wy', 'tx', 'kw', 'kg', 'mg'], '自动禁用', ownerById.get(rec.lxId)))
+              if (t.success) { disabled++; rec.disabledByPatrol = true; this.log(`巡检失效，已自动禁用：${name} — ${note}`, '巡检', 'warn') }
+              else if (t.message) this.log(`巡检失效，但自动禁用失败：${name} — ${t.message}`, '巡检', 'warn')
+            }
+          } else if (cfg.patrolAutoDisable !== false) {
+            const t = await this._patrolEnqueueServerWrite('disable', () => this._safePlatforms(cfg, rec.lxId, ['wy', 'tx', 'kw', 'kg', 'mg'], '自动禁用', ownerById.get(rec.lxId)))
             if (t.success) { disabled++; rec.disabledByPatrol = true; this.log(`巡检失效，已自动禁用：${name} — ${note}`, '巡检', 'warn') }
             else if (t.message) this.log(`巡检失效，但自动禁用失败：${name} — ${t.message}`, '巡检', 'warn')
           } else {
@@ -1562,7 +1636,7 @@ class Hunter {
           // 恢复启用。过去只有「确认可用」才恢复，历史误禁的源可能永远出不了黑名单。
           // 「疑似失效」（streak 在涨）仍保持禁用，等下一轮确认。
           if (!suspectTag && rec.disabledByPatrol) {
-            const t = await this._safePlatforms(cfg, rec.lxId, [], '恢复启用', ownerById.get(rec.lxId))
+            const t = await this._patrolEnqueueServerWrite('enable', () => this._safePlatforms(cfg, rec.lxId, [], '恢复启用', ownerById.get(rec.lxId)))
             if (t.success) { delete rec.disabledByPatrol; reEnabled++; this.log(`巡检无法确认失效，已恢复启用：${name}`, '巡检') }
           }
         }
@@ -1574,16 +1648,16 @@ class Hunter {
     }
     await Promise.all(Array.from({ length: conc }, () => worker()))
     this.store.saveDb(); this.store.saveImported()
-    this.store.db.patrol = { lastRun: Date.now(), total: items.length, ok, disabled, unknown, reEnabled, cancelled: this.cancelRequested }
+    this.store.db.patrol = { lastRun: Date.now(), total: items.length, ok, disabled, unknown, reEnabled, deleted, cancelled: this.cancelRequested }
     this.store.saveDb()
     const stillDisabled = Object.values(this.store.imported || {}).filter(r => r && r.disabledByPatrol).length
     this.log(this.cancelRequested
       ? '巡检已取消（已完成部分保留）'
-      : `巡检完成：正常 ${ok}${reEnabled ? `（含恢复启用 ${reEnabled}）` : ''}、失效禁用 ${disabled}、无法判定 ${unknown} / 共 ${items.length}` +
+      : `巡检完成：正常 ${ok}${reEnabled ? `（含恢复启用 ${reEnabled}）` : ''}、失效禁用 ${disabled}${deleted ? `、自动删除 ${deleted}` : ''}、无法判定 ${unknown} / 共 ${items.length}` +
         (stillDisabled ? `；仍有 ${stillDisabled} 个源处于巡检停用，可在「已灌入」页单个恢复或点「全部恢复启用」` : ''), '巡检', this.cancelRequested ? 'warn' : 'info')
     this.job.running = false
-    this.emit('job', { running: false, type: 'patrol', done: true, cancelled: this.cancelRequested, summary: { total: items.length, ok, disabled, unknown, reEnabled } })
-    return { ok, disabled, unknown, reEnabled, total: items.length }
+    this.emit('job', { running: false, type: 'patrol', done: true, cancelled: this.cancelRequested, summary: { total: items.length, ok, disabled, unknown, reEnabled, deleted } })
+    return { ok, disabled, unknown, reEnabled, deleted, total: items.length }
   }
 
   // ---------------- 撤回 ----------------
@@ -1733,4 +1807,4 @@ class Hunter {
   }
 }
 
-module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum }
+module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum, patrolAutoDeleteWanted }

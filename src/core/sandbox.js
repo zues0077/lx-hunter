@@ -9,6 +9,25 @@ const zlib = require('zlib')
 const { SETUP } = require('./lxbootstrap')
 const { hostFetch, describeNetError } = require('./net')
 
+// ---------- 全局兜底：未处理的 Promise 拒绝（本次 bug 的根因）----------
+// 沙箱运行不可信第三方音源脚本，脚本内部 `fetch(u).then(r=>r.json()).then(cb)` 不接 catch 是常态。
+// 一旦这些派生出的 Promise 拒绝，Node 默认 --unhandled-rejections=throw 会直接杀进程（SIGKILL 137）。
+// 注册 'unhandledRejection' 监听器后，Node 不再因未处理拒绝而终止，而是交给这里记录后忽略 ——
+// 这是最后一道防线；配合 fetch 返回值的 swallow（见下）与配额闸门，根治本次事故。
+// 仅注册一次（模块可能被多次 require，用标记去重）。
+if (!process.__lxUnhandledGuard) {
+  process.__lxUnhandledGuard = true
+  process.__lxUnhandledCount = 0
+  process.on('unhandledRejection', (reason) => {
+    try {
+      process.__lxUnhandledCount = (process.__lxUnhandledCount || 0) + 1
+      const m = reason && reason.message ? String(reason.message) : String(reason)
+      // 仅记录、绝不再抛出 —— 否则又变成新的未捕获异常，回到原点
+      console.error('[lx-hunter] 未处理的 Promise 拒绝（已忽略，不终止进程）: ' + m.slice(0, 200))
+    } catch (e) { /* 自身绝不能抛 */ }
+  })
+}
+
 // ---------- 注入给沙箱的 crypto / zlib polyfill ----------
 function makeCryptoPolyfill() {
   function toBuf(v, enc) {
@@ -96,6 +115,18 @@ class Sandbox {
     this.stopped = false
     this.reqSeq = 0
     this.baseUrl = null       // 相对 URL 的基址（取脚本 @homepage）
+    // ---- 资源配额（v1.9.1）----
+    // 实测事故：一批已废弃音源在被并发抓取时，脚本内部对同一个失效域名反复重试
+    // （每次 fetch 都 ENOTFOUND / 证书不匹配），在飞请求数无上限地涨，
+    // 宿主 socket / 内存被打满，最终被 OOM Killer 以 SIGKILL(137) 干掉。
+    // 这里给单个沙箱的「并发请求数」和「请求总量」都加上限：
+    // 超限一律快速失败，让脚本自己走它的错误分支，而不是拖垮整个进程。
+    this.maxInflight = Number(opts.maxInflight) > 0 ? Number(opts.maxInflight) : 12
+    this.maxTotalFetches = Number(opts.maxTotalFetches) > 0 ? Number(opts.maxTotalFetches) : 200
+    this.totalFetches = 0
+    this.rejectedByQuota = 0
+    // 异步错误去重计数（_noteAsyncError 用），避免海量重复拒绝打爆日志/自身再抛
+    this._asyncErrSeen = new Map()
 
     const self = this
     const log = (...a) => { try { self.onLog(a.map(String).join(' ')) } catch (e) {} }
@@ -117,7 +148,25 @@ class Sandbox {
     // 因此所有进入沙箱的定时器回调都包一层 try/catch，且销毁后直接静默。
     const guard = fn => function (...args) {
       if (self.destroyed || self.stopped) return
-      try { return fn.apply(this, args) } catch (e) { self.onLog('沙箱异步回调异常: ' + String((e && e.message) || e).slice(0, 120)) }
+      try { return fn.apply(this, args) } catch (e) { self._noteAsyncError(e) }
+    }
+    /**
+     * 给「从沙箱流出到宿主」的 Promise 挂静默兜底（v1.9.1）。
+     *
+     * 事故根因：脚本里常见 `fetch(u).then(r => r.json()).then(cb)` 这种链，
+     * 而我们返回的 fetch Promise 一旦被 .then 派生，派生出的**新** Promise 由脚本自己持有，
+     * 它被拒绝时脚本通常并不接 —— Node 于是把它当成「未处理的拒绝」，
+     * 冒到宿主进程；`--unhandled-rejections=throw`（Node 15+ 默认）会直接终止进程。
+     * 典型触发就是那三条日志：证书 altnames 不匹配 / ENOTFOUND / 域名不存在。
+     *
+     * 做法：在我们交出去的 Promise 上预挂一个「已被消费」的尾巴，
+     * 让引擎认为该拒绝有人处理；同时在沙箱侧记录一次（去重、限量），
+     * 既不影响脚本自己的 catch，也不会让它污染宿主。
+     */
+    const swallow = p => {
+      if (!p || typeof p.then !== 'function') return p
+      try { p.then(undefined, e => self._noteAsyncError(e)) } catch (e) {}
+      return p
     }
     const mkTimer = hostFn => (fn, ms, ...a) => {
       // 不允许字符串代码定时器（会在宿主作用域 eval，逃逸沙箱）
@@ -152,9 +201,28 @@ class Sandbox {
         try {
           finalUrl = self.baseUrl ? new URL(raw, self.baseUrl).href : new URL(raw).href
         } catch (e) {
-          return Promise.reject(new Error('沙箱 fetch 地址无效（相对地址且脚本未提供 homepage）: ' + raw.slice(0, 80)))
+          // 流出的拒绝也要 swallow：脚本若这样写 fetch(u).then(r=>r.json()).then(cb)
+          // 而没有 catch，裸拒绝会冒成宿主 unhandledRejection → 默认 throw 终止进程
+          return swallow(Promise.reject(new Error('沙箱 fetch 地址无效（相对地址且脚本未提供 homepage）: ' + raw.slice(0, 80))))
         }
-        if (self.destroyed || self.stopped) return Promise.reject(new Error('已取消'))
+        if (self.destroyed || self.stopped) return swallow(Promise.reject(new Error('已取消')))
+        // ---- 资源配额闸门（v1.9.1，事故根因修复）----
+        // 实测事故：一批已废弃音源被并发抓取时，脚本对同一个失效域名反复重试，
+        // 在飞请求数无上限地涨，宿主 socket/内存被打满 → 被 OOM Killer 以 SIGKILL(137) 干掉。
+        // 这里双向限速：总量超限直接拒（音源本身已失效，没必要再打网络）；
+        // 并发超限快速失败，让脚本走自己的错误分支（多数回退到其它源/本地解析），
+        // 而不是把整个进程拖死。所有拒绝都经 swallow 兜底，绝不污染宿主。
+        if (self.totalFetches >= self.maxTotalFetches) {
+          self.rejectedByQuota++
+          self.onLog('沙箱请求被拒（总量超限 ' + self.maxTotalFetches + '）: ' + finalUrl.slice(0, 60))
+          return swallow(Promise.reject(new Error('沙箱请求数超限（总量 ' + self.maxTotalFetches + '）')))
+        }
+        if (self.inflightFetches >= self.maxInflight) {
+          self.rejectedByQuota++
+          self.onLog('沙箱请求被拒（并发超限 ' + self.maxInflight + '）: ' + finalUrl.slice(0, 60))
+          return swallow(Promise.reject(new Error('沙箱并发请求超限（' + self.maxInflight + '）')))
+        }
+        self.totalFetches++
         const doFetch = opts.fetchImpl || hostFetch()
         // 在飞请求计数：init 宽限据此自适应延长。
         // 一类脚本把 lx.send('inited') 放在网络回调里（先拉远端平台配置再注册），
@@ -167,7 +235,7 @@ class Sandbox {
           try { initObj.signal = AbortSignal.timeout(Number(opts.fetchTimeout) > 0 ? Number(opts.fetchTimeout) : 15000) } catch (e) {}
         }
         const settle = () => { if (self.inflightFetches > 0) self.inflightFetches-- }
-        return Promise.resolve()
+        return swallow(Promise.resolve()
           .then(() => doFetch(finalUrl, initObj))
           .then(r => { settle(); return r })
           .catch(err => {
@@ -180,7 +248,7 @@ class Sandbox {
               ? '请求超时 ' + ms + 'ms'
               : raw
             throw new Error('沙箱 fetch 失败: ' + msg.slice(0, 160) + ' [' + finalUrl.slice(0, 60) + ']')
-          })
+          }))
       },
       Buffer,
       crypto: makeCryptoPolyfill(),
@@ -209,6 +277,26 @@ class Sandbox {
     sandboxGlobals.globalThis = sandboxGlobals
     this.context = vm.createContext(sandboxGlobals)
     vm.runInContext(SETUP, this.context, { timeout: 5000 })
+  }
+
+  /**
+   * 沙箱异步错误的统一出口（v1.9.1）。
+   * guard / swallow / fetch 兜底都会把逃逸的 Promise 拒绝或回调异常导到这里：
+   * 只记录、绝不再抛出 —— 否则又会在宿主进程里变成新的未捕获异常，
+   * 重新触发 SIGKILL（正是这次事故的来源）。
+   * 去重 + 限量（同一沙箱同消息最多记 8 次），避免海量重复拒绝打爆日志，也避免自身抛错。
+   */
+  _noteAsyncError(e) {
+    try {
+      if (!this._asyncErrSeen) this._asyncErrSeen = new Map()
+      const msg = e && e.message ? String(e.message) : (e == null ? 'undefined' : String(e))
+      const key = msg.slice(0, 80)
+      const seen = this._asyncErrSeen.get(key) || 0
+      if (seen < 8) {
+        this._asyncErrSeen.set(key, seen + 1)
+        this.onLog('沙箱异步异常: ' + msg.slice(0, 200))
+      }
+    } catch (e2) { /* 自身绝不能抛 */ }
   }
 
   /** 注入脚本元信息（洛雪脚本通过 lx.currentScriptInfo 读取） */

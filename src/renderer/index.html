@@ -335,6 +335,8 @@
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（按上面的间隔自动重测已灌入音源）</span></label>
           <label class="chk"><input type="checkbox" id="cfgPatrolDisable"><span>巡检失效的音源自动禁用（脚本被删/五平台全部取链失败才判定，网络抖动不误杀）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgPatrolAutoDelete"><span>巡检连续失效达阈值<strong>自动删除音源</strong>（从服务端+本地一并移除；本地未灌入服务端的源只禁用不删）</span></label>
+          <label class="field inline"><span>自动删除所需连续失效次数</span><input class="input" id="cfgPatrolDeleteAfter" type="number" min="1" max="20" step="1"></label>
         </div>
         <p class="hint"><strong>「启用定时巡检」就是定时巡检的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次巡检是否已够间隔」，够了才真正开跑 —— <strong>实际触发比设定间隔最多晚 1 分钟</strong>，且<strong>软件必须保持运行</strong>。</p>
         <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
