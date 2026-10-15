@@ -44,7 +44,7 @@ docker run -d --name lx-hunter \
 | 平台 | 地址填什么 | 账号 / 密码 |
 | --- | --- | --- |
 | **LX Server**（自建服务） | 形如 `http://<IP>:7968` | 用户名 = 灌入落点（见下表）；密码 = 服务端配置里的 `frontend.password`——**不是**网页登录账号的密码，两套体系互不相通 |
-| **Geelonn LX Server**（gefl24/lxserver） | 形如 `http://<IP>:8195` | 与 LX Server 完全一致：`frontend.password` + 用户名 = 灌入落点。它是 LX Music Sync Server 的魔改 fork，核心自定义音源 API（`/api/custom-source/*` + `x-frontend-auth`）沿用原版，故猎手直接复用 LX Server 适配器 |
+| **Geelonn LX Server**（gefl24/lxserver） | 形如 `http://<IP>:8195` | **网页登录账号密码**（如 `admin` / 后台密码）——该 fork 走用户登录制（`POST /api/user/login` 换 token），不用 `frontend.password`。**用户名必须是真实存在的登录账号**（`default` 不可登录）；灌入落点沿用 LX Server 口径（`default`=公开源，具名=该账号私有列表），灌入身份与登录身份同名时即落到该账号自己的列表 |
 | **Songloft**（平台内 lxmusic 插件） | Songloft 站点地址 | Songloft 的登录账号密码（插件的音源管理要先登录才能用） |
 | **MusicSync** | MusicSync 站点地址 | MusicSync 的登录账号密码 |
 

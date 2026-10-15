@@ -245,30 +245,73 @@ async function testLxserver() {
   ok('公共音源清理仅 lxserver / geelonn 提供（songloft/musicsync 不暴露，避免误删）')
 }
 
-// ---------------------------------------------------------------- geelonn 薄包装
+// ---------------------------------------------------------------- geelonn 适配器
 async function testGeelonn() {
-  console.log('\n[geelonn 薄包装]')
-  // geelonn/lxserver 是 lxserver 的魔改 fork，核心 custom-source API 完全一致，
-  // 适配器应产出与 lxserver 等价的请求（相同端点 + 相同 x-frontend-auth 头）。
-  const acct = { id: 'g', type: 'geelonn', url: 'http://geelonn:8195/', username: 'default', password: 'gpw', timeoutMs: 25000 }
+  console.log('\n[geelonn 适配器（登录制鉴权）]')
+  // 实测（2026-10-15，自建 v3.0.1）：fork 没有 /api/admin/verify（404），管理接口也不认
+  // x-frontend-auth 明文密码（403）——走 POST /api/user/login 换 token，之后带
+  // x-user-name + x-user-token 访问 custom-source 管理接口。
+  const acct = { id: 'g', type: 'geelonn', url: 'http://geelonn:8195/', username: 'admin', password: 'gpw', timeoutMs: 25000 }
   const seen = []
   net.fetchWithTimeout = async (url, init) => {
     seen.push({ url: String(url), init })
-    return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, list: [] }) }
+    const u = String(url)
+    if (u.endsWith('/api/user/login')) {
+      const body = JSON.parse(init.body || '{}')
+      if (body.username === 'admin' && body.password === 'gpw') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, token: 'GTKN', username: 'admin', role: 'admin' }) }
+      }
+      return { ok: false, status: 401, text: async () => JSON.stringify({ success: false, message: 'Invalid credentials' }) }
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify([]) }
   }
   const a = reloadServices().getService('geelonn')
   assert.strictEqual(a.kind, 'geelonn')
-  await a.verify(acct)
-  const first = seen[0]
-  assert.strictEqual(first.url, 'http://geelonn:8195/api/admin/verify')
-  assert.strictEqual(first.init.headers['x-frontend-auth'], 'gpw')
-  ok('verify：geelonn 字段正确映射为 lxservice 的 cfg（与 lxserver 同款端点 + 头）')
+  a.clearTokenCache()
 
+  const v = await a.verify(acct)
+  assert.strictEqual(v.ok, true)
+  const loginReq = seen.find(s => s.url.endsWith('/api/user/login'))
+  assert.ok(loginReq, '未发起登录请求')
+  assert.strictEqual(JSON.parse(loginReq.init.body).username, 'admin')
+  assert.strictEqual(JSON.parse(loginReq.init.body).password, 'gpw')
+  ok('verify：走 POST /api/user/login 换 token（fork 无 /api/admin/verify）')
+
+  const vbad = await a.verify(Object.assign({}, acct, { password: 'wrong' }))
+  assert.strictEqual(vbad.ok, false)
+  assert.ok(/密码错误/.test(vbad.msg), '401 应转成友好文案：' + vbad.msg)
+  ok('verify：401 Invalid credentials → 「管理员账号或密码错误」')
+
+  // list：公开读 + 必须携带登录态头
   seen.length = 0
-  await a.list(acct)
-  assert.ok(seen.some(s => String(s.url).includes('username=default')),
-    '未按账号身份拉取：' + seen.map(s => s.url).join(' , '))
-  ok('list：按账号 username 拉取（公开+私有合并视图，与 lxserver 一致）')
+  const list = await a.list(acct)
+  assert.ok(Array.isArray(list))
+  const listReq = seen.find(s => String(s.url).includes('/api/custom-source/list?username=default'))
+  assert.ok(listReq, '未按公开源身份拉取：' + seen.map(s => s.url).join(' , '))
+  assert.strictEqual(listReq.init.headers['x-user-name'], 'admin')
+  assert.strictEqual(listReq.init.headers['x-user-token'], 'GTKN')
+  ok('list：公开源读取携带 x-user-name + x-user-token 登录态')
+
+  // token 失效自愈：管理接口第一次 401 → 自动强制重登 → 重试成功
+  seen.length = 0
+  a.clearTokenCache()   // 清缓存让首次调用也走登录，便于断言「登录两次 = 初次 + 重登」
+  let expired = true
+  net.fetchWithTimeout = async (url, init) => {
+    seen.push({ url: String(url), init })
+    const u = String(url)
+    if (u.endsWith('/api/user/login')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, token: 'GTKN2', username: 'admin', role: 'admin' }) }
+    }
+    if (u.endsWith('/api/custom-source/toggle')) {
+      if (expired) { expired = false; return { ok: false, status: 401, text: async () => JSON.stringify({ success: false, message: 'Unauthorized' }) } }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ success: true }) }
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify([]) }
+  }
+  const t = await a.toggle(acct, 'a.js', true)
+  assert.strictEqual(t.success, true)
+  assert.ok(seen.filter(s => s.url.endsWith('/api/user/login')).length >= 2, '401 后未强制重登')
+  ok('toggle：遇 401 自动强制重登并重试一次（token 过期自愈）')
 
   // 公共音源清理能力齐备
   assert.strictEqual(typeof a.listPublic, 'function')
