@@ -224,6 +224,11 @@ async function loadConfig() {
   renderPlatforms()
   $('cfgToken').value = c.ghToken || ''
   $('cfgMirror').value = c.mirror || 'auto'
+  $('cfgMirrorCustom').value = c.mirrorCustom || ''
+  $('cfgMirrorCustom').parentNode.style.display = (c.mirror === 'custom') ? '' : 'none'
+  $('cfgCrawlProxy').value = c.crawlProxy || ''
+  $('cfgForceProxy').checked = !!c.forceProxy
+  $('cfgUseJsdelivr').checked = c.useJsdelivr !== false
   $('cfgMaxCand').value = c.maxCandidatesPerRepo || 400
   $('cfgConc').value = c.concurrency || 8
   $('cfgTmo').value = c.timeoutMs || 15000
@@ -256,6 +261,10 @@ $('btnSaveCfg').addEventListener('click', async () => {
     activePlatformId: state.activePlatformId,
     ghToken: $('cfgToken').value.trim(),
     mirror: $('cfgMirror').value,
+    mirrorCustom: $('cfgMirrorCustom').value.trim(),
+    crawlProxy: $('cfgCrawlProxy').value.trim(),
+    forceProxy: $('cfgForceProxy').checked,
+    useJsdelivr: $('cfgUseJsdelivr').checked,
     maxCandidatesPerRepo: parseInt($('cfgMaxCand').value, 10) || 400,
     concurrency: Math.max(1, Math.min(16, parseInt($('cfgConc').value, 10) || 8)),
     timeoutMs: parseInt($('cfgTmo').value, 10) || 15000,
@@ -297,6 +306,34 @@ $('btnSaveCfg').addEventListener('click', async () => {
 })
 
 $('btnTestConn').addEventListener('click', () => testConn(true))
+
+// 下载镜像选「自定义…」时才露出基址输入框
+$('cfgMirror').addEventListener('change', () => {
+  $('cfgMirrorCustom').parentNode.style.display = ($('cfgMirror').value === 'custom') ? '' : 'none'
+})
+
+// 网络连通性测试：按当前表单里的设置（未保存也行）跑一遍完整候选链
+$('btnNetTest').addEventListener('click', async () => {
+  const el = $('netTestResult')
+  el.textContent = '测试中…（依次尝试各通道，可能需要十几秒）'
+  try {
+    const r = await api.netTest({
+      mirror: $('cfgMirror').value,
+      mirrorCustom: $('cfgMirrorCustom').value.trim(),
+      crawlProxy: $('cfgCrawlProxy').value.trim(),
+      forceProxy: $('cfgForceProxy').checked,
+      useJsdelivr: $('cfgUseJsdelivr').checked
+    })
+    if (!r.ok) { el.textContent = '测试失败：' + (r.error || '未知错误'); return }
+    const d = r.data || {}
+    const detail = (d.attempts || []).map(a => `${a.mirror}：${a.error ? '失败（' + a.error + '）' : 'HTTP ' + a.status} ${a.ms}ms`).join('；')
+    el.textContent = (d.ok ? `可用：经「${d.via}」取到探针文件（HTTP ${d.status}）` : '全部通道均失败')
+      + (detail ? ' —— ' + detail : '')
+    if (d.ok && d.via === 'proxy') toast('代理通道可用', 'ok')
+  } catch (e) {
+    el.textContent = '测试失败：' + String((e && e.message) || e)
+  }
+})
 
 async function testConn(explicit) {
   const chip = $('connChip'), txt = $('connText')

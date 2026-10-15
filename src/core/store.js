@@ -22,6 +22,14 @@ const DEFAULT_CONFIG = {
   activePlatformId: null,
   ghToken: '',
   mirror: 'auto',
+  // ---------------- 网络加速（v1.9.7，借鉴 songloft 版设置页） ----------------
+  // crawlProxy：HTTP 代理（http://host:port），仅作用于 GitHub 爬取链（仓库扫描/脚本/压缩包下载），
+  // 不影响音源检测的播放请求与灌入；forceProxy：把代理排到候选链最前；
+  // useJsdelivr：jsDelivr 是否参与镜像候选链；mirrorCustom：镜像选「自定义…」时的前缀基址。
+  crawlProxy: '',
+  forceProxy: false,
+  useJsdelivr: true,
+  mirrorCustom: '',
   customRepos: [],
   maxCandidatesPerRepo: 400,
   timeoutMs: 15000,

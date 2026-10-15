@@ -183,39 +183,201 @@ function parseRaw(url) {
 const GH_ASSET_RE = /^https?:\/\/(?:www\.)?github\.com\/[^/]+\/[^/]+\/releases\/download\//i
 function isGhAssetUrl(url) { return GH_ASSET_RE.test(String(url || '')) }
 
+/**
+ * 内置 raw 加速镜像（2026-10-15 实测筛选，判据 = HTTP 200 **且返回内容确实是目标文件**）：
+ *  - ✅ ghfast.top / gh-proxy.com / ghproxy.net / jsDelivr CDN 均返回正确文件内容；
+ *  - ❌ ghproxy.cn 返回 HTML 页面（站点已变质）、gh-proxy.net 返回 JS 挑战页、
+ *     FastGit（raw.fastgit.org）与 ghproxy.vvv.ee / gh1.lh1.one 域名已失效 —— 一律不内置，
+ *    免得 auto 链每轮白等一次超时。
+ * 只按状态码判断会误收「200 但不是文件」的站点，所以这里以实测内容为准定期复核。
+ */
 const MIRROR_PRESETS = [
   { id: 'direct', label: '直连 GitHub', prefix: true, build: u => u },
   { id: 'ghfast', label: 'ghfast.top', prefix: true, build: u => 'https://ghfast.top/' + u },
   { id: 'ghproxy', label: 'gh-proxy.com', prefix: true, build: u => 'https://gh-proxy.com/' + u },
   { id: 'ghproxy-net', label: 'ghproxy.net', prefix: true, build: u => 'https://ghproxy.net/' + u },
-  { id: 'jsdelivr', label: 'jsDelivr CDN', gh: true, build: (owner, repo, ref, p) => `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${p}` },
-  { id: 'fastgit', label: 'FastGit', gh: true, build: (owner, repo, ref, p) => `https://raw.fastgit.org/${owner}/${repo}/${ref}/${p}` }
+  { id: 'jsdelivr', label: 'jsDelivr CDN', gh: true, build: (owner, repo, ref, p) => `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${p}` }
 ]
 
+/* ================= 爬取代理 / 候选链开关（v1.9.7，借鉴 songloft 版网络设置） =================
+ * - crawlProxy：HTTP 代理（如 http://192.168.1.246:7890），仅作用于 GitHub 爬取链
+ *   （仓库扫描 / 脚本 / 压缩包下载，全部走 crawlFetch），不影响音源检测的播放请求与灌入。
+ * - forceProxy：把「经代理直连目标」排到候选链最前（代理稳定的环境省掉逐个镜像试错）。
+ * - useJsdelivr：jsDelivr 是否参与候选链（默认参与；关掉可排除 CDN 缓存旧文件的干扰）。
+ * - mirrorCustom：镜像下拉选「自定义…」时的前缀镜像基址。
+ * 零依赖实现：http 目标走代理绝对 URI；https 目标走 CONNECT 隧道 + TLS。
+ */
+const NETCFG = { crawlProxy: '', forceProxy: false, useJsdelivr: true, mirrorCustom: '' }
+function applyConfig(cfg) {
+  if (!cfg) return
+  if ('crawlProxy' in cfg) NETCFG.crawlProxy = String(cfg.crawlProxy || '').trim()
+  if ('forceProxy' in cfg) NETCFG.forceProxy = !!cfg.forceProxy
+  if ('useJsdelivr' in cfg) NETCFG.useJsdelivr = cfg.useJsdelivr !== false
+  if ('mirrorCustom' in cfg) NETCFG.mirrorCustom = String(cfg.mirrorCustom || '').trim()
+}
+
+function parseProxyUrl(p) {
+  const m = String(p || '').match(/^http:\/\/([^/:@]+)(?::(\d+))?\/?$/i)
+  if (!m) return null
+  return { host: m[1], port: Number(m[2] || 80) }
+}
+
+/** 把 chunked 传输编码解开（GitHub 大文件常用） */
+function dechunk(buf) {
+  const out = []
+  let i = 0
+  while (i < buf.length) {
+    const nl = buf.indexOf('\r\n', i)
+    if (nl < 0) break
+    const n = parseInt(buf.slice(i, nl).toString('utf8').trim(), 16)
+    if (!n) break
+    out.push(buf.slice(nl + 2, nl + 2 + n))
+    i = nl + 2 + n + 2
+  }
+  return Buffer.concat(out)
+}
+
+/** 解析手写 HTTP 响应：状态行 + headers + body */
+function parseHttpResponse(buf) {
+  const sep = buf.indexOf('\r\n\r\n')
+  if (sep < 0) throw new Error('代理响应格式异常（缺少响应头）')
+  const lines = buf.slice(0, sep).toString('utf8').split('\r\n')
+  const status = parseInt((lines[0].split(' ')[1] || '0'), 10)
+  const headers = {}
+  for (let i = 1; i < lines.length; i++) {
+    const m = lines[i].match(/^([^:]+):\s*(.*)$/)
+    if (m) headers[m[1].toLowerCase()] = m[2]
+  }
+  let body = buf.slice(sep + 4)
+  if (/chunked/i.test(headers['transfer-encoding'] || '')) body = dechunk(body)
+  return { status, headers, body }
+}
+
 /**
- * 生成候选 URL 列表：用户指定镜像优先，其次「直连 → 其余镜像」
+ * 通过 HTTP 代理请求任意 URL（零依赖，手写 HTTP/1.1）：
+ *  - https 目标：CONNECT 建隧道 → TLS → 明文 HTTP 写进加密通道；
+ *  - http 目标：绝对 URI 直接发给代理；
+ *  - 3xx 自动跟随（最多 5 跳），Connection: close 保证一次读全。
+ * 实测要点：别用 https.request + createConnection（会被默认 agent 绕过隧道，
+ * 表现为代理形同虚设 / ECONNRESET / 一直超时），手写请求最稳。
+ */
+function proxyFetchRaw(url, options, timeoutMs, proxyUrl, redirects) {
+  const proxy = parseProxyUrl(proxyUrl)
+  if (!proxy) return Promise.reject(new Error('爬取代理格式无效（应为 http://host:port）'))
+  return new Promise((resolve, reject) => {
+    const net = require('node:net')
+    const http = require('node:http')
+    const tls = require('node:tls')
+    const u = new URL(url)
+    const isHttps = u.protocol === 'https:'
+    const ms = timeoutMs || 15000
+    const hops = Number(redirects || 0)
+    let settled = false
+    const done = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v) } }
+    const timer = setTimeout(() => done(reject, new Error('请求超时 ' + ms + 'ms（经代理）')), ms)
+    const socks = []
+
+    // hop-by-hop 头不该透传给代理；Connection: close 让我们能靠 'end' 收全响应
+    // （注意顺序：先清 hop-by-hop，最后再补 Connection，否则会被自己删掉 → 一直等不到 end）
+    const headers = Object.assign({ Host: u.host }, (options && options.headers) || {})
+    delete headers['connection']; delete headers['Connection']
+    delete headers['proxy-connection']; delete headers['Proxy-Connection']
+    headers.Connection = 'close'
+    const method = (options && options.method) || 'GET'
+    const reqHead = `${method} ${isHttps ? (u.pathname + u.search) : url} HTTP/1.1\r\n`
+      + Object.keys(headers).map(k => `${k}: ${headers[k]}`).join('\r\n') + '\r\n\r\n'
+
+    const collect = (sock) => {
+      const chunks = []
+      sock.on('data', c => chunks.push(c))
+      sock.on('end', () => {
+        try {
+          const r = parseHttpResponse(Buffer.concat(chunks))
+          if (r.status >= 300 && r.status < 400 && r.headers.location && hops < 5) {
+            const next = new URL(r.headers.location, url).toString()
+            proxyFetchRaw(next, options, timeoutMs, proxyUrl, hops + 1).then(v => done(resolve, v)).catch(e => done(reject, e))
+            return
+          }
+          done(resolve, {
+            ok: r.status >= 200 && r.status < 300,
+            status: r.status,
+            headers: r.headers,
+            text: () => Promise.resolve(r.body.toString('utf8')),
+            arrayBuffer: () => Promise.resolve(r.body.buffer.slice(r.body.byteOffset, r.body.byteOffset + r.body.byteLength))
+          })
+        } catch (e) { done(reject, e) }
+      })
+      sock.on('error', e => done(reject, e))
+      sock.write(reqHead)
+    }
+
+    if (isHttps) {
+      const creq = http.request({
+        host: proxy.host, port: proxy.port, method: 'CONNECT',
+        path: u.hostname + ':' + (u.port || 443),
+        headers: { Host: u.hostname + ':' + (u.port || 443) }
+      })
+      socks.push(creq)
+      creq.on('connect', (res2, socket) => {
+        if (res2.statusCode !== 200) { try { socket.destroy() } catch (e) {} return done(reject, new Error('代理 CONNECT 失败 HTTP ' + res2.statusCode)) }
+        const t = tls.connect({ socket, servername: u.hostname }, () => collect(t))
+        socks.push(t)
+        t.on('error', e => done(reject, e))
+      })
+      creq.on('error', e => done(reject, e))
+      creq.end()
+    } else {
+      const s = net.connect(proxy.port, proxy.host, () => collect(s))
+      socks.push(s)
+      s.on('error', e => done(reject, e))
+      s.setTimeout(ms, () => { try { s.destroy(new Error('请求超时 ' + ms + 'ms（经代理）')) } catch (e) {} })
+    }
+  })
+}
+
+/** 自定义镜像（用户填的前缀基址，如 https://my-mirror.example.com） */
+function customPreset() {
+  const base = String(NETCFG.mirrorCustom || '').trim().replace(/\/+$/, '')
+  if (!/^https?:\/\//i.test(base)) return null
+  return { id: 'custom', label: '自定义镜像', prefix: true, build: u => base + '/' + u }
+}
+
+function jsdelivrAllowed() { return NETCFG.useJsdelivr !== false }
+
+/**
+ * 生成候选 URL 列表：
+ *  - 开了强制代理且配了爬取代理 → 「经代理直连目标」排最前（省去逐个镜像试错）；
+ *  - 用户指定镜像（含自定义）其次；然后直连，最后其余镜像兜底。
+ *  - useJsdelivr=false 时 jsDelivr 不参与（FastGit 仅 raw 路径，保留）。
  */
 function buildCandidates(rawUrl, mirrorId) {
+  mirrorId = mirrorId || NETCFG.mirror || 'auto'
   const out = []
-  const p = parseRaw(rawUrl)
   const push = (id, url) => { if (url && out.every(o => o.url !== url)) out.push({ id, url }) }
+  if (NETCFG.forceProxy && NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy)) push('proxy', rawUrl)
+  const p = parseRaw(rawUrl)
+  const pickPreset = (id) => id === 'custom' ? customPreset() : MIRROR_PRESETS.find(m => m.id === id)
   if (mirrorId && mirrorId !== 'auto' && mirrorId !== 'direct') {
-    const pre = MIRROR_PRESETS.find(m => m.id === mirrorId)
+    const pre = pickPreset(mirrorId)
     if (pre && p) push(pre.id, pre.gh ? pre.build(p.owner, p.repo, p.ref, p.path) : pre.build(rawUrl))
     else if (pre) push(pre.id, pre.build(rawUrl))
   }
   push('direct', rawUrl)
   if (p) {
     for (const m of MIRROR_PRESETS) {
-      if (m.id === 'direct') continue
+      if (m.id === 'direct' || (m.id === 'jsdelivr' && !jsdelivrAllowed())) continue
       try { push(m.id, m.gh ? m.build(p.owner, p.repo, p.ref, p.path) : m.build(rawUrl)) } catch (e) {}
     }
+    const cp = customPreset()
+    if (cp && mirrorId !== 'custom') { try { push(cp.id, cp.build(rawUrl)) } catch (e) {} }
   } else if (isGhAssetUrl(rawUrl)) {
     // github.com releases 资产：只有前缀型镜像能代理（jsdelivr/fastgit 仅服务 raw 路径）
     for (const m of MIRROR_PRESETS) {
       if (m.id === 'direct' || m.gh) continue
       try { push(m.id, m.build(rawUrl)) } catch (e) {}
     }
+    const cp = customPreset()
+    if (cp && mirrorId !== 'custom') { try { push(cp.id, cp.build(rawUrl)) } catch (e) {} }
   }
   return out
 }
@@ -232,7 +394,9 @@ async function crawlFetch(rawUrl, options, timeoutMs, mirrorId, preferredId) {
   for (const c of cands) {
     const t0 = Date.now()
     try {
-      const res = await fetchWithTimeout(c.url, Object.assign({ headers: { 'User-Agent': UA } }, options || {}), timeoutMs)
+      const res = c.id === 'proxy' && NETCFG.crawlProxy
+        ? await proxyFetchRaw(c.url, Object.assign({ headers: { 'User-Agent': UA } }, options || {}), timeoutMs, NETCFG.crawlProxy)
+        : await fetchWithTimeout(c.url, Object.assign({ headers: { 'User-Agent': UA } }, options || {}), timeoutMs)
       attempts.push({ mirror: c.id, url: c.url, status: res.status, ms: Date.now() - t0 })
       if (res.ok) return { res, url: c.url, mirror: c.id, attempts }
       if (res.status === 404) { // 404 说明镜像工作正常但文件不在，继续试下一个没意义
@@ -245,7 +409,23 @@ async function crawlFetch(rawUrl, options, timeoutMs, mirrorId, preferredId) {
   return { res: null, url: rawUrl, mirror: null, attempts }
 }
 
+/** 网络连通性测试（设置页「测试」按钮）：对探针 URL 跑一遍候选链，报告每条通道的耗时/结果 */
+async function testNetwork(opts) {
+  const o = opts || {}
+  const probe = String(o.url || 'https://raw.githubusercontent.com/zues0077/lx-hunter/main/package.json')
+  // 测试时用传入的配置快照，而不是全局 NETCFG（便于「保存前」先试）
+  const saved = Object.assign({}, NETCFG)
+  try {
+    applyConfig({ crawlProxy: o.crawlProxy != null ? o.crawlProxy : saved.crawlProxy, forceProxy: o.forceProxy != null ? o.forceProxy : saved.forceProxy, useJsdelivr: o.useJsdelivr != null ? o.useJsdelivr : saved.useJsdelivr, mirrorCustom: o.mirrorCustom != null ? o.mirrorCustom : saved.mirrorCustom })
+    const r = await crawlFetch(probe, null, o.timeoutMs || 12000, o.mirror || 'auto', null)
+    return { ok: !!(r.res && r.res.ok), status: r.res ? r.res.status : null, via: r.mirror, attempts: r.attempts }
+  } finally {
+    Object.assign(NETCFG, saved)
+  }
+}
+
 module.exports = {
   fetchWithTimeout, fetchAnyWithTimeout, readText, buildCandidates, crawlFetch, sleep, UA, MIRROR_PRESETS,
-  hostFetch, describeNetError, isConnLevel, buildDualChannel, dohLookup, isGhAssetUrl
+  hostFetch, describeNetError, isConnLevel, buildDualChannel, dohLookup, isGhAssetUrl,
+  applyConfig, testNetwork, proxyFetchRaw, customPreset
 }

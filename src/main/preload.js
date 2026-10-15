@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 const api = {
   configGet: () => ipcRenderer.invoke('config:get'),
   configSet: (patch) => ipcRenderer.invoke('config:set', patch),
+  netTest: (opts) => ipcRenderer.invoke('net:test', opts),
   serviceTest: (cfg) => ipcRenderer.invoke('service:test', cfg),
   serviceList: () => ipcRenderer.invoke('service:list'),
   serviceReconcile: (platformId, liveIds) => ipcRenderer.invoke('service:reconcile', platformId, liveIds),

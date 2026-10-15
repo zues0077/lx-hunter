@@ -173,7 +173,14 @@ route('POST', '/api/config', guard(async (req, res, ctx) => {
     ctx.body._reposNormalized = out.length
   }
   store.saveConfig(ctx.body)
+  require('../core/net').applyConfig(store.config) // 网络设置改动即时生效
   return store.config
+}))
+
+// 网络连通性测试（设置页「测试」按钮）：对探针 URL 跑一遍候选链
+route('POST', '/api/net/test', guard(async (req, res, ctx) => {
+  const { testNetwork } = require('../core/net')
+  return await testNetwork(ctx.body || {})
 }))
 
 route('POST', '/api/service/test', guard(async (req, res, ctx) => {
@@ -369,6 +376,8 @@ server.keepAliveTimeout = 75000
 // ---------------- 启动 ----------------
 store = new Store(DATA_DIR)
 hunter = new Hunter(store, emitAll)
+// 网络加速配置（爬取代理/强制代理/jsDelivr 开关/自定义镜像）在启动时同步到网络层
+require('../core/net').applyConfig(store.config)
 
 server.listen(PORT, '0.0.0.0', () => {
   pushLog({

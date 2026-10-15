@@ -123,6 +123,8 @@ app.whenReady().then(() => {
   }
   store = new Store(getDataDir())
   hunter = new Hunter(store, emitAll)
+  // 网络加速配置（爬取代理/强制代理/jsDelivr 开关/自定义镜像）在启动时同步到网络层
+  require('../core/net').applyConfig(store.config)
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
   // ---- 定时任务：巡检 / 爬取（v1.7.0 起，v1.9.0 起爬取可接自动灌入）----
@@ -189,7 +191,13 @@ ipcMain.handle('config:set', guard((e, patch) => {
     patch._reposNormalized = patch.customRepos.length
   }
   store.saveConfig(patch)
+  require('../core/net').applyConfig(store.config) // 网络设置改动即时生效
   return store.config
+}))
+
+ipcMain.handle('net:test', guard(async (e, opts) => {
+  const { testNetwork } = require('../core/net')
+  return await testNetwork(opts || {})
 }))
 
 ipcMain.handle('service:test', guard(async (e, cfgOverride) => {

@@ -480,5 +480,32 @@ const wbSrc = read('src/renderer/web-bridge.js')
 ck('Web 角标版本号取 /api/health 动态获取', has(wbSrc, /call\('\/api\/health'\)/))
 ck('Web 角标不再写死版本号', !/textContent\s*=\s*['"]Web\/Docker 版 v\d/.test(wbSrc))
 
+// ---- v1.9.7：网络加速（借鉴 songloft 版设置页）——爬取代理/强制代理/jsDelivr 开关/自定义镜像 ----
+// 内置镜像以 2026-10-15 实测为准：只留返回真实文件内容的（ghfast.top / gh-proxy.com /
+// ghproxy.net / jsDelivr），失效的 FastGit、ghproxy.vvv.ee、gh1.lh1.one 一律不内置，
+// 免得 auto 链每轮白等一次超时。判据必须是「HTTP 200 且内容正确」——只看状态码
+// 会误收 ghproxy.cn（返回 HTML 页面）这类已变质的站点。
+console.log('\n== v1.9.7 网络加速 ==')
+const netSrc2 = read('src/core/net.js')
+ck('net 层提供爬取代理（http CONNECT）', has(netSrc2, /CONNECT/) && has(netSrc2, /proxyFetchRaw/))
+ck('net 层支持强制代理（代理排候选最前）', has(netSrc2, /forceProxy/) && has(netSrc2, /push\('proxy', rawUrl\)/))
+ck('net 层支持 jsDelivr 开关', has(netSrc2, /useJsdelivr/))
+ck('net 层支持自定义镜像', has(netSrc2, /mirrorCustom/) && has(netSrc2, /customPreset/))
+// 只看 MIRROR_PRESETS 数组本体：注释里会点名这些失效域名，直接全文匹配会误伤自己
+const presetBlock = (netSrc2.match(/const MIRROR_PRESETS = \[[\s\S]*?\n\]/) || [''])[0]
+ck('内置镜像不含已失效域名（FastGit / vvv.ee / gh1.lh1.one / ghproxy.cn）',
+  presetBlock.length > 0 && !/fastgit|ghproxy\.vvv\.ee|gh1\.lh1\.one|ghproxy\.cn/.test(presetBlock))
+ck('设置页提供爬取代理输入框', has(html, /id="cfgCrawlProxy"/))
+ck('设置页提供强制代理 / jsDelivr 开关', has(html, /id="cfgForceProxy"/) && has(html, /id="cfgUseJsdelivr"/))
+ck('设置页提供自定义镜像与测试按钮', has(html, /id="cfgMirrorCustom"/) && has(html, /id="btnNetTest"/))
+ck('镜像下拉不再有 FastGit 选项', !/value="fastgit"/.test(html))
+ck('Web 版暴露 /api/net/test', has(read('src/server/web.js'), /\/api\/net\/test/))
+ck('桌面版暴露 net:test 通道', has(read('src/main/index.js'), /net:test/) && has(read('src/main/preload.js'), /netTest/))
+ck('设置保存后即时同步到网络层', has(read('src/server/web.js'), /applyConfig\(store\.config\)/))
+// 发行包里的 package.json 被 electron-builder 裁掉了 scripts，所以这条要读源码仓库里的
+const srcPkg = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')
+ck('网络加速测试存在且被纳入 npm test',
+  /net-accel\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/net-accel.test.js')))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

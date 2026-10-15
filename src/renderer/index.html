@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.6</div>
+        <div class="brand-sub">PC 版 v1.9.7</div>
       </div>
     </div>
     <nav class="nav">
@@ -288,14 +288,23 @@
               <option value="ghproxy">gh-proxy.com</option>
               <option value="ghproxy-net">ghproxy.net</option>
               <option value="jsdelivr">jsDelivr CDN</option>
-              <option value="fastgit">FastGit</option>
+              <option value="custom">自定义…（在下方填写）</option>
             </select>
           </label>
+          <label class="field" id="rowMirrorCustom" style="display:none"><span>自定义镜像基址</span><input class="input" id="cfgMirrorCustom" type="text" placeholder="https://your-mirror.example.com"></label>
+          <label class="field"><span>爬取代理（可选）</span><input class="input" id="cfgCrawlProxy" type="text" placeholder="http://192.168.1.246:7890"></label>
           <label class="field"><span>单仓库候选上限</span><input class="input" id="cfgMaxCand" type="number"></label>
           <label class="field"><span>并发数（1–16）</span><input class="input" id="cfgConc" type="number" min="1" max="16"></label>
           <label class="field"><span>下载超时 (ms)</span><input class="input" id="cfgTmo" type="number"></label>
           <label class="field"><span>取链超时 (ms)</span><input class="input" id="cfgLinkTmo" type="number"></label>
         </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgForceProxy"><span>强制代理：把代理排在候选链最前（代理稳定时省去逐个镜像试错）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgUseJsdelivr"><span>jsDelivr 加速（关闭后不再使用 jsDelivr 兜底，避免 CDN 缓存旧脚本）</span></label>
+          <button class="ghost" id="btnNetTest" type="button" style="align-self:flex-start">测试网络连通</button>
+        </div>
+        <div class="field-row"><span class="hint" id="netTestResult"></span></div>
+        <div class="field-row"><span class="hint" style="width:auto">爬取代理只用于 GitHub 爬取（仓库扫描 / 脚本与压缩包下载），格式 <code>http://host:port</code>，不影响音源检测与灌入；内置镜像为 2026-10-15 实测可用（ghfast.top / gh-proxy.com / ghproxy.net / jsDelivr），失效镜像已剔除</span></div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgAutoUnsafe"><span>脚本要求 VM 模式时自动放行（有安全风险）</span></label>
         </div>
@@ -397,7 +406,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=28"></script>
-<script src="app.js?v=29"></script>
+<script src="web-bridge.js?v=30"></script>
+<script src="app.js?v=30"></script>
 </body>
 </html>
