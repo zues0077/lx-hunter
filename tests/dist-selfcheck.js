@@ -471,5 +471,14 @@ ck('设置页开关文案更新（每次灌入 + 反调试特征）',
   has(html, /每次灌入自动剔除/) && has(html, /空转死循环 while\(!!\[\]\)\{\}/))
 ck('renderer obfTip 同步新特征描述', has(appSrc, /空转死循环 while\(!!\[\]\)\{\}/) && has(appSrc, /混淆自调度定时器/))
 
+// ---- v1.9.6：修复 Web 版角标写死 v1.9.0（升级后界面版本号不变） ----
+// v1.9.0 时 web-bridge.js 把品牌字样写死成 'Web/Docker 版 v1.9.0'，之后每次升级
+// 界面都还显示 v1.9.0，用户无法分辨运行版本（2026-10-15 在 NAS 上实测踩中）。
+// 修为动态取 /api/health 的 version（读镜像内 package.json），并加断言禁止再写死。
+console.log('\n== v1.9.6 Web 角标版本号动态化 ==')
+const wbSrc = read('src/renderer/web-bridge.js')
+ck('Web 角标版本号取 /api/health 动态获取', has(wbSrc, /call\('\/api\/health'\)/))
+ck('Web 角标不再写死版本号', !/textContent\s*=\s*['"]Web\/Docker 版 v\d/.test(wbSrc))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

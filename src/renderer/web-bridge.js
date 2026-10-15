@@ -114,7 +114,17 @@
     onEvent: cb => subscribe('event', cb)
   }
 
-  // 角标标注运行形态，避免和桌面版截图混淆
+  // 角标标注运行形态，避免和桌面版截图混淆。
+  // 版本号必须动态取服务端实际版本（/api/health 读的是镜像内 package.json）：
+  // v1.9.0 时这里写死过 'Web/Docker 版 v1.9.0'，之后每次升级界面都还显示 v1.9.0，
+  // 用户根本分不出自己跑的是哪版（2026-10-15 实测踩中）。写死字符串每版都要记得改，
+  // 动态取版一劳永逸，且 dist-selfcheck 有回归断言禁止再写死。
   const brand = document.querySelector('.brand-sub')
-  if (brand) brand.textContent = 'Web/Docker 版 v1.9.0'
+  if (brand) {
+    brand.textContent = 'Web/Docker 版'
+    call('/api/health').then(d => {
+      const v = d && d.data && d.data.version
+      if (v) brand.textContent = 'Web/Docker 版 v' + v
+    }).catch(() => { /* 取不到就保留「Web/Docker 版」，不编造版本号 */ })
+  }
 })()
