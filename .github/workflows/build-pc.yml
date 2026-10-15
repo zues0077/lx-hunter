@@ -1,0 +1,64 @@
+name: Build PC (Electron) Release
+
+# 构建 Windows 便携版（portable .exe）并挂到对应 Release。
+# - 打 v* tag 时自动跑（用 tag 对应的代码构建）
+# - 也可手动 workflow_dispatch，指定已存在的 tag 重新构建/补充资产
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并挂载资产的 Release tag（留空则用触发时的 ref）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-pc:
+    name: Build Windows portable exe
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Build portable exe
+        run: npm run dist
+        env:
+          # 避免 electron-builder 尝试自动代码签名（仓库无证书）
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Rename artifact to clean ASCII name
+        # GitHub 会剥掉资产名里的非 ASCII 字符（音源猎手PC-*.exe → PC-*.exe），
+        # 故上传前统一改名成 lx-hunter-pc-<version>-x64.exe
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          SRC=$(ls dist/*.exe | head -n1)
+          DST="dist/lx-hunter-pc-${VER}-x64.exe"
+          mv "$SRC" "$DST"
+          echo "renamed -> $DST"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 挂到已存在的 Release（不存在则新建）；append 资产
+          tag_name: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}
+          files: dist/lx-hunter-pc-*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
