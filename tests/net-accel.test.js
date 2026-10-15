@@ -101,6 +101,14 @@ function startProxy() {
   } catch (e) {
     ck('代理格式非法时明确报错', /格式无效/.test(String(e.message)), e.message)
   }
+  // v1.9.8 回归：探针 404 时也要把全部通道测完（此前复用 crawlFetch，遇 404 提前返回只报一条）
+  const nf = http.createServer((req, res) => { res.writeHead(404); res.end('no') })
+  await new Promise(r => nf.listen(0, '127.0.0.1', r))
+  const t404 = await net.testNetwork({ url: 'http://127.0.0.1:' + nf.address().port + '/x', crawlProxy: proxyUrl, forceProxy: true, timeoutMs: 5000 })
+  ck('404 探针仍测完全部通道且逐条报状态',
+    t404.ok === false && (t404.attempts || []).length >= 2 && t404.attempts.every(a => a.status === 404),
+    JSON.stringify(t404.attempts))
+  nf.close()
   echo.close(); proxy.close()
 
   // ---------- 8. testNetwork：用传入快照测试，测完恢复全局配置 ----------

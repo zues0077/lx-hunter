@@ -327,8 +327,18 @@ $('btnNetTest').addEventListener('click', async () => {
     if (!r.ok) { el.textContent = '测试失败：' + (r.error || '未知错误'); return }
     const d = r.data || {}
     const detail = (d.attempts || []).map(a => `${a.mirror}：${a.error ? '失败（' + a.error + '）' : 'HTTP ' + a.status} ${a.ms}ms`).join('；')
-    el.textContent = (d.ok ? `可用：经「${d.via}」取到探针文件（HTTP ${d.status}）` : '全部通道均失败')
-      + (detail ? ' —— ' + detail : '')
+    // 404 特殊说明：能收到 404 说明这条通道本身是通的（连接、TLS、代理都正常），
+    // 只是探针文件不存在；真正不通的通道报的是超时/连接错误
+    const reached = (d.attempts || []).filter(a => a.status != null && a.status !== 404)
+    const notFound = (d.attempts || []).filter(a => a.status === 404)
+    const verdict = d.ok
+      ? `可用：经「${d.via}」取到探针文件（HTTP ${d.status}）`
+      : reached.length
+        ? '未取到探针文件，但以下通道本身是通的（连接正常，被目标拒了内容）'
+        : notFound.length
+          ? '未取到探针文件，但收到 404 的通道本身是通的（连接正常，只是文件不在/仓库私有）'
+          : '全部通道均失败（连接层面不通：超时/被拒/代理不可用）'
+    el.textContent = verdict + (detail ? ' —— ' + detail : '')
     if (d.ok && d.via === 'proxy') toast('代理通道可用', 'ok')
   } catch (e) {
     el.textContent = '测试失败：' + String((e && e.message) || e)

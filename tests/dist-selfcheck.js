@@ -507,5 +507,17 @@ const srcPkg = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')
 ck('网络加速测试存在且被纳入 npm test',
   /net-accel\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/net-accel.test.js')))
 
+// ---- v1.9.8：网络测试探针与候选链去重修复 ----
+// 用户反馈「测试全部通道失败」但只报了一条 proxy: HTTP 404：
+//  ① 默认探针用了私有仓库 zues0077/lx-hunter，raw 未授权返回 404，被当成通道不通；
+//  ② crawlFetch 遇 404 提前返回，其余通道根本没测；
+//  ③ 候选链按 URL 去重，把「经代理直连」和「直连」（URL 相同、通道不同）合并成一条。
+console.log('\n== v1.9.8 网络测试探针修复 ==')
+ck('测试探针改用公开仓库文件', has(netSrc2, /zlyon\/lx-hunter\/main\/plugin\.json/))
+ck('不再用私有仓库做探针', !/zues0077\/lx-hunter\/main\/package\.json/.test(netSrc2))
+ck('测试遇 404 继续测其余通道', has(netSrc2, /404 也继续测下一条通道/))
+ck('候选链按「通道+URL」去重而非只按 URL', has(netSrc2, /o\.id === id && o\.url === url/))
+ck('测试按钮能解释 404 语义', has(appSrc, /收到 404 的通道本身是通的/))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

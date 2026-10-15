@@ -353,7 +353,9 @@ function jsdelivrAllowed() { return NETCFG.useJsdelivr !== false }
 function buildCandidates(rawUrl, mirrorId) {
   mirrorId = mirrorId || NETCFG.mirror || 'auto'
   const out = []
-  const push = (id, url) => { if (url && out.every(o => o.url !== url)) out.push({ id, url }) }
+  // 按「通道 + URL」去重，而不是只按 URL：经代理直连与直连的 URL 相同但通道不同，
+  // 只按 URL 去重会把其中一条吃掉（测试模式下就只报一条，看不出第二条通不通）
+  const push = (id, url) => { if (url && out.every(o => !(o.id === id && o.url === url))) out.push({ id, url }) }
   if (NETCFG.forceProxy && NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy)) push('proxy', rawUrl)
   const p = parseRaw(rawUrl)
   const pickPreset = (id) => id === 'custom' ? customPreset() : MIRROR_PRESETS.find(m => m.id === id)
@@ -412,13 +414,29 @@ async function crawlFetch(rawUrl, options, timeoutMs, mirrorId, preferredId) {
 /** 网络连通性测试（设置页「测试」按钮）：对探针 URL 跑一遍候选链，报告每条通道的耗时/结果 */
 async function testNetwork(opts) {
   const o = opts || {}
-  const probe = String(o.url || 'https://raw.githubusercontent.com/zues0077/lx-hunter/main/package.json')
+  // 探针必须用公开仓库文件：私有仓库的 raw 未授权返回 404，会被误判成「通道失败」
+  const probe = String(o.url || 'https://raw.githubusercontent.com/zlyon/lx-hunter/main/plugin.json')
   // 测试时用传入的配置快照，而不是全局 NETCFG（便于「保存前」先试）
   const saved = Object.assign({}, NETCFG)
   try {
     applyConfig({ crawlProxy: o.crawlProxy != null ? o.crawlProxy : saved.crawlProxy, forceProxy: o.forceProxy != null ? o.forceProxy : saved.forceProxy, useJsdelivr: o.useJsdelivr != null ? o.useJsdelivr : saved.useJsdelivr, mirrorCustom: o.mirrorCustom != null ? o.mirrorCustom : saved.mirrorCustom })
-    const r = await crawlFetch(probe, null, o.timeoutMs || 12000, o.mirror || 'auto', null)
-    return { ok: !!(r.res && r.res.ok), status: r.res ? r.res.status : null, via: r.mirror, attempts: r.attempts }
+    // 测试与真实爬取不同：404 也继续测下一条通道，把每条通道的真实状态都报告出来
+    const cands = buildCandidates(probe, o.mirror || 'auto')
+    const attempts = []
+    let hit = null
+    for (const c of cands) {
+      const t0 = Date.now()
+      try {
+        const res = c.id === 'proxy' && NETCFG.crawlProxy
+          ? await proxyFetchRaw(c.url, Object.assign({ headers: { 'User-Agent': UA } }, o.headers || {}), o.timeoutMs || 12000, NETCFG.crawlProxy)
+          : await fetchWithTimeout(c.url, Object.assign({ headers: { 'User-Agent': UA } }, o.headers || {}), o.timeoutMs || 12000)
+        attempts.push({ mirror: c.id, url: c.url, status: res.status, ms: Date.now() - t0 })
+        if (res.ok && !hit) hit = { status: res.status, mirror: c.id, res }
+      } catch (e) {
+        attempts.push({ mirror: c.id, url: c.url, error: String(e && e.message || e), ms: Date.now() - t0 })
+      }
+    }
+    return { ok: !!hit, status: hit ? hit.status : (attempts.find(a => a.status != null) || {}).status || null, via: hit ? hit.mirror : null, attempts }
   } finally {
     Object.assign(NETCFG, saved)
   }
