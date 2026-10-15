@@ -247,11 +247,14 @@ async function testLxserver() {
 
 // ---------------------------------------------------------------- geelonn 适配器
 async function testGeelonn() {
-  console.log('\n[geelonn 适配器（登录制鉴权）]')
-  // 实测（2026-10-15，自建 v3.0.1）：fork 没有 /api/admin/verify（404），管理接口也不认
-  // x-frontend-auth 明文密码（403）——走 POST /api/user/login 换 token，之后带
-  // x-user-name + x-user-token 访问 custom-source 管理接口。
-  const acct = { id: 'g', type: 'geelonn', url: 'http://geelonn:8195/', username: 'admin', password: 'gpw', timeoutMs: 25000 }
+  console.log('\n[geelonn 适配器（登录制鉴权 + 登录账号/落点分离）]')
+  // 实测（2026-10-15，自建 v3.0.1）：
+  //  1) 鉴权：无 /api/admin/verify（404），管理接口不认 x-frontend-auth 明文密码（403）；
+  //     走 POST /api/user/login 换 token，之后带 x-user-name + x-user-token。
+  //  2) 登录必须用**真实账号**（default 登录 → 401），故登录账号独立成 loginUser（留空默认 admin）。
+  //  3) 落点由「用户名」决定：留空/default → body username=default → owner=open（公开源）；
+  //     具名 → owner=<账号名>（该账号私有列表）。v1.9.3 误把登录账号当落点，音源全进 admin 私有列表。
+  const acct = { id: 'g', type: 'geelonn', url: 'http://geelonn:8195/', username: '', loginUser: 'admin', password: 'gpw', timeoutMs: 25000 }
   const seen = []
   net.fetchWithTimeout = async (url, init) => {
     seen.push({ url: String(url), init })
@@ -273,24 +276,50 @@ async function testGeelonn() {
   assert.strictEqual(v.ok, true)
   const loginReq = seen.find(s => s.url.endsWith('/api/user/login'))
   assert.ok(loginReq, '未发起登录请求')
-  assert.strictEqual(JSON.parse(loginReq.init.body).username, 'admin')
+  assert.strictEqual(JSON.parse(loginReq.init.body).username, 'admin', '登录必须取 loginUser（不能拿落点去登录）')
   assert.strictEqual(JSON.parse(loginReq.init.body).password, 'gpw')
-  ok('verify：走 POST /api/user/login 换 token（fork 无 /api/admin/verify）')
+  assert.ok(/公开源/.test(v.msg), '落点为空应提示公开源：' + v.msg)
+  ok('verify：用 loginUser 登录（落点为空 → 提示「灌入落点：公开源」）')
 
   const vbad = await a.verify(Object.assign({}, acct, { password: 'wrong' }))
   assert.strictEqual(vbad.ok, false)
   assert.ok(/密码错误/.test(vbad.msg), '401 应转成友好文案：' + vbad.msg)
-  ok('verify：401 Invalid credentials → 「管理员账号或密码错误」')
+  ok('verify：401 Invalid credentials → 「登录账号或密码错误」')
 
-  // list：公开读 + 必须携带登录态头
+  // 落点映射：空/open/default → 'default'（公开源）；具名 → 该账号
+  assert.strictEqual(a.targetUsername({ username: '' }), 'default')
+  assert.strictEqual(a.targetUsername({ username: 'default' }), 'default')
+  assert.strictEqual(a.targetUsername({ username: 'admin' }), 'admin')
+  ok('targetUsername：留空 / default → 公开源（default）；填 admin → 该账号私有列表')
+
+  // list：只读「落点那一份」（不混登录账号的私有源，否则同名源会被误判「服务端已有」而漏灌）
   seen.length = 0
   const list = await a.list(acct)
   assert.ok(Array.isArray(list))
   const listReq = seen.find(s => String(s.url).includes('/api/custom-source/list?username=default'))
-  assert.ok(listReq, '未按公开源身份拉取：' + seen.map(s => s.url).join(' , '))
+  assert.ok(listReq, '未按公开源落点拉取：' + seen.map(s => s.url).join(' , '))
   assert.strictEqual(listReq.init.headers['x-user-name'], 'admin')
   assert.strictEqual(listReq.init.headers['x-user-token'], 'GTKN')
-  ok('list：公开源读取携带 x-user-name + x-user-token 登录态')
+  ok('list：落点为空 → list?username=default（公开源），且携带登录态头')
+
+  seen.length = 0
+  const acctPriv = Object.assign({}, acct, { username: 'admin' })
+  await a.list(acctPriv)
+  assert.ok(seen.some(s => String(s.url).includes('list?username=admin')),
+    '落点填 admin 时未按该账号拉取：' + seen.map(s => s.url).join(' , '))
+  ok('list：落点填 admin → list?username=admin（该账号私有视图）')
+
+  // upload 落点：留空 → default(owner=open)；填 admin → 该账号私有
+  seen.length = 0
+  await a.upload(acct, 'const A=1', 'x.js')
+  const upOpen = seen.find(s => s.url.endsWith('/api/custom-source/upload'))
+  assert.ok(upOpen, '未发起 upload')
+  assert.strictEqual(JSON.parse(upOpen.init.body).username, 'default', '落点为空必须灌到 default（公开源 owner=open）')
+  seen.length = 0
+  await a.upload(acctPriv, 'const A=1', 'x.js')
+  const upPriv = seen.find(s => s.url.endsWith('/api/custom-source/upload'))
+  assert.strictEqual(JSON.parse(upPriv.init.body).username, 'admin', '落点填 admin 应灌到该账号私有列表')
+  ok('upload：用户名留空 → 公开源；填 admin → 私有列表')
 
   // token 失效自愈：管理接口第一次 401 → 自动强制重登 → 重试成功
   seen.length = 0
@@ -366,6 +395,19 @@ function testMigration() {
   assert.strictEqual(st2.config.platforms[0].enabled, true)
   ok('已有多平台配置 → 原样保留，仅补齐缺失默认字段')
 
+  // Geelonn 语义修正（v1.9.4）：v1.9.3 的 username 其实是「登录账号」（被当落点用 → 音源全进
+  // 私有列表），升级后应迁到 loginUser，并把落点恢复为空（＝公开源），否则老用户升级后依旧灌私有。
+  const dir4 = fs.mkdtempSync(path.join(os.tmpdir(), 'lxh-'))
+  fs.writeFileSync(path.join(dir4, 'config.json'), JSON.stringify({
+    platforms: [{ id: 'pg', type: 'geelonn', name: 'Geelonn', url: 'http://g:8195', username: 'admin', password: 'pw', timeoutMs: 25000, enabled: true }],
+    activePlatformId: 'pg'
+  }))
+  const st4 = new Store(dir4)
+  const pg = st4.config.platforms[0]
+  assert.strictEqual(pg.loginUser, 'admin', 'v1.9.3 的 username 应迁到 loginUser')
+  assert.strictEqual(pg.username, '', '落点应复位为空（＝公开源）')
+  ok('Geelonn 老账号（username=登录账号）→ 迁到 loginUser，落点复位为公开源')
+
   // 空配置：不凭空造账号（UI 会提示先添加）
   const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'lxh-'))
   const st3 = new Store(dir3)
@@ -376,6 +418,7 @@ function testMigration() {
   fs.rmSync(dir, { recursive: true, force: true })
   fs.rmSync(dir2, { recursive: true, force: true })
   fs.rmSync(dir3, { recursive: true, force: true })
+  fs.rmSync(dir4, { recursive: true, force: true })
 }
 
 ;(async () => {

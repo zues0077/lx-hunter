@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.3</div>
+        <div class="brand-sub">PC 版 v1.9.4</div>
       </div>
     </div>
     <nav class="nav">
@@ -259,10 +259,12 @@
             </label>
             <label class="field"><span>账号名称</span><input class="input" id="accName" placeholder="如：家里 NAS / 备用机 / 主账号"></label>
             <label class="field"><span>服务地址</span><input class="input" id="accUrl" placeholder="http://地址:端口"></label>
-            <label class="field"><span>用户名</span><input class="input" id="accUser" placeholder="lxserver 填 default 或账号名；Songloft/MusicSync 填登录账号"></label>
+            <label class="field"><span>用户名</span><input class="input" id="accUser" placeholder="灌入落点：留空或 default＝公开源；填账号名＝该账号私有列表"></label>
             <label class="field"><span>密码</span><input class="input" id="accPwd" type="password" placeholder="LX Server 填 frontend.password；Geelonn/Songloft/MusicSync 填网页登录密码"></label>
+            <label class="field"><span>登录账号</span><input class="input" id="accLogin" placeholder="仅 Geelonn 需要；留空默认 admin"></label>
             <label class="field"><span>超时 (ms)</span><input class="input" id="accTmo" type="number" placeholder="25000"></label>
           </div>
+          <p class="hint" id="accHint"></p>
           <div class="field-row">
             <label class="chk"><input type="checkbox" id="accBatch"><span><strong>参与批量灌入</strong>（勾了才会被「灌入选中的音源 / 灌入全部可用」以及「定时爬取后自动灌入」同时灌入；一个都不勾时只灌当前选中账号）</span></label>
           </div>

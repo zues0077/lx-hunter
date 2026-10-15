@@ -44,7 +44,7 @@ docker run -d --name lx-hunter \
 | 平台 | 地址填什么 | 账号 / 密码 |
 | --- | --- | --- |
 | **LX Server**（自建服务） | 形如 `http://<IP>:7968` | 用户名 = 灌入落点（见下表）；密码 = 服务端配置里的 `frontend.password`——**不是**网页登录账号的密码，两套体系互不相通 |
-| **Geelonn LX Server**（gefl24/lxserver） | 形如 `http://<IP>:8195` | **网页登录账号密码**（如 `admin` / 后台密码）——该 fork 走用户登录制（`POST /api/user/login` 换 token），不用 `frontend.password`。**用户名必须是真实存在的登录账号**（`default` 不可登录）；灌入落点沿用 LX Server 口径（`default`=公开源，具名=该账号私有列表），灌入身份与登录身份同名时即落到该账号自己的列表 |
+| **Geelonn LX Server**（gefl24/lxserver） | 形如 `http://<IP>:8195` | **用户名 = 灌入落点**（留空 / `default` = 公开源；`admin` 等账号名 = 该账号私有列表）；**登录账号**（独立字段，留空默认 `admin`）+ **密码** = 网页登录账号密码——该 fork 走用户登录制（`POST /api/user/login` 换 token），不用 `frontend.password`，且**必须用真实存在的账号登录**（`default` 不能登录），所以登录账号与落点要分开填 |
 | **Songloft**（平台内 lxmusic 插件） | Songloft 站点地址 | Songloft 的登录账号密码（插件的音源管理要先登录才能用） |
 | **MusicSync** | MusicSync 站点地址 | MusicSync 的登录账号密码 |
 
@@ -54,12 +54,14 @@ docker run -d --name lx-hunter \
 
 旧版本只有「服务地址 / 管理员密码 / 用户名」三项的配置，升级后会自动变成第一个 LX Server 账号，不用重新填。
 
-### LX Server 的「用户名 = 灌入落点」
+### 「用户名 = 灌入落点」（LX Server / Geelonn LX Server 通用）
 
 | 填 | 音源去哪 | 谁能看到 |
 | --- | --- | --- |
-| `default` / `open` / 留空 | 公开源（`owner=open`） | 所有账号可用，LX 网页端「音源管理」可见可管 |
+| 留空 / `default` / `open` | 公开源（`owner=open`） | 所有账号可用，LX 网页端「音源管理」可见可管 |
 | 具体账号名（如 `admin`） | 该账号的私有源列表 | 只有该账号登录后可见可用，公共列表看不到 |
+
+> **Geelonn 额外注意**：它的登录鉴权与落点是两回事——「登录账号」+「密码」用于登录（`POST /api/user/login`），「用户名」决定音源落到哪个列表。所以**只想灌公开源时**：用户名留空（或 `default`）+ 登录账号 `admin` + 后台密码即可；填 `admin` 则灌进 admin 的私有列表。老版本（v1.9.3）的 Geelonn 账号升级后会自动把原「用户名」迁到「登录账号」，落点复位为公开源。
 
 删除、停用、平台开关按每条音源各自的归属路由，不会串；**公开源清理始终只删公开源**。
 

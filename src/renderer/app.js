@@ -353,7 +353,7 @@ function renderPlatforms() {
         <span class="acct-dot ${p.type}"></span>
         <div class="acct-meta">
           <div class="acct-name">${esc(p.name || p.url)} ${active ? '<span class="badge ok">当前</span>' : ''}${p.batchImport ? '<span class="badge accent" title="已勾选「参与批量灌入」：批量灌入时会同时灌到这个账号">批量灌入</span>' : ''}</div>
-          <div class="acct-sub">${esc(typeLabel)} · ${esc(p.url || '（未填地址）')} · ${esc(p.username || 'default')}</div>
+          <div class="acct-sub">${esc(typeLabel)} · ${esc(p.url || '（未填地址）')} · ${esc(acctSinkText(p))}</div>
         </div>
       </div>
       <div class="acct-ops">
@@ -373,6 +373,40 @@ function renderPlatforms() {
   })
 }
 
+/** 账号列表副标题里的「落点」文案：留空/default → 公开源；具名 → 该账号私有 */
+function acctSinkText(p) {
+  if (!p) return ''
+  const u = String(p.username || '').trim()
+  if (p.type === 'geelonn' || p.type === 'lxserver') {
+    return (!u || /^(default|open|_open)$/i.test(u)) ? '落点：公开源' : `落点：${u}（私有）`
+  }
+  return u ? `账号：${u}` : '未填账号'
+}
+
+/** 账号表单随平台类型切换的说明（用户名＝落点 & 登录账号的差别最容易踩坑，写清楚） */
+function updateAccHint(type) {
+  const el = $('accHint')
+  if (!el) return
+  const u = $('accUser')
+  const lg = $('accLogin')
+  if (type === 'geelonn') {
+    u.placeholder = '留空或 default＝公开源；填 admin 等账号名＝该账号私有列表'
+    lg.placeholder = 'Geelonn 登录账号；留空默认 admin'
+    el.innerHTML = '<b>Geelonn LX Server 两个身份是分开的：</b>'
+      + '<br>① <b>用户名＝灌入落点</b>：<b>留空或填 default → 灌到「公开源」</b>（所有 LX 客户端可见、网页端公开列表能看到）；<b>填 admin 等账号名 → 灌到该账号的「私有列表」</b>（只有该账号能用，网页端公开列表看不到）。'
+      + '<br>② <b>登录账号 + 密码＝鉴权</b>：这个 fork 必须用<b>真实存在的账号</b>登录才能写音源（<code>default</code> 无法登录），所以留空时默认用 <code>admin</code>；只有当你的管理员账号不叫 <code>admin</code> 时才需要填。'
+      + '<br>例：用户名留空 + 登录账号留空 + 密码 <code>你的后台密码</code> → 音源进公开源；用户名填 <code>admin</code> → 音源进 admin 私有列表。'
+  } else if (type === 'lxserver') {
+    u.placeholder = '留空或 default＝公开源；填账号名＝该账号私有列表'
+    lg.placeholder = 'LX Server 不需要，留空即可'
+    el.innerHTML = '<b>LX Server（原版）</b>：「用户名」＝灌入落点（留空或 <code>default</code> → 公开源；填账号名 → 该账号私有列表）；「密码」填服务端配置里的 <code>frontend.password</code>（<b>不是</b>网页登录密码）。「登录账号」对 LX Server 无效，可留空。'
+  } else {
+    u.placeholder = '填写该平台的登录账号'
+    lg.placeholder = '该平台不需要，留空即可'
+    el.innerHTML = '「用户名」+「密码」＝该平台的登录账号密码（如 Songloft / MusicSync 的站点登录）。「登录账号」字段仅 Geelonn 使用，此处可留空。'
+  }
+}
+
 function openAccountForm(id) {
   const form = $('accountForm')
   form.hidden = false
@@ -382,8 +416,10 @@ function openAccountForm(id) {
   $('accName').value = (acc && acc.name) || ''
   $('accUrl').value = (acc && acc.url) || ''
   $('accUser').value = (acc && acc.username) || ''
+  $('accLogin').value = (acc && acc.loginUser) || ''
   $('accPwd').value = (acc && acc.password) || ''
   $('accTmo').value = (acc && acc.timeoutMs) || 25000
+  updateAccHint($('accType').value)
   // 「参与批量灌入」：新建时默认勾上（多平台是本版主打用法，勾了才用得上），
   // 编辑已有账号时以存下来的值为准 —— 老账号没这个字段就不勾，行为与升级前一致。
   $('accBatch').checked = acc ? acc.batchImport === true : true
@@ -405,13 +441,18 @@ function validateAccount() {
     type,
     name: name || url,
     url,
+    // 用户名＝灌入落点（留空/default → 公开源；具名 → 该账号私有列表）
     username: $('accUser').value.trim(),
+    // 登录账号：仅 Geelonn 需要（fork 必须用真实账号鉴权；留空默认 admin）
+    loginUser: $('accLogin').value.trim(),
     password: $('accPwd').value,
     timeoutMs: parseInt($('accTmo').value, 10) || 25000,
     enabled: true,
     batchImport: !!$('accBatch').checked
   }
 }
+
+$('accType').addEventListener('change', () => updateAccHint($('accType').value))
 
 $('btnAddAccount').addEventListener('click', () => openAccountForm(null))
 $('btnAccCancel').addEventListener('click', closeAccountForm)

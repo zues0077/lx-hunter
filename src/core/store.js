@@ -118,6 +118,14 @@ class Store {
       if (!p.id) { p.id = 'p_' + Math.random().toString(36).slice(2, 9); changed = true }
       if (typeof p.timeoutMs !== 'number') { p.timeoutMs = 25000; changed = true }
       if (typeof p.enabled !== 'boolean') { p.enabled = true; changed = true }
+      // Geelonn 语义修正（v1.9.4）：v1.9.3 把「用户名」直接当登录账号用，导致音源全被灌进
+      // 该账号的**私有**列表（网页端公开列表看不到）。现在「用户名」＝灌入落点、登录账号独立
+      // 成 loginUser：老账号把 username 迁到 loginUser，落点恢复默认＝公开源。
+      if (p.type === 'geelonn' && !p.loginUser) {
+        p.loginUser = p.username || 'admin'
+        p.username = ''
+        changed = true
+      }
     }
     return changed
   }

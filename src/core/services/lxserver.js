@@ -8,7 +8,7 @@
  * 账号对象字段：{ url, password, username, timeoutMs }
  *   url       → lxservice 的 serverUrl
  *   password  → adminPassword（frontend.password）
- *   username  → 灌入目标身份（default=公开源，具名=私有源）
+ *   username  → 灌入目标身份（留空/default=公开源，具名=私有源）
  *   timeoutMs → serverTimeoutMs
  */
 const L = require('../lxservice')

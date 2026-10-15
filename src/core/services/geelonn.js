@@ -19,12 +19,20 @@
  * 因此本适配器不复用 lxservice（那是 x-frontend-auth 明文密码制），独立实现同一组接口。
  * token 进程内缓存；任何请求遇 401/403 自动强制重登一次并重试（token 过期自愈）。
  *
- * 账号对象字段：{ url, username, password, timeoutMs }
+ * 账号对象字段：{ url, username, password, loginUser, timeoutMs }
  *   url       → 服务地址（如 http://192.168.x.x:8195）
- *   username  → 网页登录账号（必须真实存在，如 admin；default 用户不可登录）
- *   password  → 该账号的网页登录密码
- *   灌入落点沿用 lxserver 口径：body username=default → 公开源(owner=open)；
- *   具名 → 该账号私有列表。list 合并公开+私有视图，toggle/remove 按 owner 路由。
+ *   username  → **灌入落点**（与 lxserver 口径一致）：留空 / default / open → 公开源
+ *               （body username=default → owner=open，所有 LX 客户端可见）；
+ *               填账号名（如 admin）→ 该账号的私有列表（owner=<账号名>）
+ *   loginUser → **登录账号**（鉴权用，仅 Geelonn 需要）：留空默认 'admin'。
+ *               fork 的登录必须用真实存在的账号（default 不能登录），故它与落点是两回事。
+ *   password  → 登录账号的网页登录密码
+ *
+ * ⚠ 落点 ≠ 登录账号：如果直接拿「落点」去登录（留空/default 时），登录会 401；
+ *   反之若把登录账号当落点（username=admin），音源会全部灌进 admin 的**私有**列表，
+ *   LX 网页端公开列表看不到（v1.9.3 的现象：「上传的音源跑到私有账号、公共源无」）。
+ *
+ * list/toggle/remove 一律围绕「落点那一份」：default → 公开源(_open)；具名 → 该账号列表。
  */
 const net = require('../net')
 
@@ -37,10 +45,18 @@ const _tokens = new Map()
 function toCfg(acct) {
   return {
     serverUrl: acct && acct.url || '',
-    username: (acct && acct.username) || 'admin',
+    // 灌入落点（留空 = 公开源）——与 lxserver 的 username 语义一致
+    username: (acct && acct.username) || '',
+    // 登录账号（鉴权用）：单独的字段，留空默认 'admin'
+    loginUser: (acct && acct.loginUser) || '',
     password: acct && acct.password || '',
     serverTimeoutMs: (acct && acct.timeoutMs) || 25000
   }
+}
+
+/** 登录账号（鉴权身份；落点不参与登录） */
+function loginUserOf(cfg) {
+  return String((cfg && cfg.loginUser) || '').trim() || 'admin'
 }
 
 /** 登录换 token（不读缓存，每次真登录） */
@@ -50,7 +66,7 @@ async function login(cfg) {
   const init = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: String(cfg.username || 'admin'), password: String(cfg.password || '') })
+    body: JSON.stringify({ username: loginUserOf(cfg), password: String(cfg.password || '') })
   }
   let res, text, data = null
   try {
@@ -61,15 +77,15 @@ async function login(cfg) {
     return { ok: false, msg: '无法连接：' + String((e && e.message) || e) }
   }
   if (res.ok && data && data.success && data.token) {
-    return { ok: true, token: String(data.token), username: data.username || cfg.username, role: data.role || '' }
+    return { ok: true, token: String(data.token), username: data.username || loginUserOf(cfg), role: data.role || '' }
   }
   const bad = res.status === 401 || (data && /invalid credentials/i.test(String(data.message || '')))
-  return { ok: false, status: res.status, bad, msg: bad ? '管理员账号或密码错误' : ((data && (data.message || data.error)) || `HTTP ${res.status}（服务异常）`) }
+  return { ok: false, status: res.status, bad, msg: bad ? `登录账号或密码错误（当前登录账号：${loginUserOf(cfg)}）` : ((data && (data.message || data.error)) || `HTTP ${res.status}（服务异常）`) }
 }
 
 /** 取 token（带缓存；force=true 强制重登） */
 async function getToken(cfg, force) {
-  const key = baseUrl(cfg) + '|' + String(cfg.username || 'admin')
+  const key = baseUrl(cfg) + '|' + loginUserOf(cfg)
   if (!force) {
     const hit = _tokens.get(key)
     if (hit) return hit.token
@@ -104,7 +120,7 @@ async function req(cfg, method, path, bodyObj, timeoutMs) {
   const once = async (tk) => {
     const headers = {
       'Content-Type': 'application/json',
-      'x-user-name': String(cfg.username || 'admin'),
+      'x-user-name': loginUserOf(cfg),
       'x-user-token': tk
     }
     const init = { method, headers }
@@ -133,8 +149,10 @@ async function verify(cfg) {
   if (!baseUrl(cfg)) return { ok: false, msg: '未配置服务地址' }
   const r = await login(cfg)
   if (r.ok) {
-    _tokens.set(baseUrl(cfg) + '|' + String(cfg.username || 'admin'), { token: r.token, ts: Date.now() })
-    return { ok: true, msg: `已连接，账号 ${r.username || cfg.username} 验证通过` + (r.role ? `（${r.role}）` : '') }
+    _tokens.set(baseUrl(cfg) + '|' + loginUserOf(cfg), { token: r.token, ts: Date.now() })
+    const sink = targetUsername(cfg)
+    const sinkTxt = sink === 'default' ? '灌入落点：公开源' : `灌入落点：${sink}（私有）`
+    return { ok: true, msg: `已连接，登录账号 ${r.username || loginUserOf(cfg)} 验证通过` + (r.role ? `（${r.role}）` : '') + ' · ' + sinkTxt }
   }
   return { ok: false, msg: r.msg }
 }
@@ -147,27 +165,32 @@ async function listAs(cfg, username) {
 }
 
 /**
- * 服务端已有音源列表（合并视图）——口径与 lxserver 一致：
- * 公开源（default → _open）为主，再按配置的具名身份补充其私有源。
+ * 服务端已有音源列表 —— **只看灌入落点那一份**（与 lxserver 口径一致）：
+ *  - 落点 = 公开源 → default（fork 的 `list?username=default` 只返回 owner=open 的公开源）；
+ *  - 落点 = 具名账号 → 该账号视图（服务端在具名查询里已把公开源 + 该账号私有源合并返回）。
+ * 刻意不把「登录账号的私有源」混进来：否则同名私有源会让猎手误判「服务端已有」而跳过灌入，
+ * 公开列表依然为空（这正是 v1.9.3 的行为，用户表现为「上传的音源跑到私有账号、公共源无」）。
  */
 async function list(cfg) {
-  const user = String((cfg && cfg.username) || 'default').trim()
-  const openList = await listAs(cfg, 'default')
-  if (!user || user === 'default' || user === 'open' || user === '_open') return openList
-  let privateList = []
-  try { privateList = await listAs(cfg, user) } catch (e) { /* 私有源读失败不致命 */ }
-  const byId = new Map(openList.map(s => [s && s.id, s]))
-  for (const s of privateList) {
-    if (s && s.id && !byId.has(s.id)) byId.set(s.id, s)
-  }
-  return Array.from(byId.values())
+  return await listAs(cfg, targetUsername(cfg))
 }
 
-/** 灌入目标身份（与 lxserver 口径一致）：default/open/空 → 公开源；具名 → 私有列表 */
+/**
+ * 灌入落点身份（取自「用户名」字段，与 lxserver 口径一致）：
+ * 留空 / open / default → 'default'（服务端映射到公开源 _open，owner=open）；具名 → 该账号私有列表。
+ */
 function targetUsername(cfg) {
-  const u = String((cfg && cfg.username) || 'default').trim()
-  if (!u || u === 'open' || u === '_open' || u.toLowerCase() === 'default') return 'default'
+  const u = String((cfg && cfg.username) || '').trim()
+  if (!u) return 'default'
+  const low = u.toLowerCase()
+  if (low === 'default' || low === 'open' || low === '_open') return 'default'
   return u
+}
+
+/** 落点的人类可读描述（UI / 日志用） */
+function sinkLabel(cfg) {
+  const sink = targetUsername(cfg)
+  return sink === 'default' ? '公开源' : `${sink} 私有列表`
 }
 
 /** 校验脚本（不落盘），返回 { ok, status, data, text } */
@@ -355,7 +378,7 @@ module.exports = {
   // 名字即 key：服务端按脚本 @name 生成 id，重名会被拒（README「灌入提示已存在」即此）。
   uniqueName: true,
   verify, list, upload, importUrl, toggle, remove, setPlatforms, validate, baseUrl,
-  listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername,
+  listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername, sinkLabel,
   // 仅供测试/高级用法
   clearTokenCache
 }
