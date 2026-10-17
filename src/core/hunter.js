@@ -226,7 +226,11 @@ class Hunter {
             maxReposPerKeyword: Number(cfg.maxReposPerKeyword) || 20,
             maxTotal: Number(cfg.maxSearchReposTotal) || 60,
             timeoutMs: cfg.timeoutMs, known: knownRepos,
-            skipStarsBelow: Number(cfg.searchMinStars) || 0
+            skipStarsBelow: Number(cfg.searchMinStars) || 0,
+            // v1.9.14 内容验真：搜索命中只保证「名字/描述像音源仓库」，不保证真有脚本。
+            // 逐个拉文件树抽检 .js（scoreEntry>=4），并放行压缩包分发与 Release 资产分发的仓库。
+            verify: cfg.searchVerify !== false,
+            verifyConcurrency: 4
           })
           if (d.repos.length) {
             repos = repos.concat(d.repos)
@@ -240,9 +244,17 @@ class Hunter {
               }
               if (changed) this.store.saveConfig()
             }
-            this.log(`搜索发现新增 ${d.repos.length} 个仓库（来自 ${d.searched} 个关键词，跳过已收录）`, '爬取')
+            const dropped = Object.values(d.perKeyword || {}).reduce((n, x) => n + (Number(x.filtered) || 0), 0)
+            const noSrc = Number(d.droppedNoSource) || 0
+            this.log(`搜索发现新增 ${d.repos.length} 个仓库（来自 ${d.searched} 个关键词，跳过已收录` +
+              (dropped ? `，过滤无关 ${dropped} 个` : '') +
+              (noSrc ? `，验真剔除 ${noSrc} 个无音源内容` : '') + '）', '爬取')
           } else {
-            this.log('搜索发现：本轮未找到新仓库（可能都已收录或搜索受限）', '爬取')
+            const dropped = Object.values(d.perKeyword || {}).reduce((n, x) => n + (Number(x.filtered) || 0), 0)
+            const noSrc = Number(d.droppedNoSource) || 0
+            this.log('搜索发现：本轮未找到可用新仓库（可能都已收录或搜索受限' +
+              (dropped ? `；已过滤 ${dropped} 个无关仓库` : '') +
+              (noSrc ? `；验真剔除 ${noSrc} 个无音源内容` : '') + '）', '爬取')
           }
         } catch (e) {
           this.log('搜索发现失败：' + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
@@ -673,6 +685,16 @@ class Hunter {
           if (e.deep.hash === e.contentHash) {
             skippedChecked++
             if (e.usable) usable++
+            // v1.9.13：接口域名探活开关是后开的，已检测过的音源身上没有 apiAlive，
+            // 而跳过分支不重新拉代码（code 为空，下面那段探测不会触发），
+            // 结果就是「音源库」里一直没有后端在线/失效徽章。这里对缺结果的小批量补探一次。
+            // 仅限本次检测条目很少时（用户手动勾几条），批量的 1000+ 条交给「巡检」，
+            // 否则每条 8 个域名 × 5s 超时会把整轮检测拖成几小时。
+            if (cfg.apiHostCheck && list.length <= 20 &&
+                Array.isArray(e.apiHosts) && e.apiHosts.length &&
+                (!e.apiAlive || !Object.keys(e.apiAlive).length)) {
+              try { await probeApiHosts(e, cfg); this.emit('source-updated', e) } catch (_) {}
+            }
             this.progress({ done: i + 1, total: list.length, usable })
             continue
           }

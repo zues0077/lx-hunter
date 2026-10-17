@@ -603,5 +603,43 @@ ck('renderer 提供 renderMirrorSpeeds', has(appSrc, /function renderMirrorSpeed
 ck('raw 加速镜像测试存在且被纳入 npm test',
   /mirror-speed\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/mirror-speed.test.js')))
 
+// ---- v1.9.14：搜索相关性闸门 + 修 mirrors/defaultRepos 取值层级 + 清除发现仓库 ----
+// 事故：v1.9.13 用 `in:name,description,readme` 搜索，readme 里出现「音源」二字就被命中，
+// 实跑一轮收进 60 个无关仓库（ebooks / awesome-* / 教程类），既浪费配额又污染仓库清单。
+console.log('\n== v1.9.14 搜索相关性 + 配置层级修复 ==')
+const crawlSrc14 = read('src/core/crawler.js')
+// 注意：不能只做「源码里不含 in:name,description,readme」的反向断言——
+// 上面那段解释来龙去脉的注释本身就写着这个字符串，会误判。要盯真正的查询构造行。
+ck('搜索查询用 in:name,description（不带 readme）',
+  has(crawlSrc14, /const q = encodeURIComponent\(kw \+ ' in:name,description'\)/))
+ck('crawler 提供相关性闸门 looksLikeSourceRepo', has(crawlSrc14, /function looksLikeSourceRepo/) && has(crawlSrc14, /SOURCE_REPO_RE/))
+ck('搜索命中要过相关性闸门', has(crawlSrc14, /skipRelevance !== true && !looksLikeSourceRepo/))
+ck('perKeyword 记录被过滤数量', has(crawlSrc14, /filtered/))
+// 层级修复：defaultRepos / mirrors 挂在 config:get 返回的 data 顶层，不在 config 里
+ck('renderer 从 data.mirrors 取镜像（不能是 config.mirrors）',
+  has(appSrc, /populateMirrors\(meta\.mirrors\)/) && !has(appSrc, /populateMirrors\(c\.mirrors\)/))
+ck('renderer 从 data.defaultRepos 取内置清单（不能是 config.defaultRepos）', has(appSrc, /meta\.defaultRepos/))
+ck('镜像下拉有兜底清单，取不到也不会变空', has(appSrc, /MIRROR_FALLBACK/))
+ck('保存时镜像值不会存成空串', has(appSrc, /mirror: \$\('cfgMirror'\)\.value \|\| 'auto'/))
+ck('仓库清单提供「清除搜索发现的仓库」', has(html, /id="btnClearDiscovered"/) && has(appSrc, /btnClearDiscovered/))
+ck('跳过已检测时补探接口域名（小批量）', has(huntSrc, /list\.length <= 20/) && has(huntSrc, /probeApiHosts\(e, cfg\)/))
+
+// ---- v1.9.14 增补：内容验真（名字像 ≠ 里面真有音源）----
+// 事故：相关性闸门后仍有 47% 命中是客户端/播放器/API 仓库（lxmusic-android、lxmusic2api…），
+// 只靠名字/描述无法判定。用户特别强调：有的仓库把音源打包成 zip 发，不能误杀。
+ck('crawler 提供内容验真 verifyRepoHasSource', has(crawlSrc14, /async function verifyRepoHasSource/))
+ck('验真用项目自己的 scoreEntry 判音源脚本', has(crawlSrc14, /scoreEntry\(f\.path, text\)/) && has(crawlSrc14, /sc >= 4/))
+ck('验真放行压缩包分发仓库（zip/7z/rar 不能被误杀）',
+  has(crawlSrc14, /const packs = items\.filter/) && has(crawlSrc14, /if \(packs\.length\) return \{ ok: true, reason: '压缩包分发'/))
+ck('验真放行只发 Release 资产的仓库', has(crawlSrc14, /releases\?per_page=5/) && has(crawlSrc14, /Release 资产分发/))
+ck('验真不把 tests/fixtures 里的示例脚本当音源', has(crawlSrc14, /isWeakPath/) && has(crawlSrc14, /仅测试\/示例脚本/))
+ck('验真以并发池跑，避免突发打 GitHub', has(crawlSrc14, /async function runPool/) && has(crawlSrc14, /verifyConcurrency/))
+ck('搜索发现可选接入验真并回报 droppedNoSource',
+  has(crawlSrc14, /o\.verify === true/) && has(crawlSrc14, /droppedNoSource/))
+ck('hunter 爬取时默认开启验真', has(huntSrc, /verify: cfg\.searchVerify !== false/))
+ck('hunter 日志输出验真剔除数', has(huntSrc, /验真剔除/))
+ck('store 默认 searchVerify: true', has(read('src/core/store.js'), /searchVerify: true/))
+ck('HTML 提供内容验真开关', has(html, /id="cfgSearchVerify"/) && has(appSrc, /cfgSearchVerify/))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

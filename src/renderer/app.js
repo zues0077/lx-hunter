@@ -219,12 +219,18 @@ async function loadConfig() {
   if (!r.ok) return toast('读取配置失败: ' + r.error, 'err')
   state.config = r.data.config
   const c = state.config
+  // 注意：defaultRepos / mirrors 挂在 r.data 顶层，不在 config 里。
+  // v1.9.13 曾误写成 c.mirrors / c.defaultRepos（永远 undefined）→ 镜像下拉只剩「自动/自定义」、
+  // 「恢复默认仓库」点了没反应。这里统一从 meta 取。
+  const meta = r.data || {}
   state.platforms = Array.isArray(c.platforms) ? c.platforms : []
   state.activePlatformId = c.activePlatformId || (state.platforms[0] && state.platforms[0].id) || null
   renderPlatforms()
   $('cfgToken').value = c.ghToken || ''
-  populateMirrors(c.mirrors)
+  populateMirrors(meta.mirrors)
   $('cfgMirror').value = c.mirror || 'auto'
+  // 配置里存了个当前清单没有的 id 时，<select> 会静默变成空值，回落到「自动」更安全
+  if (!$('cfgMirror').value) $('cfgMirror').value = 'auto'
   $('cfgMirrorCustom').value = c.mirrorCustom || ''
   $('cfgMirrorCustom').parentNode.style.display = (c.mirror === 'custom') ? '' : 'none'
   $('cfgCrawlProxy').value = c.crawlProxy || ''
@@ -252,13 +258,15 @@ async function loadConfig() {
   $('cfgCrawlHours').value = c.crawlIntervalHours || 24
   $('cfgCrawlSinceDays').value = Math.max(0, Number(c.crawlSinceDays) || 0)
   $('cfgReplaceSame').checked = c.replaceSameNameOnImport !== false
-  state.defaultRepos = Array.isArray(c.defaultRepos) ? c.defaultRepos : []
+  state.defaultRepos = Array.isArray(meta.defaultRepos) ? meta.defaultRepos
+    : (Array.isArray(c.defaultRepos) ? c.defaultRepos : [])
   renderRepoList(c.repos, state.defaultRepos)
   $('cfgSearchEnabled').checked = !!c.searchEnabled
   $('cfgSearchKeywords').value = (c.searchKeywords || []).join('\n')
   $('cfgMaxReposPerKeyword').value = c.maxReposPerKeyword || 20
   $('cfgMaxSearchReposTotal').value = c.maxSearchReposTotal || 60
   $('cfgSearchMinStars').value = c.searchMinStars || 0
+  $('cfgSearchVerify').checked = c.searchVerify !== false
   renderInstalledAccountInfo()
   testConn()
 }
@@ -268,7 +276,7 @@ $('btnSaveCfg').addEventListener('click', async () => {
     platforms: state.platforms,
     activePlatformId: state.activePlatformId,
     ghToken: $('cfgToken').value.trim(),
-    mirror: $('cfgMirror').value,
+    mirror: $('cfgMirror').value || 'auto',
     mirrorCustom: $('cfgMirrorCustom').value.trim(),
     crawlProxy: $('cfgCrawlProxy').value.trim(),
     forceProxy: $('cfgForceProxy').checked,
@@ -300,7 +308,8 @@ $('btnSaveCfg').addEventListener('click', async () => {
     searchKeywords: $('cfgSearchKeywords').value.split(/[\n,]/).map(s => s.trim()).filter(Boolean),
     maxReposPerKeyword: Math.max(1, Math.min(100, parseInt($('cfgMaxReposPerKeyword').value, 10) || 20)),
     maxSearchReposTotal: Math.max(1, Math.min(200, parseInt($('cfgMaxSearchReposTotal').value, 10) || 60)),
-    searchMinStars: Math.max(0, parseInt($('cfgSearchMinStars').value, 10) || 0)
+    searchMinStars: Math.max(0, parseInt($('cfgSearchMinStars').value, 10) || 0),
+    searchVerify: $('cfgSearchVerify').checked
   }
   const r = await api.configSet(patch)
   if (!r.ok) return toast('保存失败: ' + r.error, 'err')
@@ -402,6 +411,20 @@ $('btnAddRepo').addEventListener('click', async () => {
   if (ok) toast('已添加 ' + added + ' 个仓库', 'ok')
 })
 
+// 清除搜索发现的仓库（v1.9.14）：早期版本用了 in:readme 搜索，把一堆无关仓库（ebooks、
+// awesome-*、教程类）收了进来，既浪费配额又占清单。这里一次性把它们移出清单。
+// 只删 origin==='discovered' 的条目：内置与你自己添加的不受影响。
+$('btnClearDiscovered').addEventListener('click', async () => {
+  const all = state.config.repos || []
+  const keep = all.filter(x => x.origin !== 'discovered')
+  const removed = all.length - keep.length
+  if (!removed) return toast('清单里没有搜索发现的仓库', 'warn')
+  if (!confirm(`将移除 ${removed} 个「搜索发现」的仓库，内置仓库和你手动添加的不会动。继续？`)) return
+  state.config.repos = keep
+  const ok = await persistRepos()
+  if (ok) toast('已清除 ' + removed + ' 个搜索发现的仓库', 'ok')
+})
+
 // 恢复默认仓库：把内置清单里缺失的重新加回并启用（已有的保留用户设置）
 $('btnRestoreRepos').addEventListener('click', async () => {
   const defs = state.defaultRepos || []
@@ -423,16 +446,27 @@ $('cfgMirror').addEventListener('change', () => {
 
 // ---------------- raw 加速镜像下拉 + 测速（v1.9.13） ----------------
 // 下拉项由后端 MIRROR_PRESETS 动态生成：以后新增/剔除镜像只改 net.js，不用再动 HTML。
+// 兜底清单：后端没给 mirrors（旧服务端/接口异常）时也要能选，绝不让下拉变空
+const MIRROR_FALLBACK = [
+  { id: 'direct', label: '直连 GitHub' },
+  { id: 'ghfast', label: 'ghfast.top' },
+  { id: 'ghproxy', label: 'gh-proxy.com' },
+  { id: 'ghproxy-net', label: 'ghproxy.net' },
+  { id: 'lhlone', label: 'gh1.lhl.one' },
+  { id: 'jsdelivr', label: 'jsDelivr CDN' }
+]
+
 function populateMirrors(list) {
   const sel = $('cfgMirror')
-  if (!sel || !Array.isArray(list) || !list.length) return
-  // 保留首尾两个固定项（自动 / 自定义），中间整段替换为后端给的镜像
+  if (!sel) return
+  const use = (Array.isArray(list) && list.length) ? list : MIRROR_FALLBACK
+  // 保留首尾两个固定项（自动 / 自定义），中间整段替换为镜像清单
   const head = sel.querySelector('option[value="auto"]')
   const tail = sel.querySelector('option[value="custom"]')
   for (const o of Array.from(sel.options)) {
     if (o !== head && o !== tail) o.remove()
   }
-  for (const m of list) {
+  for (const m of use) {
     const op = document.createElement('option')
     op.value = m.id
     op.textContent = m.label

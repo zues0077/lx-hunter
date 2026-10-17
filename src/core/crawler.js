@@ -261,6 +261,119 @@ async function checkQuota(need, token) {
  * @param {object} opts {keywords, token, maxReposPerKeyword, maxTotal, timeoutMs, known, skipStarsBelow}
  * @returns {Promise<{repos:string[], perKeyword:object, searched:number, total:number}>}
  */
+/**
+ * 搜索命中的相关性闸门（v1.9.13）。
+ *
+ * 为什么必须有：GitHub 搜索对中文关键词非常宽松，早先的 `in:name,description,readme`
+ * 会把 readme 里偶然出现「音源」二字的仓库全捞进来。实测一轮 16 个新增里全是
+ * ebooks / china-dictatorship / gpt4o-image-prompts / awesome-security 这类无关仓库——
+ * 既浪费 GitHub 配额，又把这些仓库塞进用户的仓库清单。
+ *
+ * 判据只看「仓库自己的身份信息」（全名/名字/描述/topics），不看 readme；
+ * 必须出现 lx 音源语义（lxmusic / 洛雪 / 音源 / music-source / lx-source …）。
+ */
+const SOURCE_REPO_RE = /(lx[-_\s.]?music|lxmusic|洛雪|音源|music[-_\s.]?sources?|song[-_\s.]?sources?|lx[-_\s.]?source|lx[-_\s.]?script|音源脚本|音源仓库)/i
+
+function looksLikeSourceRepo(it) {
+  if (!it) return false
+  const hay = [it.full_name, it.name, it.description, (it.topics || []).join(' ')]
+    .filter(Boolean).join(' ')
+  return SOURCE_REPO_RE.test(hay)
+}
+
+/**
+ * 内容验真（v1.9.14）：名字像音源仓库，不代表里面真有音源脚本。
+ *
+ * 实测 60 个「名字/描述含 lx 音源」的仓库里只有 32 个真含脚本，其余是客户端/播放器/API
+ * （Mineradio、lx-music-downloader、lxmusic-android、lxmusic2api…）甚至毫不相干的
+ * lxde/lxmusic（Linux 桌面环境的播放器）。只靠关键词会把它们塞进仓库清单、白耗爬取配额。
+ *
+ * 判据复用项目自己的 scoreEntry（>=4 即「像音源脚本」），并对「压缩包分发」的仓库网开一面：
+ * 不少仓库把音源打包成 zip 发（chinaes666/lx-music-source 就是），树里没有 .js 但是真音源。
+ */
+async function verifyRepoHasSource(repo, o) {
+  const token = (o && o.token) || ''
+  const tmo = Number(o && o.timeoutMs) || 15000
+  const get = async (url, raw) => {
+    const res = await fetchWithTimeout(url, { headers: raw
+      ? Object.assign({}, ghHeaders(token), { Accept: 'application/vnd.github.raw' })
+      : ghHeaders(token) }, tmo)
+    return res
+  }
+  const info = await get(`https://api.github.com/repos/${repo}`)
+  if (!info.ok) return { ok: false, reason: 'repo HTTP ' + info.status }
+  let meta = {}
+  try { meta = JSON.parse(await readText(info, tmo)) } catch (e) {}
+  const branch = meta.default_branch || 'main'
+  const tr = await get(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`)
+  if (!tr.ok) return { ok: false, reason: 'tree HTTP ' + tr.status }
+  let tj = {}
+  try { tj = JSON.parse(await readText(tr, tmo)) } catch (e) {}
+  const items = Array.isArray(tj.tree) ? tj.tree : []
+  const js = items.filter(t => t.type === 'blob' && /\.js$/i.test(t.path) &&
+    (t.size || 0) < 2 * 1024 * 1024 && !/node_modules|\.min\.js/i.test(t.path))
+  const packs = items.filter(t => t.type === 'blob' && /\.(zip|7z|rar)$/i.test(t.path))
+  // 测试夹具 / 示例 / 模板里的「音源」不是可分发音源。实测有仓库整个就是「音源管理工具」，
+  // 唯一命中来自 tests/fixtures/basic-source.js——把它当音源收进来，爬取阶段也只能捞到个假脚本。
+  const isWeakPath = (p) => /(^|\/)(tests?|__tests__|specs?|fixtures?|examples?|demos?|samples?|docs?|templates?)\//i.test(p) ||
+    /(template|example|sample|demo|fixture|mock)[^/]*\.js$/i.test(p)
+  js.sort((a, b) => {
+    const wa = isWeakPath(a.path) ? 1 : 0
+    const wb = isWeakPath(b.path) ? 1 : 0
+    if (wa !== wb) return wa - wb
+    const sa = /音源|源|source|lx/i.test(a.path) ? 0 : 1
+    const sb = /音源|源|source|lx/i.test(b.path) ? 0 : 1
+    return sa - sb || (a.size || 0) - (b.size || 0)
+  })
+  let best = 0
+  let weakHit = null
+  for (const f of js.slice(0, 3)) {
+    const enc = f.path.split('/').map(encodeURIComponent).join('/')
+    try {
+      const c = await get(`https://api.github.com/repos/${repo}/contents/${enc}?ref=${encodeURIComponent(branch)}`, true)
+      if (!c.ok) continue
+      const text = await readText(c, tmo)
+      const sc = scoreEntry(f.path, text)
+      if (sc > best) best = sc
+      if (sc >= 4) {
+        // 正常路径直接放行；测试/示例路径先记着，等压缩包与发行资产都排除后再算账
+        if (isWeakPath(f.path)) { weakHit = weakHit || { score: sc, file: f.path }; continue }
+        return { ok: true, reason: '含音源脚本', score: sc, file: f.path }
+      }
+    } catch (e) { /* 单个文件失败不影响整仓判定 */ }
+  }
+  // ★ 压缩包分发：很多仓库把音源打包成 zip 发（skxingyu/lx_music- 树里 4 个 zip、无散装 .js），
+  //   树里只有零散构建脚本甚至没有 .js。这种情况不能因为「抽检的 .js 不是音源」就判死，
+  //   只要树里有压缩包就放行，交给爬取阶段的解压挑脚本。
+  if (packs.length) return { ok: true, reason: '压缩包分发', score: best, packs: packs.length }
+  // ★ 只发 Release 资产的仓库：树里可能空空如也，再看一眼 release 资产名
+  try {
+    const rl = await get(`https://api.github.com/repos/${repo}/releases?per_page=5`)
+    if (rl.ok) {
+      const list = JSON.parse(await readText(rl, tmo))
+      const hit = (Array.isArray(list) ? list : []).some(rel =>
+        (rel.assets || []).some(a => /\.(js|zip|7z|rar)$/i.test(a.name || '')))
+      if (hit) return { ok: true, reason: 'Release 资产分发', score: best }
+    }
+  } catch (e) {}
+  if (weakHit) return { ok: false, reason: '仅测试/示例脚本', score: weakHit.score, file: weakHit.file }
+  return { ok: false, reason: js.length ? '无音源脚本（也无压缩包/发行资产）' : '无 .js 也无压缩包', score: best }
+}
+
+/** 小并发跑一批异步任务（内容验真用；不想给 GitHub 打突发请求） */
+async function runPool(items, n, fn) {
+  const out = new Array(items.length)
+  let i = 0
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (true) {
+      const k = i++
+      if (k >= items.length) return
+      try { out[k] = await fn(items[k], k) } catch (e) { out[k] = { ok: false, reason: String((e && e.message) || e) } }
+    }
+  }))
+  return out
+}
+
 async function discoverReposViaSearch(opts) {
   const o = opts || {}
   const keywords = Array.isArray(o.keywords) && o.keywords.length ? o.keywords : []
@@ -277,7 +390,8 @@ async function discoverReposViaSearch(opts) {
   for (const kw of keywords) {
     if (out.length >= maxTotal) break
     try {
-      const q = encodeURIComponent(kw + ' in:name,description,readme')
+      // 只搜名字与描述：带上 in:readme 会命中一堆「正文里提过音源」的无关仓库
+      const q = encodeURIComponent(kw + ' in:name,description')
       const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&order=desc&per_page=${perKw}`
       const res = await fetchWithTimeout(url, { headers: ghHeaders(token) }, timeoutMs)
       const text = await readText(res, timeoutMs)
@@ -285,6 +399,7 @@ async function discoverReposViaSearch(opts) {
       if (j.message) { perKeyword[kw] = { error: String(j.message).slice(0, 80), found: 0 }; continue }
       const items = Array.isArray(j.items) ? j.items : []
       let added = 0
+      let filtered = 0
       for (const it of items) {
         if (out.length >= maxTotal) break
         const full = it && it.full_name
@@ -292,17 +407,37 @@ async function discoverReposViaSearch(opts) {
         const n = normalizeRepo(full)
         if (!n || seen.has(n)) continue
         if (skipStarsBelow && Number(it.stargazers_count || 0) < skipStarsBelow) continue
+        // 相关性闸门：名字/描述/topics 里没有 lx 音源语义的一律不要
+        if (o.skipRelevance !== true && !looksLikeSourceRepo(it)) { filtered++; continue }
         seen.add(n)
         out.push(n)
         added++
       }
-      perKeyword[kw] = { found: items.length, added }
+      perKeyword[kw] = { found: items.length, added, filtered }
     } catch (e) {
       perKeyword[kw] = { error: String((e && e.message) || e).slice(0, 80), found: 0 }
     }
     await sleep(300)
   }
-  return { repos: out, perKeyword, searched: keywords.length, total: out.length }
+  // 内容验真（可选）：逐个仓库看有没有真音源脚本 / 压缩包 / 发行资产。
+  // 只有显式 verify===true 才做——搜索本身是"发现"，实际爬取前才值得花这些 API 配额。
+  let droppedNoSource = 0
+  const details = []
+  if (o.verify === true && out.length) {
+    const vr = await runPool(out, Math.max(1, Number(o.verifyConcurrency) || 4), (r) => verifyRepoHasSource(r, o))
+    const kept = []
+    for (let i = 0; i < out.length; i++) {
+      const v = vr[i] || { ok: false, reason: '验真失败' }
+      details.push({ repo: out[i], ok: !!v.ok, reason: v.reason, score: v.score })
+      if (v.ok) kept.push(out[i])
+      else droppedNoSource++
+    }
+    return {
+      repos: kept, perKeyword, searched: keywords.length, total: kept.length,
+      discovered: out.length, droppedNoSource, details
+    }
+  }
+  return { repos: out, perKeyword, searched: keywords.length, total: out.length, droppedNoSource: 0 }
 }
 
 /**
@@ -489,7 +624,7 @@ async function crawl(opts, onEvent, shouldStop) {
 
 module.exports = {
   DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness,
-  discoverReposViaSearch,
+  discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
   RELEASES_PER_REPO, MAX_ASSET_BYTES, MAX_RELEASE_DL_PER_REPO
 }

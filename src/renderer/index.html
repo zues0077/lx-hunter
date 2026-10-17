@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.13</div>
+        <div class="brand-sub">PC 版 v1.9.14</div>
       </div>
     </div>
     <nav class="nav">
@@ -332,7 +332,10 @@
           <label class="field"><span>搜索发现仓库上限</span><input class="input" id="cfgMaxSearchReposTotal" type="number" min="1" max="200"></label>
           <label class="field"><span>最小 star 门槛（0=不限）</span><input class="input" id="cfgSearchMinStars" type="number" min="0"></label>
         </div>
-        <div class="field-row"><span class="hint" style="width:auto">搜索发现只在「开始爬取 / 定时爬取」时触发（定向爬取 reposOverride 不触发）。关键词越贴近「洛雪音源」语义，搜到的越准；匿名搜索限额较低，填入 GitHub Token 可提升配额。</span></div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgSearchVerify"><span><strong>内容验真</strong>：搜到的仓库逐个查文件树，确认真有音源脚本才收录（放行压缩包分发与 Release 资产分发的仓库）。关闭后只按名字/描述判断，会收录客户端、播放器、API 这类无关仓库</span></label>
+        </div>
+        <div class="field-row"><span class="hint" style="width:auto">搜索发现只在「开始爬取 / 定时爬取」时触发（定向爬取 reposOverride 不触发）。关键词越贴近「洛雪音源」语义，搜到的越准；匿名搜索限额较低，填入 GitHub Token 可提升配额。内容验真每个仓库额外消耗约 3 次 API 请求。</span></div>
       </div>
 
       <div class="card">
@@ -396,6 +399,7 @@
           <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo，可粘贴多行 / 逗号批量">
           <button class="btn btn-sm" id="btnAddRepo">添加</button>
           <button class="btn btn-sm ghost" id="btnRestoreRepos">恢复默认仓库</button>
+          <button class="btn btn-sm danger-ghost" id="btnClearDiscovered">清除搜索发现的仓库</button>
         </div>
       </div>
 
@@ -428,7 +432,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=36"></script>
-<script src="app.js?v=36"></script>
+<script src="web-bridge.js?v=39"></script>
+<script src="app.js?v=39"></script>
 </body>
 </html>

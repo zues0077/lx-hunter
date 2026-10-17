@@ -51,6 +51,10 @@ const DEFAULT_CONFIG = {
   maxReposPerKeyword: 20,
   maxSearchReposTotal: 60,
   searchMinStars: 0,
+  // searchVerify：内容验真（v1.9.14）。名字/描述像音源仓库不代表真有脚本——
+  // 实测 60 个命中里只有 32 个真含音源，其余是客户端/播放器/API。开启后逐个看文件树
+  // 抽检 .js、并放行「压缩包分发」与「Release 资产分发」两类仓库。默认开。
+  searchVerify: true,
   // ---------------- 接口域名探活（v1.9.10，借鉴 lxhub 的 api_hosts/api_alive） ----------------
   // apiHostCheck：检测时额外对脚本引用的后端域名做轻量存活探测（默认关，开启会为每个音源多发若干请求）。
   apiHostCheck: false,
