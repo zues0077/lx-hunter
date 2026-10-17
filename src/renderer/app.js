@@ -248,6 +248,8 @@ async function loadConfig() {
   $('cfgSkipChecked').checked = c.skipChecked !== false
   $('cfgHashDedupe').checked = c.hashDedupeAfterCrawl !== false
   $('cfgApiHostCheck').checked = !!c.apiHostCheck
+  $('cfgApiHostBackfillMax').value = c.apiHostBackfillMax != null ? c.apiHostBackfillMax : 200
+  $('cfgApiHostBackfillBudgetSec').value = Math.round((Number(c.apiHostBackfillBudgetMs) || 180000) / 1000)
   $('cfgPatrolOn').checked = !!c.patrolEnabled
   $('cfgPatrolHours').value = c.patrolIntervalHours || 12
   $('cfgPatrolDisable').checked = c.patrolAutoDisable !== false
@@ -293,6 +295,9 @@ $('btnSaveCfg').addEventListener('click', async () => {
     skipChecked: $('cfgSkipChecked').checked,
     hashDedupeAfterCrawl: $('cfgHashDedupe').checked,
     apiHostCheck: $('cfgApiHostCheck').checked,
+    apiHostBackfillMax: Math.max(0, Math.min(5000, parseInt($('cfgApiHostBackfillMax').value, 10) || 0)),
+    apiHostBackfillBudgetMs: Math.max(5000, Math.min(3600000,
+      (parseInt($('cfgApiHostBackfillBudgetSec').value, 10) || 180) * 1000)),
     patrolEnabled: $('cfgPatrolOn').checked,
     patrolIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgPatrolHours').value, 10) || 12)),
     patrolAutoDisable: $('cfgPatrolDisable').checked,

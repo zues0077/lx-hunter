@@ -688,8 +688,8 @@ class Hunter {
             // v1.9.13：接口域名探活开关是后开的，已检测过的音源身上没有 apiAlive，
             // 而跳过分支不重新拉代码（code 为空，下面那段探测不会触发），
             // 结果就是「音源库」里一直没有后端在线/失效徽章。这里对缺结果的小批量补探一次。
-            // 仅限本次检测条目很少时（用户手动勾几条），批量的 1000+ 条交给「巡检」，
-            // 否则每条 8 个域名 × 5s 超时会把整轮检测拖成几小时。
+            // 仅限本次检测条目很少时（用户手动勾几条）即时补探，让用户立刻看到徽章；
+            // 大批量的补探交给收尾的 _backfillApiAlive（限量 + 并发 + 时间预算）。
             if (cfg.apiHostCheck && list.length <= 20 &&
                 Array.isArray(e.apiHosts) && e.apiHosts.length &&
                 (!e.apiAlive || !Object.keys(e.apiAlive).length)) {
@@ -782,6 +782,7 @@ class Hunter {
     }
     await Promise.all(Array.from({ length: conc }, () => worker()))
     this.store.saveDb()
+    const bf = await this._backfillApiAlive(list, cfg)
     const dup = this.dedupe()
     if (this.cancelRequested) this.log('检测已取消（已完成的检测结果全部保留）', '检测', 'warn')
     else this.log(`检测完成：可用 ${usable} 条 / 共 ${list.length} 条` +
@@ -789,12 +790,68 @@ class Hunter {
       (depInline ? `，即时去重废弃 ${depInline} 条` : '') +
       (excluded ? `，跳过重复合并项/服务端原生 ${excluded} 条` : '') +
       (notSource ? `，非典型音源 ${notSource} 条` : '') +
+      (bf ? `，补探接口域名 ${bf.done} 条（后端可达 ${bf.up} / 全不可达 ${bf.down}）` : '') +
       (obfSeen.high ? `，重度混淆 ${obfSeen.high} 条（状态栏有标记，建议拒绝使用）` : '') +
       (obfSeen.mid ? `，局部混淆 ${obfSeen.mid} 条（可能防和谐，自行甄别）` : '') +
       ((dup.dupFile || dup.dupContent || dup.oldVersion) ? `，收尾去重 ${dup.dupFile + dup.dupContent + dup.oldVersion} 条` : ''), '检测')
     this.job.running = false
-    this.emit('job', { running: false, type: 'check', done: true, cancelled: this.cancelRequested, usable, total: list.length, notSource, depInline, obfHigh: obfSeen.high || 0, obfMid: obfSeen.mid || 0 })
-    return { usable, total: list.length, notSource, depInline, obfHigh: obfSeen.high || 0, obfMid: obfSeen.mid || 0 }
+    this.emit('job', { running: false, type: 'check', done: true, cancelled: this.cancelRequested, usable, total: list.length, notSource, depInline, obfHigh: obfSeen.high || 0, obfMid: obfSeen.mid || 0, backfill: bf || null })
+    return { usable, total: list.length, notSource, depInline, obfHigh: obfSeen.high || 0, obfMid: obfSeen.mid || 0, backfill: bf || null }
+  }
+
+  /**
+   * v1.9.15：批量补探接口域名存活（主检测收尾后单跑一段）。
+   * 背景：「接口域名存活探测」是后加的开关，库里几千条历史音源身上根本没有 apiAlive；
+   * 而主检测开着「跳过已检测」，这些条目不重新拉代码，探测条件不成立 → 音源库里的
+   * 「后端N在线 / 后端失效×N」徽章一条都出不来。
+   * 做法：主循环结束后单独挑缺结果的条目补探，每轮限量 + 并发 + 时间预算三重保护，
+   * 多跑几轮自然把全库补齐，不会把单轮检测拖成几小时。
+   * @returns {null|{done:number,up:number,down:number,pending:number}}
+   */
+  async _backfillApiAlive(list, cfg, opts) {
+    const o = opts || {}
+    if (!cfg || !cfg.apiHostCheck) return null
+    const max = Math.max(0, Number(cfg.apiHostBackfillMax))
+    if (!max) return null
+    const need = (list || []).filter(e => e && !e.deprecated &&
+      Array.isArray(e.apiHosts) && e.apiHosts.length &&
+      (!e.apiAlive || !Object.keys(e.apiAlive).length))
+    if (!need.length) return null
+    // 先补「用户真在用」的（深检可用），其次最近检测过的，让有价值的先出结果
+    need.sort((a, b) => (b.usable ? 1 : 0) - (a.usable ? 1 : 0) ||
+      Number((b.deep && b.deep.checkedAt) || 0) - Number((a.deep && a.deep.checkedAt) || 0))
+    const picked = need.slice(0, max)
+    const conc = Math.max(1, Math.min(8, Number(cfg.apiHostBackfillConcurrency) || 6))
+    // 时间预算：域名不可达时每条要等到 5s 超时，限量之外再加一道墙
+    const budget = Math.max(1000, Number(o.budgetMs != null ? o.budgetMs : cfg.apiHostBackfillBudgetMs) || 180000)
+    const t0 = Date.now()
+    let idx = 0, done = 0, up = 0, down = 0
+    const worker = async () => {
+      while (true) {
+        if (this.cancelRequested) return
+        if (Date.now() - t0 > budget) return
+        const i = idx++
+        if (i >= picked.length) return
+        const e = picked[i]
+        try {
+          await probeApiHosts(e, cfg)
+          const vs = Object.values(e.apiAlive || {})
+          if (vs.some(v => v === 'up' || String(v).startsWith('http_'))) up++
+          else if (vs.length) down++
+          this.emit('source-updated', e)
+        } catch (_) {}
+        done++
+        if (done % 20 === 0) { this.step(`补探接口域名 ${done}/${picked.length}`); this.store.saveDb() }
+      }
+    }
+    this.log(`补探接口域名存活：本轮 ${picked.length} 条（库内待补 ${need.length} 条，并发 ${conc}，预算 ${Math.round(budget / 1000)}s）…`, '检测')
+    await Promise.all(Array.from({ length: conc }, () => worker()))
+    this.store.saveDb()
+    const stopped = done < picked.length
+    this.log(`接口域名补探完成：新增 ${done} 条结果（后端可达 ${up} 条 / 全不可达 ${down} 条）` +
+      (stopped ? (this.cancelRequested ? '（已取消，未探完的下轮继续）' : `（达到 ${Math.round(budget / 1000)}s 预算，剩余留到下轮）`) : '') +
+      (need.length > done ? `，库内还有 ${need.length - done} 条待补` : ''), '检测')
+    return { done, up, down, pending: need.length - done }
   }
 
   // ---------------- 快速指纹去重（爬取后先跑，检测就跳过重复） ----------------

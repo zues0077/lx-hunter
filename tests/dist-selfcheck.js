@@ -646,5 +646,30 @@ ck('hunter 日志输出验真剔除数', has(huntSrc, /验真剔除/))
 ck('store 默认 searchVerify: true', has(read('src/core/store.js'), /searchVerify: true/))
 ck('HTML 提供内容验真开关', has(html, /id="cfgSearchVerify"/) && has(appSrc, /cfgSearchVerify/))
 
+// ---- v1.9.15：批量补探接口域名存活 ----
+// 事故：探活开关是后加的，库里几千条历史音源没有 apiAlive；主检测开着「跳过已检测」时
+// 这些条目不重新拉代码，探测条件不成立 → 音源库「后端N在线/失效×N」徽章一条都出不来。
+// 只在手动勾 ≤20 条时补探，等于让用户自己一条条点，3832 条根本补不完。
+console.log('\n== v1.9.15 接口域名批量补探 ==')
+ck('hunter 提供批量补探 _backfillApiAlive', has(huntSrc, /async _backfillApiAlive\(list, cfg, opts\)/))
+ck('补探在主检测收尾后调用（不阻塞主流程）',
+  has(huntSrc, /const bf = await this\._backfillApiAlive\(list, cfg\)/))
+ck('补探只挑尚无探活结果的条目', has(huntSrc, /!e\.apiAlive \|\| !Object\.keys\(e\.apiAlive\)\.length/))
+ck('补探跳过已废弃条目', has(huntSrc, /e && !e\.deprecated/))
+ck('每轮限量 apiHostBackfillMax（0=不补探）',
+  has(huntSrc, /Number\(cfg\.apiHostBackfillMax\)/) && has(huntSrc, /if \(!max\) return null/))
+ck('补探按可用优先排序（先补用户真在用的）', has(huntSrc, /b\.usable \? 1 : 0/))
+ck('补探有并发控制', has(huntSrc, /apiHostBackfillConcurrency/) && has(huntSrc, /Array\.from\(\{ length: conc \}/))
+ck('补探有时间预算，域名不可达不会拖成几小时', has(huntSrc, /apiHostBackfillBudgetMs/) && has(huntSrc, /Date\.now\(\) - t0 > budget/))
+ck('补探响应取消', has(huntSrc, /if \(this\.cancelRequested\) return/))
+ck('补探结果写回并落盘', has(huntSrc, /this\.emit\('source-updated', e\)/) && has(huntSrc, /this\.store\.saveDb\(\)/))
+ck('检测日志汇报补探条数与待补剩余',
+  has(huntSrc, /补探接口域名 \$\{bf\.done\} 条/) && has(huntSrc, /库内还有/))
+ck('store 提供补探三项默认值', has(storeSrc9, /apiHostBackfillMax: 200/) &&
+  has(storeSrc9, /apiHostBackfillConcurrency: 6/) && has(storeSrc9, /apiHostBackfillBudgetMs: 180000/))
+ck('HTML 提供补探上限与预算输入', has(html, /id="cfgApiHostBackfillMax"/) && has(html, /id="cfgApiHostBackfillBudgetSec"/))
+ck('app.js 读写补探配置（秒转毫秒）',
+  has(appSrc, /cfgApiHostBackfillMax/) && has(appSrc, /apiHostBackfillBudgetMs/))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

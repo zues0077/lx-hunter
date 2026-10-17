@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.14</div>
+        <div class="brand-sub">PC 版 v1.9.15</div>
       </div>
     </div>
     <nav class="nav">
@@ -317,6 +317,11 @@
           <label class="chk"><input type="checkbox" id="cfgApiHostCheck"><span><strong>接口域名存活探测</strong>：检测时对脚本引用的后端域名做轻量探活，后端全挂的音源提前标记。默认关——开启会为每个音源多发若干请求，量大时偏慢</span></label>
         </div>
         <div class="field-row">
+          <label class="field"><span>批量补探：每轮最多补（条，0=不补探）</span><input class="input" id="cfgApiHostBackfillMax" type="number" min="0" max="5000"></label>
+          <label class="field"><span>补探时间预算（秒）</span><input class="input" id="cfgApiHostBackfillBudgetSec" type="number" min="5" max="3600"></label>
+        </div>
+        <div class="field-row"><span class="hint" style="width:auto">本开关是后加的，库里大量历史音源身上没有探活结果；而开着「跳过已检测」时这些音源不重新拉代码，探测不会触发，音源库的「后端N在线/失效×N」徽章就一直空着。批量补探在每轮检测收尾后单跑一段，只挑缺结果的音源（可用的优先），探满上限或达到预算即停，剩下的下一轮继续，多跑几轮自然补齐。</span></div>
+        <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>每次灌入自动剔除<strong>高危混淆/反调试</strong>脚本（安全建议，依据 lx-ikun issue#8 与 NAS CPU 占用实测：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门，<strong>空转死循环 while(!![]){}、混淆自调度定时器等反调试特征会独吞 CPU</strong>；检测与灌入阶段都会剔除，局部混淆只标注不剔除）</span></label>
         </div>
       </div>
@@ -432,7 +437,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=39"></script>
-<script src="app.js?v=39"></script>
+<script src="web-bridge.js?v=40"></script>
+<script src="app.js?v=40"></script>
 </body>
 </html>

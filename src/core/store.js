@@ -58,6 +58,13 @@ const DEFAULT_CONFIG = {
   // ---------------- 接口域名探活（v1.9.10，借鉴 lxhub 的 api_hosts/api_alive） ----------------
   // apiHostCheck：检测时额外对脚本引用的后端域名做轻量存活探测（默认关，开启会为每个音源多发若干请求）。
   apiHostCheck: false,
+  // v1.9.15：批量补探。探活开关是后开的，库里大量历史音源身上没有 apiAlive，
+  // 而主检测走「跳过已检测」分支不重新拉代码，探测永远补不上 → 音源库的
+  // 「后端N在线/失效」徽章一直是空的。主检测收尾后单独挑一批缺结果的补探，
+  // 每轮限量（apiHostBackfillMax，0=不补探）＋并发＋时间预算，慢慢把全库补齐。
+  apiHostBackfillMax: 200,
+  apiHostBackfillConcurrency: 6,
+  apiHostBackfillBudgetMs: 180000,
   maxCandidatesPerRepo: 400,
   timeoutMs: 15000,
   linkTimeoutMs: 20000,
