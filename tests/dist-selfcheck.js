@@ -629,10 +629,15 @@ ck('跳过已检测时补探接口域名（小批量）', has(huntSrc, /list\.le
 // 只靠名字/描述无法判定。用户特别强调：有的仓库把音源打包成 zip 发，不能误杀。
 ck('crawler 提供内容验真 verifyRepoHasSource', has(crawlSrc14, /async function verifyRepoHasSource/))
 ck('验真用项目自己的 scoreEntry 判音源脚本', has(crawlSrc14, /scoreEntry\(f\.path, text\)/) && has(crawlSrc14, /sc >= 4/))
-ck('验真放行压缩包分发仓库（zip/7z/rar 不能被误杀）',
-  has(crawlSrc14, /const packs = items\.filter/) && has(crawlSrc14, /if \(packs\.length\) return \{ ok: true, reason: '压缩包分发'/))
+ck('验真放行压缩包分发仓库（zip/7z/rar 不能被误杀，但要有网开一面的判据）',
+  has(crawlSrc14, /const packs = items\.filter/) &&
+  has(crawlSrc14, /if \(packs\.length && packOk\) return \{ ok: true, reason: '压缩包分发'/))
 ck('验真放行只发 Release 资产的仓库', has(crawlSrc14, /releases\?per_page=5/) && has(crawlSrc14, /Release 资产分发/))
 ck('验真不把 tests/fixtures 里的示例脚本当音源', has(crawlSrc14, /isWeakPath/) && has(crawlSrc14, /仅测试\/示例脚本/))
+ck('验真不放行无关仓库的压缩包（题库 47 个 rar 不算音源分发）',
+  has(crawlSrc14, /packNamed/) && has(crawlSrc14, /压缩包不是音源/))
+ck('验真挡住客户端发行包（dmg/7z/AppImage 不是音源分发）',
+  has(crawlSrc14, /function isSourceAsset/) && has(crawlSrc14, /appimage/i))
 ck('验真以并发池跑，避免突发打 GitHub', has(crawlSrc14, /async function runPool/) && has(crawlSrc14, /verifyConcurrency/))
 ck('搜索发现可选接入验真并回报 droppedNoSource',
   has(crawlSrc14, /o\.verify === true/) && has(crawlSrc14, /droppedNoSource/))

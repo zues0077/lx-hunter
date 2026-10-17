@@ -262,6 +262,24 @@ async function checkQuota(need, token) {
  * @returns {Promise<{repos:string[], perKeyword:object, searched:number, total:number}>}
  */
 /**
+ * Release 资产算不算「音源分发」。踩过的坑：
+ *  - 洛雪客户端/服务端的发行包也是 zip/7z/dmg/exe（lx-music-desktop 的 latest.yml + 130MB dmg），
+ *    早先只看后缀 `\.(js|zip|7z|rar)$` 会把 lx-music-desktop、lxserver、Sollin、BakaMusic 全收进来。
+ *  - 真音源分发包长这样：`lxmusic.jsplugin.zip`(483KB)、`LxMusicApi_1.0.0.0.zip`(30MB)、
+ *    `HYWmusic_.V1.2.0.js`、`wow-origin.rewrite.js`(581KB)。
+ * 判据：先排掉构建产物名，再要求「名字像源」或「体积很小」。
+ */
+function isSourceAsset(a) {
+  const n = String((a && a.name) || '')
+  if (!/\.(js|zip|7z|rar)$/i.test(n)) return false
+  // 图标/哈希/自动更新清单之类不是分发内容
+  if (/\.(yml|sha256|blockmap|json|txt)$/i.test(n)) return false
+  if (/(^|[^a-z])(win(dows)?|mac(os)?|linux|darwin|arm64|aarch64|x64|amd64|x86_64|x86|armv7l|universal|dmg|setup|installer|portable|appimage|deb|rpm)([^a-z]|$)/i.test(n)) return false
+  if (/音源|source|src|plugin|script|api/i.test(n)) return true
+  return Number(a && a.size || 0) > 0 && Number(a && a.size) <= 1024 * 1024
+}
+
+/**
  * 搜索命中的相关性闸门（v1.9.13）。
  *
  * 为什么必须有：GitHub 搜索对中文关键词非常宽松，早先的 `in:name,description,readme`
@@ -345,18 +363,26 @@ async function verifyRepoHasSource(repo, o) {
   // ★ 压缩包分发：很多仓库把音源打包成 zip 发（skxingyu/lx_music- 树里 4 个 zip、无散装 .js），
   //   树里只有零散构建脚本甚至没有 .js。这种情况不能因为「抽检的 .js 不是音源」就判死，
   //   只要树里有压缩包就放行，交给爬取阶段的解压挑脚本。
-  if (packs.length) return { ok: true, reason: '压缩包分发', score: best, packs: packs.length }
-  // ★ 只发 Release 资产的仓库：树里可能空空如也，再看一眼 release 资产名
+  //   但「有压缩包」这个条件本身太松——数学题库 Math_Model（master 分支）里的 47 个 .rar 里
+  //   有个「MATLAB智能算法…+源代码.7z」，早先只写「源」就被「源代码」蒙过去了。
+  //   因此压缩包名要按词匹配音源语义，或者压缩包很少且仓库身份本身就像音源仓库。
+  const packNamed = packs.some(p => /音源|music[-_\s.]?sources?|song[-_\s.]?sources?|lx[-_\s.]?music|lx[-_\s.]?source|lxmusic|plugin/i.test(p.path))
+  const packOk = packNamed || (packs.length <= 5 && looksLikeSourceRepo(meta))
+  if (packs.length && packOk) return { ok: true, reason: '压缩包分发', score: best, packs: packs.length }
+  // ★ 只发 Release 资产的仓库：树里可能空空如也，再看一眼 release 资产名。
+  //   Electron 客户端/服务端的发行包也是 zip/7z（90~230MB 的 dmg/exe/zip），不能算音源——
+  //   判据用「像源文件名」或「体积很小（源脚本打包通常几百 KB）」，构建产物两条都不满足。
   try {
     const rl = await get(`https://api.github.com/repos/${repo}/releases?per_page=5`)
     if (rl.ok) {
       const list = JSON.parse(await readText(rl, tmo))
       const hit = (Array.isArray(list) ? list : []).some(rel =>
-        (rel.assets || []).some(a => /\.(js|zip|7z|rar)$/i.test(a.name || '')))
+        (rel.assets || []).some(a => isSourceAsset(a)))
       if (hit) return { ok: true, reason: 'Release 资产分发', score: best }
     }
   } catch (e) {}
   if (weakHit) return { ok: false, reason: '仅测试/示例脚本', score: weakHit.score, file: weakHit.file }
+  if (packs.length) return { ok: false, reason: '压缩包不是音源（无音源脚本）', score: best, packs: packs.length }
   return { ok: false, reason: js.length ? '无音源脚本（也无压缩包/发行资产）' : '无 .js 也无压缩包', score: best }
 }
 
@@ -624,7 +650,7 @@ async function crawl(opts, onEvent, shouldStop) {
 
 module.exports = {
   DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness,
-  discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource,
+  discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, isSourceAsset,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
   RELEASES_PER_REPO, MAX_ASSET_BYTES, MAX_RELEASE_DL_PER_REPO
 }

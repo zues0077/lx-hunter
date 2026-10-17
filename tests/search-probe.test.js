@@ -131,6 +131,27 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
       ],
       files: { 'tests/fixtures/basic-source.js': SRC_TEXT, 'real-source.js': SRC_TEXT },
       releases: []
+    },
+    // 「有压缩包就算音源」太松：数学题库里 47 个 .rar（含「源代码.7z」）也不能放行
+    'g/math-model': {
+      branch: 'master',
+      tree: Array.from({ length: 6 }, (_, i) => ({ type: 'blob', path: `2012${i}/MATLAB智能算法+源代码.7z`, size: 1000 })),
+      files: {},
+      releases: []
+    },
+    // Electron 客户端的发行包也是 zip/7z/dmg，不能当音源分发
+    'h/lx-music-desktop': {
+      branch: 'main',
+      tree: [],
+      files: {},
+      releases: [
+        { tag_name: 'v2.12.6', assets: [
+          { name: 'lx-music-desktop-2.12.6-arm64.dmg', size: 128 * 1024 * 1024 },
+          { name: 'lx-music-desktop-v2.12.6-win7_x64-green.7z', size: 143 * 1024 * 1024 },
+          { name: 'latest.yml', size: 200 }
+        ] },
+        { tag_name: 'v2.12.5', assets: [{ name: 'lx-music-desktop-2.12.5-x64.dmg', size: 132 * 1024 * 1024 }] }
+      ]
     }
   }
   const ghCalls = []
@@ -168,6 +189,28 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
   const vf = await verifyRepoHasSource('f/lx-real-and-fixture', { timeoutMs: 3000 })
   ck('内容验真：真脚本优先于夹具（不被 tests/fixtures 带偏）',
     vf.ok === true && vf.reason === '含音源脚本' && vf.file === 'real-source.js', JSON.stringify(vf))
+  const vg = await verifyRepoHasSource('g/math-model', { timeoutMs: 3000 })
+  ck('内容验真：无关仓库的一堆压缩包不算音源分发',
+    vg.ok === false && vg.reason === '压缩包不是音源（无音源脚本）', JSON.stringify(vg))
+  const vh = await verifyRepoHasSource('h/lx-music-desktop', { timeoutMs: 3000 })
+  ck('内容验真：客户端的 dmg/7z 发行包不算音源分发',
+    vh.ok === false, JSON.stringify(vh))
+  // 资产判据单测：真分发包 vs 客户端构建产物
+  const { isSourceAsset } = require('../src/core/crawler')
+  const assetsOk = [
+    ['lxmusic.jsplugin.zip', 483 * 1024],
+    ['LxMusicApi_1.0.0.0.zip', 30 * 1024 * 1024],
+    ['HYWmusic_.V1.2.0.js', 200 * 1024],
+    ['洛雪音源集合.zip', 3 * 1024 * 1024]
+  ].every(([name, size]) => isSourceAsset({ name, size }))
+  const assetsBad = [
+    ['lx-music-desktop-v2.12.6-win7_x64-green.7z', 143 * 1024 * 1024],
+    ['LX.Music.Server.2.1.3.arm64.Portable.exe', 104 * 1024 * 1024],
+    ['Sollin-1.3.8-arm64-mac.zip', 129 * 1024 * 1024],
+    ['BakaMusic-1.9.5-linux-amd64.AppImage', 144 * 1024 * 1024],
+    ['latest-linux-arm64.yml', 0]
+  ].every(([name, size]) => !isSourceAsset({ name, size }))
+  ck('资产判据：音源分发包放行、客户端构建产物挡住', assetsOk && assetsBad)
 
   // verify 开关：默认不做内容验真（不额外打树接口）；开启后按验真结果裁剪
   const searchItems = Object.keys(fixtures).map(full_name => ({ full_name, description: '洛雪音源' }))
@@ -191,16 +234,17 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
     return json({ default_branch: fx.branch })
   }
   const noVerify = await discoverReposViaSearch({ keywords: ['lx 音源'], known: new Set(), timeoutMs: 3000 })
-  ck('内容验真：未开启时 6 个命中全收（不做额外请求）',
-    noVerify.repos.length === 6 && !ghCalls.some(u => /\/git\/trees\//.test(u)), 'repos=' + noVerify.repos.length)
+  ck('内容验真：未开启时 8 个命中全收（不做额外请求）',
+    noVerify.repos.length === 8 && !ghCalls.some(u => /\/git\/trees\//.test(u)), 'repos=' + noVerify.repos.length)
   const yesVerify = await discoverReposViaSearch({ keywords: ['lx 音源'], known: new Set(), timeoutMs: 3000, verify: true })
-  ck('内容验真：开启后剔除客户端与测试夹具两个仓库',
-    yesVerify.repos.length === 4 && !yesVerify.repos.includes('c/lxmusic-android') && !yesVerify.repos.includes('e/lx-music-source-manager'),
+  ck('内容验真：开启后剔除客户端、测试夹具、题库与客户端发行仓库',
+    yesVerify.repos.length === 4 &&
+    ['c/lxmusic-android', 'e/lx-music-source-manager', 'g/math-model', 'h/lx-music-desktop'].every(x => !yesVerify.repos.includes(x)),
     yesVerify.repos.join(','))
   ck('内容验真：压缩包与 Release 分发型都被保住',
     yesVerify.repos.includes('b/lx-source-pack') && yesVerify.repos.includes('d/lx-source-release'), yesVerify.repos.join(','))
   ck('内容验真：droppedNoSource 计数与 details 对齐',
-    yesVerify.droppedNoSource === 2 && yesVerify.discovered === 6 && yesVerify.details.length === 6,
+    yesVerify.droppedNoSource === 4 && yesVerify.discovered === 8 && yesVerify.details.length === 8,
     `dropped=${yesVerify.droppedNoSource} discovered=${yesVerify.discovered} details=${yesVerify.details.length}`)
 
   globalThis.fetch = mockFetch(null, { failMessage: 'API rate limit exceeded' })
