@@ -540,8 +540,10 @@ ck('搜索发现测试存在且被纳入 npm test',
 console.log('\n== v1.9.10 接口域名探活 ==')
 ck('checker 提供接口域名抽取', has(chkSrc, /function extractApiHosts/))
 ck('checker 提供接口域名探活', has(chkSrc, /function probeApiHosts/))
-// 噪声过滤必须是后缀匹配：锚定 ^...$ 会让 cdn.jsdelivr.net 这类子域名漏网
-ck('抽取时按后缀过滤 CDN/文档噪声（jsdelivr / unpkg）', has(chkSrc, /jsdelivr\.net\|unpkg\.com/))
+// 噪声过滤必须是后缀匹配：锚定 ^...$ 会让 cdn.jsdelivr.net 这类子域名漏网。
+// 注意：源码是正则字面量，圆点是转义形式（jsdelivr\.net），断言要连反斜杠一起匹配。
+ck('抽取时按后缀过滤 CDN/文档噪声（jsdelivr / unpkg）', has(chkSrc, /jsdelivr\\\.net\|unpkg\\\.com/))
+ck('噪声过滤确为后缀锚定 (?:^|\\.)…$（子域名 cdn.jsdelivr.net 也能过滤）', has(chkSrc, /\(\?:\^\|\\\.\).*jsdelivr\\\.net.*\$\/i/))
 ck('store 默认关闭接口域名探活', has(storeSrc9, /apiHostCheck: false/))
 ck('设置页提供接口域名探活开关', has(html, /id="cfgApiHostCheck"/))
 ck('接口域名测试存在且被纳入 npm test',
