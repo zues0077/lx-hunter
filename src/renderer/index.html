@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.15</div>
+        <div class="brand-sub">PC 版 v1.9.16</div>
       </div>
     </div>
     <nav class="nav">
@@ -42,8 +42,8 @@
         </div>
         <div class="head-actions">
           <button class="btn" id="btnCrawl">爬取仓库</button>
-          <button class="btn primary" id="btnCheck">检测选中</button>
-          <button class="btn" id="btnCheckImport" title="先跑检测，再把通过的音源直接灌入服务端">检测并灌入</button>
+          <button class="btn primary" id="btnCheck" title="强制重测勾选的条目（忽略「跳过已检测」），重新下载 → 沙箱取链 → 接口域名探活">检测选中</button>
+          <button class="btn" id="btnCheckImport" title="先强制重测勾选的音源，再把通过的音源直接灌入服务端">检测并灌入</button>
           <button class="btn danger-ghost" id="btnCancel" disabled>取消</button>
         </div>
       </header>
@@ -312,7 +312,7 @@
         </div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgQuick"><span>快速检测（首个平台可用即通过，剩余平台<strong>不测</strong>并标「未测?」——平台列只反映实测结果；要完整覆盖请点「补全平台覆盖」或关闭此项）</span></label>
-          <label class="chk"><input type="checkbox" id="cfgSkipChecked"><span>跳过已检测且脚本内容未变的音源（单条手动检测仍会重测）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgSkipChecked"><span>跳过已检测且脚本内容未变的音源（<strong>单条手动检测与「检测选中 / 检测并灌入」始终强制重测</strong>；此项只对爬取后自动检测、巡检、定时管线等不指定条目的批量生效）</span></label>
           <label class="chk"><input type="checkbox" id="cfgHashDedupe"><span>爬取后先做内容指纹去重（只下载算哈希、不进沙箱），检测直接跳过重复项</span></label>
           <label class="chk"><input type="checkbox" id="cfgApiHostCheck"><span><strong>接口域名存活探测</strong>：检测时对脚本引用的后端域名做轻量探活，后端全挂的音源提前标记。默认关——开启会为每个音源多发若干请求，量大时偏慢</span></label>
         </div>
@@ -437,7 +437,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=40"></script>
-<script src="app.js?v=40"></script>
+<script src="web-bridge.js?v=41"></script>
+<script src="app.js?v=41"></script>
 </body>
 </html>

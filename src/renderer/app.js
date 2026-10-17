@@ -1453,7 +1453,7 @@ $('btnCheckImport').addEventListener('click', async () => {
   if (!ids.length) return toast('请先勾选要检测的音源')
   setBusy(true)
   $('progStep').textContent = '开始检测…'
-  const r = await api.checkStart(ids)
+  const r = await api.checkStart(ids, { force: true })
   if (!r.ok) { setBusy(false); return toast('检测失败: ' + r.error, 'err') }
   await loadSources()
   // 对账后再算「还该灌谁」：服务端上已经被删掉的那条，本地「已灌入」标记必须先摘掉，
@@ -1527,7 +1527,9 @@ async function startCheck(ids) {
   setBusy(true)
   $('btnCheck').textContent = '检测中…'
   $('progStep').textContent = '开始检测…'
-  const r = await api.checkStart(ids)
+  // v1.9.16：手动勾选 = 明确要重测，必须带 force —— 否则「跳过已检测」会把勾选的条目全部
+  // 秒跳过，徽章一条不变，用户只会以为批量检测没生效（实测反馈）
+  const r = await api.checkStart(ids, { force: true })
   setBusy(false)
   $('btnCheck').textContent = '检测选中'
   if (r.ok) {

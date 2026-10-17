@@ -671,5 +671,19 @@ ck('HTML 提供补探上限与预算输入', has(html, /id="cfgApiHostBackfillMa
 ck('app.js 读写补探配置（秒转毫秒）',
   has(appSrc, /cfgApiHostBackfillMax/) && has(appSrc, /apiHostBackfillBudgetMs/))
 
+// ---- v1.9.16：检测选中强制重测 + 跳过分支补写探针徽章 ----
+// 事故：勾 36 条点「检测选中」，同秒完成（跳过已检测 36 条），「已实测/后端N在线」徽章一条不变；
+// 单条检测却是 force 会重测。用户合理怀疑批量检测没生效。另外老条目（探针 v1.9.9 才加）跳过后
+// 一直挂「未检测/疑似未测」。
+console.log('\n== v1.9.16 检测选中强制重测 ==')
+ck('runCheck 支持 opts.force', has(huntSrc, /const force = opt\.full \|\| opt\.force \|\| !ids \|\| ids\.length <= 1/))
+ck('强制重测批量时日志写明', has(huntSrc, /勾选强制重测（忽略跳过已检测）/))
+ck('「检测选中」带 force', has(appSrc, /api\.checkStart\(ids, \{ force: true \}\)/))
+ck('「检测并灌入」同样强制重测', has(appSrc.split('btnCheckImport')[1] || appSrc, /force: true/))
+ck('跳过分支本地补写探针（不发网络请求）', has(huntSrc, /!e\.probe && e\.deep && !e\.deep\.cancelled\) applyProbeRecord\(e, e\.deep\)/))
+ck('已有探针不被覆盖（只补缺失）', has(huntSrc, /if \(!e\.probe && e\.deep/) && has(huntSrc, /applyProbeRecord\(e, e\.deep\)/))
+ck('设置说明更新：检测选中始终强制重测', has(html, /单条手动检测与「检测选中 \/ 检测并灌入」始终强制重测/))
+ck('按钮提示写明强制重测', has(html, /id="btnCheck" title="强制重测勾选的条目/))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

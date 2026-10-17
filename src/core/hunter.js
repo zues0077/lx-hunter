@@ -584,8 +584,11 @@ class Hunter {
     const opt = opts || {}
     // full=true：全平台完整检测（关掉快速模式并强制重测），用于「补全平台覆盖」
     const cfg = opt.full ? Object.assign({}, this.store.config, { quickCheck: false }) : this.store.config
-    // 单条手动检测 = 强制重测；批量时默认跳过「已检测且脚本内容未变」的条目
-    const force = opt.full || !ids || ids.length <= 1
+    // 单条手动检测 = 强制重测；批量时默认跳过「已检测且脚本内容未变」的条目。
+    // v1.9.16：UI 的「检测选中 / 检测并灌入」带 opts.force=true —— 手动勾选就是明确要重测，
+    // 再走跳过逻辑会让用户以为批量检测没生效（实测反馈：勾 36 条点检测，秒完成、徽章全不变）。
+    // 「跳过已检测」只对不指定条目的调用生效（爬取后自动检测 / 巡检 / 定时管线）。
+    const force = opt.full || opt.force || !ids || ids.length <= 1
     const picked = (ids && ids.length ? ids.map(i => this.store.db.sources[i]).filter(Boolean) : this.store.getSources())
     // 服务端原生音源：服务端 list 会带 sourceUrl（当年经 URL 导入时留存的原始脚本地址），
     // 有地址的同样可以下载 + 沙箱真实取链检测 —— 过去一律跳过，用户点「检测」毫无反应
@@ -632,7 +635,7 @@ class Hunter {
     }
     this.job = { running: true, type: 'check', cancel: false, progress: { done: 0, total: list.length, usable: 0 }, step: '' }
     this.emit('job', { running: true, type: 'check' })
-    this.log(`开始检测 ${list.length} 条候选（下载 + 沙箱真实取链，并发 ${Math.max(1, Math.min(16, cfg.concurrency || 8))}${cfg.quickCheck !== false ? '，快速模式（首个平台可用即停，其余标记未测）' : '，全平台完整检测'}）…`, '检测')
+    this.log(`开始检测 ${list.length} 条候选（下载 + 沙箱真实取链，并发 ${Math.max(1, Math.min(16, cfg.concurrency || 8))}${cfg.quickCheck !== false ? '，快速模式（首个平台可用即停，其余标记未测）' : '，全平台完整检测'}${force && ids && ids.length > 1 ? '，勾选强制重测（忽略跳过已检测）' : ''}）…`, '检测')
 
     const conc = Math.max(1, Math.min(16, cfg.concurrency || 8))
     let idx = 0
@@ -685,6 +688,11 @@ class Hunter {
           if (e.deep.hash === e.contentHash) {
             skippedChecked++
             if (e.usable) usable++
+            // v1.9.16：探针记录（probe/validTier）是 v1.9.9 才加的，老版本检测过的条目身上没有，
+            // 跳过分支原来什么都不补 → 明明深检可用，音源库里却一直挂「未检测/疑似未测」徽章。
+            // applyProbeRecord 是纯本地计算（只读已有 deep 结果，不发任何网络请求），缺就立即补齐，
+            // 让「已实测/已排除」徽章与真实检测状态对齐。
+            if (!e.probe && e.deep && !e.deep.cancelled) applyProbeRecord(e, e.deep)
             // v1.9.13：接口域名探活开关是后开的，已检测过的音源身上没有 apiAlive，
             // 而跳过分支不重新拉代码（code 为空，下面那段探测不会触发），
             // 结果就是「音源库」里一直没有后端在线/失效徽章。这里对缺结果的小批量补探一次。
