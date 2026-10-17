@@ -1,7 +1,7 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
-const { crawl, DEFAULT_REPOS, normalizeRepo } = require('./crawler')
-const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip } = require('./checker')
+const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch } = require('./crawler')
+const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
 const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
 const { Store } = require('./store')
@@ -9,6 +9,26 @@ const { Store } = require('./store')
 function normName(s) {
   return String(s || '').toLowerCase().replace(/[\[\]【】（）()|｜:：、,，.。\s_\-·•]+/g, '')
 }
+
+/**
+ * 构建本次爬取的仓库种子列表（v1.9.12，纯函数便于测试）。
+ * 优先用统一仓库清单 cfg.repos：只取 enabled 的（用户可单独禁用任一仓库，含内置）。
+ * 未迁移（repos 非数组）时回退到旧逻辑（DEFAULT_REPOS + customRepos），保证兼容。
+ * @param {object} cfg store.config
+ * @returns {string[]} owner/repo 列表
+ */
+function buildRepoSeeds(cfg) {
+  const c = cfg || {}
+  const rl = Array.isArray(c.repos) ? c.repos : null
+  if (rl) return rl.filter(r => r && r.enabled !== false).map(r => normalizeRepo(r.repo)).filter(Boolean)
+  const out = DEFAULT_REPOS.slice()
+  for (const r of (c.customRepos || [])) {
+    const n = normalizeRepo(r)
+    if (n && out.indexOf(n) === -1) out.push(n)
+  }
+  return out
+}
+
 // 「弱文件名」：纯数字 / 通用名 / 过短。这类名字在不同目录下几乎必然是不同内容
 // （实测 pdone/lx-music-source 的 ikun/6.js 与 lx/6.js 内容完全不同），
 // 不能靠文件名跨目录判重，必须留给内容指纹去确认。
@@ -189,7 +209,45 @@ class Hunter {
     if (Array.isArray(cfg.reposOverride) && cfg.reposOverride.length) {
       repos = this._normRepos(cfg.reposOverride, '定向仓库')
     } else {
-      repos = DEFAULT_REPOS.slice().concat(this._normRepos(cfg.customRepos || [], '附加仓库'))
+      // v1.9.12：优先用统一仓库清单 cfg.repos（内置/附加/发现三类，可禁用/删除）。
+      // 未迁移（repos 非数组）时回退到旧逻辑（DEFAULT_REPOS + customRepos），保证兼容。
+      const rl = Array.isArray(cfg.repos) ? cfg.repos : null
+      repos = buildRepoSeeds(cfg)
+      // v1.9.9 搜索发现：用关键词在 GitHub 搜索新仓库，作为种子的增量补充（不替换种子）。
+      // 仅在非定向爬取（reposOverride 为空）且用户开启 searchEnabled 时触发。
+      if (cfg.searchEnabled && Array.isArray(cfg.searchKeywords) && cfg.searchKeywords.length) {
+        try {
+          // knownRepos 含全部 cfg.repos（含被禁用的），避免已禁用仓库被搜索重新发现并重新启用。
+          const knownRepos = new Set()
+          if (rl) for (const r of rl) { const n = normalizeRepo(r.repo); if (n) knownRepos.add(n) }
+          for (const e of this.store.getSources()) if (e && e.repo) knownRepos.add(normalizeRepo(e.repo) || e.repo)
+          const d = await discoverReposViaSearch({
+            keywords: cfg.searchKeywords, token: cfg.ghToken,
+            maxReposPerKeyword: Number(cfg.maxReposPerKeyword) || 20,
+            maxTotal: Number(cfg.maxSearchReposTotal) || 60,
+            timeoutMs: cfg.timeoutMs, known: knownRepos,
+            skipStarsBelow: Number(cfg.searchMinStars) || 0
+          })
+          if (d.repos.length) {
+            repos = repos.concat(d.repos)
+            // v1.9.12：把搜索发现的新仓库持久化进仓库清单，使其可被用户单独禁用/删除、且后续记住。
+            if (rl) {
+              const have = new Set(rl.map(r => normalizeRepo(r.repo)))
+              let changed = false
+              for (const nr of d.repos) {
+                const k = normalizeRepo(nr)
+                if (k && !have.has(k)) { rl.push({ repo: k, enabled: true, builtin: false, origin: 'discovered' }); have.add(k); changed = true }
+              }
+              if (changed) this.store.saveConfig()
+            }
+            this.log(`搜索发现新增 ${d.repos.length} 个仓库（来自 ${d.searched} 个关键词，跳过已收录）`, '爬取')
+          } else {
+            this.log('搜索发现：本轮未找到新仓库（可能都已收录或搜索受限）', '爬取')
+          }
+        } catch (e) {
+          this.log('搜索发现失败：' + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
+        }
+      }
     }
     this.job = { running: true, type: 'crawl', cancel: false, progress: { reposDone: 0, repoTotal: repos.length, added: 0, linksFound: 0 }, step: '' }
     this.emit('job', { running: true, type: 'crawl' })
@@ -626,6 +684,10 @@ class Hunter {
         try {
           const { code } = await checkBasic(e, cfg, (t, p) => this.emit(t, p), this.mirrorPref)
           if (e.fetchMirror) this.mirrorPref = e.fetchMirror   // 镜像学习：成功的镜像后续优先
+          // v1.9.10：可选接口域名存活探测（默认关，避免每个音源都打网络请求）
+          if (cfg.apiHostCheck && e.status === 'ok' && code) {
+            try { await probeApiHosts(e, cfg) } catch (_) {}
+          }
           // 注意：单条手动检测（force）必须绕过「疑似度」门禁。
           // 否则打分偏低的真实音源连沙箱都进不去，用户点「检测」毫无反应，
           // 会被当成「检测有问题」。深检自身有并发与预算保护，放行不会拖垮速度。
@@ -654,6 +716,7 @@ class Hunter {
               }
               if (rec) { rec.deep = e.deep || d; if (rec.resolve) { rec.resolve(rec.deep); rec.resolve = null } }
               e.usable = usableCount(e) > 0
+              applyProbeRecord(e, e.deep)   // v1.9.9：把深检结论固化为可记录的探针/validTier
               // 混淆标注（v1.7.1）：checkBasic 已把 obfLevel/obfHits 写到条目上，
               // 重度/局部混淆都在状态徽章可见；这里只汇总日志。
               if (e.obfLevel) obfSeen[e.obfLevel] = (obfSeen[e.obfLevel] || 0) + 1
@@ -1587,6 +1650,11 @@ class Hunter {
         try {
           const { code } = await checkBasic(e, cfg, (t, p) => this.emit(t, p), this.mirrorPref)
           if (e.fetchMirror) this.mirrorPref = e.fetchMirror
+          // v1.9.11：接口域名存活遥测（需开启 cfg.apiHostCheck）。后端域名全挂 = 音源基本失效，
+          // 提前累计 apiDownStreak，供下方 apiDownVerdict 在后端已死时直接判死（不待深检误判）。
+          if (cfg.apiHostCheck && e.status === 'ok' && code) {
+            try { await probeApiHosts(e, cfg) } catch (_) {}
+          }
           if (e.status !== 'ok' || !code) {
             const errText = e.error || ''
             if (/HTTP 404|HTTP 410/.test(errText)) { verdict = 'dead'; note = '脚本已被删除（' + errText + '）' }
@@ -1619,11 +1687,25 @@ class Hunter {
               e.usable = usableCount(d) > 0
             }
             if (keepPrevUsable) note += '；库内保留主检的可用结果'
+            applyProbeRecord(e, e.deep)   // v1.9.9：巡检也刷新探针记录/validTier
           }
         } catch (err) {
           const msg = String((err && err.message) || err)
           if (msg === '已取消') { verdict = 'unknown'; note = '已取消' }
           else { verdict = 'unknown'; note = '检测异常：' + msg.slice(0, 80) }
+        }
+        // v1.9.11：接口域名存活信号优先。后端域名连续全部不可达 = 音源大概率失效，
+        // 即便深检因网络抖动偶发可用也不掩盖；后端已恢复则 probeApiHosts 已把 apiDownStreak 清零。
+        if (cfg.apiHostCheck && note !== '已取消') {
+          const av = apiDownVerdict(e, cfg)
+          if (av) {
+            if (av.verdict === 'dead' && verdict !== 'ok') {
+              verdict = 'dead'; note = av.note; suspectTag = false
+              rec.patrolFailStreak = av.streak
+            } else if (verdict !== 'ok' && verdict !== 'dead') {
+              verdict = 'unknown'; note = av.note; suspectTag = av.verdict === 'suspect'
+            }
+          }
         }
         delete e.checking
         rec.lastPatrol = { at: Date.now(), ok: verdict === 'ok', note: String(note).slice(0, 160) }
@@ -1850,4 +1932,4 @@ class Hunter {
   }
 }
 
-module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum, patrolAutoDeleteWanted }
+module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildRepoSeeds }

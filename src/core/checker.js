@@ -249,6 +249,7 @@ async function checkBasic(entry, cfg, onEvent, preferredMirror) {
     entry.homepage = meta.homepage || ''
     entry.description = meta.description || ''
     entry.lxName = meta.name || ''
+    entry.apiHosts = extractApiHosts(entry.code)
     return { entry, code: entry.code }
   }
   const { res, url, mirror } = await crawlFetch(entry.url, null, cfg.timeoutMs, cfg.mirror, preferredMirror)
@@ -277,6 +278,7 @@ async function checkBasic(entry, cfg, onEvent, preferredMirror) {
   entry.homepage = meta.homepage || ''
   entry.description = meta.description || ''
   entry.lxName = meta.name || ''
+  entry.apiHosts = extractApiHosts(text)
   return { entry, code: text }
 }
 
@@ -637,9 +639,112 @@ function patrolJudge(d, ctx) {
   return { verdict: 'suspect', streak, note: '五平台取链全部失败（连续第 ' + streak + ' 次），连续 ' + need + ' 次确认后才自动禁用' }
 }
 
+/**
+ * 把一次深检结果固化为可记录的「探针」（对齐 lxhub 的 probe_* 字段，v1.9.9）：
+ * 本工具的 deepCheck 本就是「真实能力探针」——在沙箱里初始化脚本、按声明音质向各平台
+ * 真实发起 musicUrl 取链并校验音频魔数。这里把它的结论落成一等公民字段，便于：
+ *  - 前端展示「已实测可用 / 降级 / 无法加载 / 未测」
+ *  - 统计连续失败次数（probeFailStreak），供巡逻自动退役
+ *  - 给出两级置信 validTier（confirmed 真实取链通过 / probable 疑似音源未实测通过 / rejected 明确非音源或已死）
+ * @param {object} e 音源库条目（会被就地写入 probe / validTier / probeFailStreak）
+ * @param {object} [d] 深检结果（缺省用 e.deep）
+ * @returns {object} e
+ */
+function applyProbeRecord(e, d) {
+  const deep = d || e.deep
+  const usable = usableCount(deep)
+  let status, detail
+  if (!deep || deep.cancelled) {
+    status = 'untested'; detail = '未检测或未确认'
+  } else if (!deep.loadable) {
+    status = 'not_loadable'; detail = String(deep.loadError || '脚本无法加载').slice(0, 120)
+  } else if (usable > 0) {
+    status = 'usable'; detail = '可用平台 ' + usable + ' 个'
+  } else {
+    const fails = Object.values(deep.platforms || {}).filter(p => p && p.status === 'failed')
+    const net = fails.some(p => isLocalNetworkIssue(p.message || ''))
+    status = net ? 'degraded' : 'not_loadable'
+    detail = net ? '全部平台取链失败（疑似本机网络/限流）' : '全部平台取链失败（音源可能已失效）'
+  }
+  e.probe = {
+    status,
+    detail,
+    checkedAt: (deep && deep.checkedAt) || Date.now(),
+    sha: e.contentHash || null,
+    sources: (deep && deep.declaredSources) || null
+  }
+  if (status === 'usable') e.validTier = 'confirmed'
+  else if (e.suspected) e.validTier = 'probable'
+  else e.validTier = 'rejected'
+  e.probeFailStreak = (status === 'usable') ? 0 : (Number(e.probeFailStreak) || 0) + 1
+  return e
+}
+
+/**
+ * 抽取脚本里出现的「疑似接口域名」（v1.9.10，借鉴 lxhub 的 api_hosts）：
+ * 洛雪音源脚本通过 lx.request 向各音乐平台接口取链，这些域名就是音源的「后端」——
+ * 后端挂了，脚本写得再对也取不到链。这里从代码里抓出 http(s):// 域名，去重后供存活探测。
+ * 过滤掉明显不是接口的噪声（CDN/图床/文档/github 自身），上限 8 个。
+ * @param {string} code 脚本源码
+ * @returns {string[]} 去重后的域名列表
+ */
+function extractApiHosts(code) {
+  const t = String(code || '')
+  const hosts = new Set()
+  const re = /https?:\/\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)/gi
+  let m
+  while ((m = re.exec(t)) && hosts.size < 16) {
+    const host = m[1].toLowerCase()
+    if (/(?:^|\.)(github\.com|github\.io|githubusercontent\.com|jsdelivr\.net|unpkg\.com|fonts\.googleapis\.com|fonts\.gstatic\.com|w3\.org|schema\.org|nodejs\.org)$/i.test(host)) continue
+    if (/\.(png|jpg|jpeg|gif|svg|css|js|json|md|woff2?|ttf)$/i.test(host)) continue
+    hosts.add(host)
+  }
+  return Array.from(hosts).slice(0, 8)
+}
+
+/**
+ * 对抽取出的接口域名做轻量存活探测（v1.9.10，借鉴 lxhub 的 api_alive）。
+ * 仅在 cfg.apiHostCheck 开启时执行（默认关，避免对每个音源每个域名都打网络请求）。
+ * 后端域名全挂的音源，即便脚本本身能加载，也基本等于失效——提前标记便于巡检。
+ * @param {object} entry 音源条目（就地写入 apiAlive: {host: 'up'|'down'|'http_N'}）
+ */
+async function probeApiHosts(entry, cfg) {
+  const hosts = Array.isArray(entry.apiHosts) ? entry.apiHosts : []
+  if (!hosts.length || !cfg || !cfg.apiHostCheck) return
+  const out = {}
+  for (const h of hosts) {
+    try {
+      const res = await fetchAnyWithTimeout('https://' + h + '/', { method: 'HEAD', headers: { 'User-Agent': UA } }, 5000)
+      const st = res && res.status
+      out[h] = (res && (res.ok || st === 403 || st === 405)) ? 'up' : ('http_' + (st != null ? st : 'na'))
+    } catch (e) {
+      out[h] = 'down'
+    }
+  }
+  entry.apiAlive = out
+  // 生命周期遥测（v1.9.11，借鉴 lxhub 的 api_down_streak）：后端域名全挂 = 音源基本失效。
+  // 只要有一个可达（up 或返回了 HTTP 状态码，说明域名解析且服务在）就清零；全部不可达才累计。
+  const anyAlive = Object.values(out).some(s => s === 'up' || String(s).startsWith('http_'))
+  entry.apiDownStreak = anyAlive ? 0 : (Number(entry.apiDownStreak) || 0) + 1
+}
+
+/**
+ * 把「接口域名存活遥测」翻译成巡检判定（v1.9.11，对齐 lxhub api_down_streak）。
+ * 仅在 cfg.apiHostCheck 开启时有效；后端域名连续全部不可达，等价于深检全平台失败。
+ * @returns {null|{verdict:'dead'|'suspect', note:string, streak:number}}
+ */
+function apiDownVerdict(e, cfg) {
+  if (!cfg || !cfg.apiHostCheck) return null
+  const streak = Number(e && e.apiDownStreak) || 0
+  if (streak <= 0) return null
+  const thr = Math.max(1, Number(cfg.patrolDisableAfter) || 2)
+  if (streak >= thr) return { verdict: 'dead', note: `接口域名连续 ${streak} 次巡检全部不可达（后端已失效）`, streak }
+  return { verdict: 'suspect', note: `接口域名连续 ${streak} 次不可达`, streak }
+}
+
 module.exports = {
   TEST_SONGS, PLATFORMS, PLATFORM_LABEL,
   sha256Str, extractMeta, classifyEntry, scoreEntry, obfuscationRisk, obfuscationTip, verifyUrl,
   checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge,
-  isTransient, isLocalNetworkIssue, deepFailKind
+  isTransient, isLocalNetworkIssue, deepFailKind, applyProbeRecord, extractApiHosts, probeApiHosts, apiDownVerdict
 }

@@ -196,6 +196,7 @@ const MIRROR_PRESETS = [
   { id: 'ghfast', label: 'ghfast.top', prefix: true, build: u => 'https://ghfast.top/' + u },
   { id: 'ghproxy', label: 'gh-proxy.com', prefix: true, build: u => 'https://gh-proxy.com/' + u },
   { id: 'ghproxy-net', label: 'ghproxy.net', prefix: true, build: u => 'https://ghproxy.net/' + u },
+  { id: 'lhlone', label: 'gh1.lhl.one', prefix: true, build: u => 'https://gh1.lhl.one/' + u },
   { id: 'jsdelivr', label: 'jsDelivr CDN', gh: true, build: (owner, repo, ref, p) => `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${p}` }
 ]
 

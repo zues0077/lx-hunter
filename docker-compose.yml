@@ -14,7 +14,7 @@
 services:
   lx-hunter:
     build: .
-    image: lx-hunter-pc:web-1.9.0
+    image: lx-hunter-pc:web-1.9.12
     container_name: lx-hunter-pc
     restart: unless-stopped
     ports:

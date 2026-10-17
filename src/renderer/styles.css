@@ -118,6 +118,7 @@ code { background: var(--card-2); padding: 1px 6px; border-radius: 5px; font-siz
 .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; color: #fff; font-weight: 600; }
 .btn.ghost { background: transparent; }
 .btn.danger-ghost { background: transparent; border-color: var(--dead); color: var(--dead); }
+.btn.btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn.danger-ghost:hover:not(:disabled) { background: rgba(248,113,113,.12); }
 .btn.sm { padding: 4px 10px; font-size: 12px; border-radius: 7px; }
 
@@ -198,6 +199,28 @@ textarea.input { width: 100%; resize: vertical; font-family: inherit; }
 .badge.warn { background: rgba(251,191,36,.16); color: var(--warn); }
 .badge.gray { background: var(--card-2); color: var(--muted); }
 .badge.accent { background: rgba(110,168,254,.16); color: var(--accent); }
+
+/* validTier 小标签（v1.9.10，对齐 lxhub 的 confirmed/probable/rejected 两级置信） */
+.vt { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 600; vertical-align: middle; }
+.vt-confirmed { background: rgba(52,211,153,.18); color: var(--ok); }
+.vt-probable { background: rgba(251,191,36,.16); color: var(--warn); }
+.vt-rejected { background: rgba(248,113,113,.14); color: var(--dead); }
+.vt-up { background: rgba(52,211,153,.18); color: var(--ok); }
+.vt-down { background: rgba(248,113,113,.16); color: var(--dead); }
+.vt-warn { background: rgba(251,191,36,.16); color: var(--warn); }
+
+/* 仓库清单管理（v1.9.12） */
+.repo-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--card-2); }
+.repo-row { display: flex; align-items: center; gap: 10px; padding: 4px 2px; }
+.repo-row + .repo-row { border-top: 1px dashed var(--border); }
+.repo-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); min-width: 64px; cursor: pointer; }
+.repo-name { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--text); }
+.repo-origin { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
+.origin-builtin { background: rgba(96,165,250,.18); color: #60a5fa; }
+.origin-custom { background: rgba(52,211,153,.18); color: var(--ok); }
+.origin-discovered { background: rgba(251,191,36,.16); color: var(--warn); }
+.repo-add { display: flex; gap: 8px; flex-wrap: wrap; }
+.repo-add .input { flex: 1; min-width: 220px; }
 
 .plats { display: flex; gap: 4px; flex-wrap: wrap; }
 .plat {

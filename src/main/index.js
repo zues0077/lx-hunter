@@ -5,6 +5,7 @@ const fs = require('fs')
 const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
+const { DEFAULT_REPOS } = require('../core/crawler')
 
 let win = null
 let store = null
@@ -176,7 +177,7 @@ function guard(fn) {
   }
 }
 
-ipcMain.handle('config:get', guard(() => ({ config: store.config, dataDir: getDataDir() })))
+ipcMain.handle('config:get', guard(() => ({ config: store.config, dataDir: getDataDir(), defaultRepos: DEFAULT_REPOS })))
 
 ipcMain.handle('config:set', guard((e, patch) => {
   // 附加仓库做规范化（支持完整 URL），避免 Not Found
@@ -189,6 +190,20 @@ ipcMain.handle('config:set', guard((e, patch) => {
     }
     patch.customRepos = out
     patch._reposNormalized = patch.customRepos.length
+  }
+  // 统一仓库清单：对每个条目做规范化（owner/repo 小写去空格），去重，保留 enabled/origin/builtin
+  if (Array.isArray(patch.repos)) {
+    const { normalizeRepo } = require('../core/crawler')
+    const seen = new Set(); const out = []
+    for (const it of patch.repos) {
+      if (!it || !it.repo) continue
+      const n = normalizeRepo(it.repo)
+      const k = n ? n.toLowerCase() : ''
+      if (!k || seen.has(k)) continue // GitHub 仓库名大小写不敏感，按小写去重避免同一仓库存两份
+      seen.add(k)
+      out.push({ repo: n, enabled: it.enabled !== false, builtin: !!it.builtin, origin: it.origin || 'custom' })
+    }
+    patch.repos = out
   }
   store.saveConfig(patch)
   require('../core/net').applyConfig(store.config) // 网络设置改动即时生效

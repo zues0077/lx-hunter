@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 <div class="app">
@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.8</div>
+        <div class="brand-sub">PC 版 v1.9.12</div>
       </div>
     </div>
     <nav class="nav">
@@ -66,6 +66,7 @@
             <button class="seg-btn" data-f="suspected">疑似</button>
             <button class="seg-btn" data-f="dead">失效</button>
             <button class="seg-btn" data-f="unchecked">未检测</button>
+            <button class="seg-btn" data-f="confirmed">已实测</button>
             <button class="seg-btn" data-f="imported">已灌入</button>
             <button class="seg-btn" data-f="selected" id="segSelected">已选</button>
           </div>
@@ -287,6 +288,7 @@
               <option value="ghfast">ghfast.top</option>
               <option value="ghproxy">gh-proxy.com</option>
               <option value="ghproxy-net">ghproxy.net</option>
+              <option value="lhlone">gh1.lhl.one</option>
               <option value="jsdelivr">jsDelivr CDN</option>
               <option value="custom">自定义…（在下方填写）</option>
             </select>
@@ -312,10 +314,25 @@
           <label class="chk"><input type="checkbox" id="cfgQuick"><span>快速检测（首个平台可用即通过，剩余平台<strong>不测</strong>并标「未测?」——平台列只反映实测结果；要完整覆盖请点「补全平台覆盖」或关闭此项）</span></label>
           <label class="chk"><input type="checkbox" id="cfgSkipChecked"><span>跳过已检测且脚本内容未变的音源（单条手动检测仍会重测）</span></label>
           <label class="chk"><input type="checkbox" id="cfgHashDedupe"><span>爬取后先做内容指纹去重（只下载算哈希、不进沙箱），检测直接跳过重复项</span></label>
+          <label class="chk"><input type="checkbox" id="cfgApiHostCheck"><span><strong>接口域名存活探测</strong>（v1.9.10，借鉴 lxhub）：检测时对脚本引用的后端域名做轻量探活，后端全挂的音源提前标记。默认关——开启会为每个音源多发若干请求，量大时偏慢</span></label>
         </div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>每次灌入自动剔除<strong>高危混淆/反调试</strong>脚本（安全建议，依据 lx-ikun issue#8 与 NAS CPU 占用实测：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门，<strong>空转死循环 while(!![]){}、混淆自调度定时器等反调试特征会独吞 CPU</strong>；检测与灌入阶段都会剔除，局部混淆只标注不剔除）</span></label>
         </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">GitHub 搜索发现（v1.9.9，借鉴 lxhub）</h3>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgSearchEnabled"><span><strong>开启关键词搜索发现</strong>：用下方关键词在 GitHub 搜索新仓库（按 stars 排序），作为内置 38 个种子之外的<strong>增量补充</strong>，自动收录新音源仓库（不替换种子，已收录的不会重复爬）</span></label>
+        </div>
+        <div class="grid-form">
+          <label class="field" style="grid-column:1 / -1"><span>搜索关键词（每行一个或逗号分隔）</span><textarea class="input" id="cfgSearchKeywords" rows="3" placeholder="lx 音源&#10;洛雪 音源&#10;lx-music 音源"></textarea></label>
+          <label class="field"><span>每关键词最多仓库</span><input class="input" id="cfgMaxReposPerKeyword" type="number" min="1" max="100"></label>
+          <label class="field"><span>搜索发现仓库上限</span><input class="input" id="cfgMaxSearchReposTotal" type="number" min="1" max="200"></label>
+          <label class="field"><span>最小 star 门槛（0=不限）</span><input class="input" id="cfgSearchMinStars" type="number" min="0"></label>
+        </div>
+        <div class="field-row"><span class="hint" style="width:auto">搜索发现只在「开始爬取 / 定时爬取」时触发（定向爬取 reposOverride 不触发）。关键词越贴近「洛雪音源」语义，搜到的越准；匿名搜索限额较低，填入 GitHub Token 可提升配额。</span></div>
       </div>
 
       <div class="card">
@@ -372,9 +389,14 @@
       </div>
 
       <div class="card">
-        <h3 class="card-title">附加仓库</h3>
-        <textarea class="input" id="cfgRepos" rows="4" placeholder="每行一个，格式 owner/repo"></textarea>
-        <p class="hint">内置 34 个常用音源仓库，这里可追加你自己的（一行一个）。</p>
+        <h3 class="card-title">仓库清单（全部可管理）</h3>
+        <p class="hint">内置 38 个 + 你追加的 + 搜索发现的，<strong>全部可勾选「禁用」（本次不爬）或「删除」</strong>。删掉的内置仓库点「恢复默认仓库」即可找回。</p>
+        <div id="repoList" class="repo-list"></div>
+        <div class="repo-add">
+          <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo，可粘贴多行 / 逗号批量">
+          <button class="btn btn-sm" id="btnAddRepo">添加</button>
+          <button class="btn btn-sm ghost" id="btnRestoreRepos">恢复默认仓库</button>
+        </div>
       </div>
 
       <div class="card">
@@ -406,7 +428,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=31"></script>
-<script src="app.js?v=31"></script>
+<script src="web-bridge.js?v=35"></script>
+<script src="app.js?v=35"></script>
 </body>
 </html>

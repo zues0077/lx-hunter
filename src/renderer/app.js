@@ -240,6 +240,7 @@ async function loadConfig() {
   $('cfgQuick').checked = c.quickCheck !== false
   $('cfgSkipChecked').checked = c.skipChecked !== false
   $('cfgHashDedupe').checked = c.hashDedupeAfterCrawl !== false
+  $('cfgApiHostCheck').checked = !!c.apiHostCheck
   $('cfgPatrolOn').checked = !!c.patrolEnabled
   $('cfgPatrolHours').value = c.patrolIntervalHours || 12
   $('cfgPatrolDisable').checked = c.patrolAutoDisable !== false
@@ -250,7 +251,13 @@ async function loadConfig() {
   $('cfgCrawlHours').value = c.crawlIntervalHours || 24
   $('cfgCrawlSinceDays').value = Math.max(0, Number(c.crawlSinceDays) || 0)
   $('cfgReplaceSame').checked = c.replaceSameNameOnImport !== false
-  $('cfgRepos').value = (c.customRepos || []).join('\n')
+  state.defaultRepos = Array.isArray(c.defaultRepos) ? c.defaultRepos : []
+  renderRepoList(c.repos, state.defaultRepos)
+  $('cfgSearchEnabled').checked = !!c.searchEnabled
+  $('cfgSearchKeywords').value = (c.searchKeywords || []).join('\n')
+  $('cfgMaxReposPerKeyword').value = c.maxReposPerKeyword || 20
+  $('cfgMaxSearchReposTotal').value = c.maxSearchReposTotal || 60
+  $('cfgSearchMinStars').value = c.searchMinStars || 0
   renderInstalledAccountInfo()
   testConn()
 }
@@ -276,6 +283,7 @@ $('btnSaveCfg').addEventListener('click', async () => {
     quickCheck: $('cfgQuick').checked,
     skipChecked: $('cfgSkipChecked').checked,
     hashDedupeAfterCrawl: $('cfgHashDedupe').checked,
+    apiHostCheck: $('cfgApiHostCheck').checked,
     patrolEnabled: $('cfgPatrolOn').checked,
     patrolIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgPatrolHours').value, 10) || 12)),
     patrolAutoDisable: $('cfgPatrolDisable').checked,
@@ -286,12 +294,17 @@ $('btnSaveCfg').addEventListener('click', async () => {
     crawlIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgCrawlHours').value, 10) || 24)),
     crawlSinceDays: Math.max(0, Math.min(365, parseInt($('cfgCrawlSinceDays').value, 10) || 0)),
     replaceSameNameOnImport: $('cfgReplaceSame').checked,
-    customRepos: $('cfgRepos').value.split('\n').map(s => s.trim()).filter(Boolean)
+    repos: state.config.repos || [],
+    searchEnabled: $('cfgSearchEnabled').checked,
+    searchKeywords: $('cfgSearchKeywords').value.split(/[\n,]/).map(s => s.trim()).filter(Boolean),
+    maxReposPerKeyword: Math.max(1, Math.min(100, parseInt($('cfgMaxReposPerKeyword').value, 10) || 20)),
+    maxSearchReposTotal: Math.max(1, Math.min(200, parseInt($('cfgMaxSearchReposTotal').value, 10) || 60)),
+    searchMinStars: Math.max(0, parseInt($('cfgSearchMinStars').value, 10) || 0)
   }
   const r = await api.configSet(patch)
   if (!r.ok) return toast('保存失败: ' + r.error, 'err')
   state.config = r.data
-  $('cfgRepos').value = (r.data.customRepos || []).join('\n')
+  renderRepoList(state.config.repos, state.defaultRepos)
   renderInstalledAccountInfo()
   // 保存时把两处「看起来对、实际不会触发」的组合说明白，别让用户以为设好了却没动静：
   //  ① 自动灌入是从属于定时爬取的（没开定时爬取就不会有「爬取结束」这个时机）；
@@ -306,6 +319,101 @@ $('btnSaveCfg').addEventListener('click', async () => {
 })
 
 $('btnTestConn').addEventListener('click', () => testConn(true))
+
+// ---------------- 仓库清单管理（v1.9.12：内置/附加/发现三类全部可禁用/删除） ----------------
+// 渲染端无法 require crawler，这里做一个等价的轻量规范化（owner/repo 小写、去协议/路径/.git）。
+function normRepo(s) {
+  let t = String(s || '').trim().toLowerCase()
+  t = t.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/\.git$/, '')
+    .replace(/github\.com[/:]/, '').replace(/[:/]+$/, '')
+  const m = t.match(/^([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/)
+  return m ? (m[1] + '/' + m[2]) : null
+}
+
+const ORIGIN_LABEL = { builtin: '内置', custom: '附加', discovered: '发现' }
+
+function renderRepoList(repos, defaultRepos) {
+  if (Array.isArray(repos)) state.config.repos = repos
+  if (Array.isArray(defaultRepos)) state.defaultRepos = defaultRepos
+  const list = (state.config.repos || [])
+  const box = $('repoList')
+  if (!list.length) { box.innerHTML = '<p class="hint" style="margin:0">清单为空 —— 点「恢复默认仓库」恢复内置 38 个，或在上方输入框添加。</p>'; return }
+  // 排序：内置在前，其次附加，最后发现；同类按名称
+  const order = { builtin: 0, custom: 1, discovered: 2 }
+  const sorted = list.slice().sort((a, b) => (order[a.origin] || 3) - (order[b.origin] || 3) || String(a.repo).localeCompare(b.repo))
+  box.innerHTML = sorted.map(r => {
+    const on = r.enabled !== false
+    const o = ORIGIN_LABEL[r.origin] || '附加'
+    return `<div class="repo-row" data-repo="${esc(r.repo)}">
+      <label class="repo-toggle"><input type="checkbox" class="repo-enabled" ${on ? 'checked' : ''}><span>${on ? '启用' : '已禁用'}</span></label>
+      <span class="repo-name">${esc(r.repo)}</span>
+      <span class="repo-origin origin-${esc(r.origin)}">${o}</span>
+      <button class="btn btn-sm danger-ghost repo-del" title="从清单移除（内置仓库可「恢复默认」找回）">删除</button>
+    </div>`
+  }).join('')
+}
+
+// 持久化当前清单（就地改 state.config.repos 后调用）
+async function persistRepos() {
+  const r = await api.configSet({ repos: state.config.repos || [] })
+  if (!r.ok) return toast('仓库清单保存失败: ' + r.error, 'err')
+  state.config = r.data || state.config
+  renderRepoList(state.config.repos, state.defaultRepos)
+  return true
+}
+
+// 勾选启用/禁用
+$('repoList').addEventListener('change', async (ev) => {
+  const cb = ev.target.closest('.repo-enabled')
+  if (!cb) return
+  const row = cb.closest('.repo-row')
+  const name = row && row.getAttribute('data-repo')
+  const it = (state.config.repos || []).find(x => x.repo === name)
+  if (!it) return
+  it.enabled = cb.checked
+  await persistRepos()
+})
+
+// 删除
+$('repoList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.repo-del')
+  if (!btn) return
+  const row = btn.closest('.repo-row')
+  const name = row && row.getAttribute('data-repo')
+  if (!name) return
+  state.config.repos = (state.config.repos || []).filter(x => x.repo !== name)
+  await persistRepos()
+})
+
+// 添加（支持多行/逗号批量）
+$('btnAddRepo').addEventListener('click', async () => {
+  const raw = $('repoAddInput').value || ''
+  const parts = raw.split(/[\n,，\s]+/).map(s => s.trim()).filter(Boolean)
+  let added = 0
+  const have = new Set((state.config.repos || []).map(x => x.repo))
+  for (const p of parts) {
+    const n = normRepo(p)
+    if (n && !have.has(n)) { state.config.repos.push({ repo: n, enabled: true, builtin: false, origin: 'custom' }); have.add(n); added++ }
+  }
+  $('repoAddInput').value = ''
+  if (!added) return toast('没有可添加的新仓库（可能格式不对或已存在）', 'warn')
+  const ok = await persistRepos()
+  if (ok) toast('已添加 ' + added + ' 个仓库', 'ok')
+})
+
+// 恢复默认仓库：把内置清单里缺失的重新加回并启用（已有的保留用户设置）
+$('btnRestoreRepos').addEventListener('click', async () => {
+  const defs = state.defaultRepos || []
+  const have = new Set((state.config.repos || []).map(x => x.repo))
+  let added = 0
+  for (const d of defs) {
+    const n = normRepo(d)
+    if (!n || have.has(n)) continue
+    state.config.repos.push({ repo: n, enabled: true, builtin: true, origin: 'builtin' }); have.add(n); added++
+  }
+  const ok = await persistRepos()
+  if (ok) toast(added ? ('已恢复 ' + added + ' 个内置仓库') : '内置仓库已齐全，无需恢复', 'ok')
+})
 
 // 下载镜像选「自定义…」时才露出基址输入框
 $('cfgMirror').addEventListener('change', () => {
@@ -693,6 +801,8 @@ function matchFilter(e) {
     // 「未检测」= 完全没跑过检测的；已检测但不是音源脚本的也算已检测
     // 已合并的重复项不算「未检测」：它不需要检测，是内容/名称与保留项重复
     case 'unchecked': if (e.deprecated || e.deep || e.status === 'dead' || isCheckedNoSource(e)) return false; break
+    // 「已实测」= 真实探针通过（validTier=confirmed），即脚本已被沙箱实测能取到可播链接
+    case 'confirmed': if (e.validTier !== 'confirmed') return false; break
     // 「已灌入」= 本次所有灌入目标账号都已有它（只灌过 A 的源，目标含 B 时不算已灌入）
     case 'imported': if (importedState(e) !== 'all') return false; break
   }
@@ -813,11 +923,29 @@ function statusCell(e) {
   return '<span class="badge gray">未检测</span>'
 }
 
+/** validTier 中文标签（v1.9.10，对齐 lxhub 的 confirmed/probable 两级置信） */
+function vtLabel(t) {
+  return t === 'confirmed' ? '已实测' : (t === 'probable' ? '疑似未测' : (t === 'rejected' ? '已排除' : ''))
+}
+
+function apiAliveBadge(e) {
+  const a = e.apiAlive
+  if (!a || typeof a !== 'object' || !Object.keys(a).length) return ''
+  const vals = Object.values(a)
+  const up = vals.filter(v => v === 'up' || String(v).startsWith('http_')).length
+  const down = vals.filter(v => v === 'down').length
+  const cls = down && !up ? 'vt-down' : (up ? 'vt-up' : 'vt-warn')
+  const txt = up ? `后端${up}在线` : (down ? `后端失效×${down}` : '后端未知')
+  return `<span class="vt ${cls}" title="接口域名存活（v1.9.11 遥测）：${esc(JSON.stringify(a))}">${txt}</span>`
+}
+
 function rowHtml(e) {
+  const vt = e.validTier ? `<span class="vt vt-${e.validTier}" title="探针置信：${vtLabel(e.validTier)}">${vtLabel(e.validTier)}</span>` : ''
+  const al = apiAliveBadge(e)
   return `
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
     <td><span class="nm">${esc(e.scriptName || e.name)}</span>
-        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span></td>
+        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span>${vt}${al}</td>
     <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
     <td class="c-repo"><span class="repo">${esc(e.repo)}</span></td>
     <td class="c-status">${statusCell(e)}</td>

@@ -519,5 +519,68 @@ ck('测试遇 404 继续测其余通道', has(netSrc2, /404 也继续测下一�
 ck('候选链按「通道+URL」去重而非只按 URL', has(netSrc2, /o\.id === id && o\.url === url/))
 ck('测试按钮能解释 404 语义', has(appSrc, /收到 404 的通道本身是通的/))
 
+// ---- v1.9.9：GitHub 关键词搜索自动发现 + 真实能力探针固化（借鉴 lxhub 的 search_stars/probe） ----
+// 我们的深检 deepCheck 本就是「沙箱里真实取链 + 校验音频魔数」的真实探针，
+// 所以 P0 不是「新造探针」而是「把已有深检结论固化成一等公民字段」：
+// probe 状态（usable/degraded/not_loadable/untested）+ validTier（confirmed/probable/rejected）。
+console.log('\n== v1.9.9 搜索发现与探针固化 ==')
+ck('crawler 提供关键词搜索发现', has(crawlSrc, /discoverReposViaSearch/))
+ck('hunter 固化探针记录', has(huntSrc, /applyProbeRecord\(e, e\.deep\)/))
+ck('checker 提供 applyProbeRecord', has(chkSrc, /function applyProbeRecord/))
+ck('store 默认配置含搜索发现开关与关键词', has(storeSrc9, /searchEnabled: false/) && has(storeSrc9, /searchKeywords:/))
+ck('设置页提供搜索发现开关 / 关键词 / 上限',
+  has(html, /id="cfgSearchEnabled"/) && has(html, /id="cfgSearchKeywords"/) && has(html, /id="cfgMaxSearchReposTotal"/))
+ck('列表支持「已实测」过滤与 validTier 徽章', has(appSrc, /case 'confirmed'/) && has(appSrc, /vtLabel/))
+ck('搜索发现测试存在且被纳入 npm test',
+  /search-probe\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/search-probe.test.js')))
+
+// ---- v1.9.10：接口域名探活（借鉴 lxhub api_hosts/api_alive）+ valid_tier 两级 ----
+// 洛雪音源脚本靠 lx.request 向后端接口取链，后端域名全挂 = 脚本写得再对也取不到链。
+// 默认关闭（避免每个音源每个域名都打网络请求），开启后巡检可据此判死。
+console.log('\n== v1.9.10 接口域名探活 ==')
+ck('checker 提供接口域名抽取', has(chkSrc, /function extractApiHosts/))
+ck('checker 提供接口域名探活', has(chkSrc, /function probeApiHosts/))
+// 噪声过滤必须是后缀匹配：锚定 ^...$ 会让 cdn.jsdelivr.net 这类子域名漏网
+ck('抽取时按后缀过滤 CDN/文档噪声（jsdelivr / unpkg）', has(chkSrc, /jsdelivr\.net\|unpkg\.com/))
+ck('store 默认关闭接口域名探活', has(storeSrc9, /apiHostCheck: false/))
+ck('设置页提供接口域名探活开关', has(html, /id="cfgApiHostCheck"/))
+ck('接口域名测试存在且被纳入 npm test',
+  /api-host\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/api-host.test.js')))
+
+// ---- v1.9.11：gh1.lhl.one 镜像 + 生命周期遥测（借鉴 lxhub api_down_streak） ----
+// 注意 lhl.one（字母 lhl，可用）与早先实测失效的 gh1.lh1.one（数字 lh1）是两个不同域名。
+console.log('\n== v1.9.11 镜像与生命周期遥测 ==')
+ck('内置镜像含 gh1.lhl.one', /id: 'lhlone'/.test(netSrc2))
+ck('内置镜像不含旧失效域名 gh1.lh1.one', !/gh1\.lh1\.one/.test(presetBlock))
+ck('checker 累计 apiDownStreak（全挂才 +1，有可达即清零）', has(chkSrc, /entry\.apiDownStreak/))
+ck('checker 提供 apiDownVerdict 判定', has(chkSrc, /function apiDownVerdict/))
+ck('hunter 巡检接入后端域名存活判定', has(huntSrc, /apiDownVerdict\(e, cfg\)/))
+ck('镜像下拉提供 gh1.lhl.one', has(html, /value="lhlone"/))
+ck('列表展示后端域名存活徽章', has(appSrc, /apiAliveBadge/))
+ck('镜像与遥测测试存在且被纳入 npm test',
+  /mirror-lifecycle\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/mirror-lifecycle.test.js')))
+
+// ---- v1.9.12：统一仓库清单（内置 / 附加 / 发现三类全部可禁用、可删除） ----
+// 此前：内置 38 个是硬编码常量（只读），搜索发现的仓库只临时并入本次爬取、爬完即弃，
+// 用户都管不了。统一进 cfg.repos 后，三类仓库一视同仁可勾选禁用或删除，删错可恢复默认。
+console.log('\n== v1.9.12 统一仓库清单 ==')
+ck('store 提供仓库清单迁移', has(storeSrc9, /_ensureRepoList/))
+// 哨兵必须是 null：默认写成 [] 时 Array.isArray 恒为真 → 永不播种 → 内置仓库永远进不了清单
+ck('repos 未初始化哨兵为 null（不能用 []：空数组表示用户已清空）',
+  has(storeSrc9, /repos: null/) && !/repos: \[\]/.test(storeSrc9))
+ck('hunter 提供 buildRepoSeeds 且保留 legacy 回退', has(huntSrc, /function buildRepoSeeds/) && has(huntSrc, /DEFAULT_REPOS\.slice\(\)/))
+ck('搜索发现的仓库持久化进清单', has(huntSrc, /origin: 'discovered'/))
+ck('knownRepos 含被禁用仓库（防被搜索重新发现并重新启用）', has(huntSrc, /含被禁用的/))
+ck('服务端 config:get 暴露 defaultRepos（供「恢复默认」）',
+  has(webSrc9, /defaultRepos: DEFAULT_REPOS/) && has(mainSrc, /defaultRepos: DEFAULT_REPOS/))
+ck('服务端 config:set 归一化并去重 repos', has(webSrc9, /ctx\.body\.repos/) && has(mainSrc, /patch\.repos/))
+ck('设置页提供仓库清单管理 UI',
+  has(html, /id="repoList"/) && has(html, /id="btnAddRepo"/) && has(html, /id="btnRestoreRepos"/))
+ck('renderer 提供清单渲染 / 增加 / 删除 / 恢复默认',
+  has(appSrc, /function renderRepoList/) && has(appSrc, /function persistRepos/) && has(appSrc, /function normRepo/))
+ck('内置仓库删除后可恢复（依赖 defaultRepos）', has(appSrc, /state\.defaultRepos/))
+ck('仓库清单测试存在且被纳入 npm test',
+  /repo-manage\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/repo-manage.test.js')))
+
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

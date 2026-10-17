@@ -251,6 +251,61 @@ async function checkQuota(need, token) {
 }
 
 /**
+ * GitHub 关键词搜索自动发现（v1.9.9，借鉴 lxhub 的 search_stars 模式）：
+ *  用一组中文关键词在 GitHub 搜索仓库（按 stars 降序），自动发掘「写死种子列表之外」的新音源仓库，
+ *  作为 DEFAULT_REPOS 的**增量补充**（绝不替换种子，也不重复爬已知仓库）。
+ *  - 跳过已知仓库（seed / custom / 库内已有 → 传入 known 集合）
+ *  - 每关键词取前 maxReposPerKeyword，全局上限 maxTotal
+ *  - 可选最小 stars 门槛（skipStarsBelow），过滤掉 star 极少的噪声仓库
+ *  - 复用 GitHub Token 提升搜索配额（未配则匿名 10 次/分钟，足够关键词发现）
+ * @param {object} opts {keywords, token, maxReposPerKeyword, maxTotal, timeoutMs, known, skipStarsBelow}
+ * @returns {Promise<{repos:string[], perKeyword:object, searched:number, total:number}>}
+ */
+async function discoverReposViaSearch(opts) {
+  const o = opts || {}
+  const keywords = Array.isArray(o.keywords) && o.keywords.length ? o.keywords : []
+  if (!keywords.length) return { repos: [], perKeyword: {}, searched: 0, total: 0 }
+  const token = o.token || ''
+  const perKw = Math.max(1, Number(o.maxReposPerKeyword) || 20)
+  const maxTotal = Math.max(1, Number(o.maxTotal) || 60)
+  const timeoutMs = Number(o.timeoutMs) || 15000
+  const known = o.known instanceof Set ? o.known : new Set(Array.isArray(o.known) ? o.known : [])
+  const skipStarsBelow = Number(o.skipStarsBelow) || 0
+  const out = []
+  const seen = new Set(known)
+  const perKeyword = {}
+  for (const kw of keywords) {
+    if (out.length >= maxTotal) break
+    try {
+      const q = encodeURIComponent(kw + ' in:name,description,readme')
+      const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&order=desc&per_page=${perKw}`
+      const res = await fetchWithTimeout(url, { headers: ghHeaders(token) }, timeoutMs)
+      const text = await readText(res, timeoutMs)
+      const j = JSON.parse(text)
+      if (j.message) { perKeyword[kw] = { error: String(j.message).slice(0, 80), found: 0 }; continue }
+      const items = Array.isArray(j.items) ? j.items : []
+      let added = 0
+      for (const it of items) {
+        if (out.length >= maxTotal) break
+        const full = it && it.full_name
+        if (!full) continue
+        const n = normalizeRepo(full)
+        if (!n || seen.has(n)) continue
+        if (skipStarsBelow && Number(it.stargazers_count || 0) < skipStarsBelow) continue
+        seen.add(n)
+        out.push(n)
+        added++
+      }
+      perKeyword[kw] = { found: items.length, added }
+    } catch (e) {
+      perKeyword[kw] = { error: String((e && e.message) || e).slice(0, 80), found: 0 }
+    }
+    await sleep(300)
+  }
+  return { repos: out, perKeyword, searched: keywords.length, total: out.length }
+}
+
+/**
  * @param {object} opts {repos, token, maxCandidatesPerRepo, timeoutMs, mirror, known}
  *   known: {archiveSha: {'owner/repo::路径': sha}, assetKeys: Set('tag/资产名')} —— 增量判重
  * @param {function} onEvent (type, payload)
@@ -434,6 +489,7 @@ async function crawl(opts, onEvent, shouldStop) {
 
 module.exports = {
   DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness,
+  discoverReposViaSearch,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
   RELEASES_PER_REPO, MAX_ASSET_BYTES, MAX_RELEASE_DL_PER_REPO
 }

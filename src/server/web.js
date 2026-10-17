@@ -18,6 +18,7 @@ const path = require('path')
 const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
+const { DEFAULT_REPOS } = require('../core/crawler')
 
 const PORT = Number(process.env.PORT || 7970)
 const DATA_DIR = process.env.DATA_DIR || '/data'
@@ -158,7 +159,7 @@ function route(method, pattern, handler) { routes.push({ method, pattern, handle
 
 route('GET', '/api/health', guard(() => ({ app: 'lx-hunter-pc', mode: 'web', version: require('../../package.json').version, dataDir: DATA_DIR })))
 
-route('GET', '/api/config', guard(() => ({ config: store.config, dataDir: DATA_DIR })))
+route('GET', '/api/config', guard(() => ({ config: store.config, dataDir: DATA_DIR, defaultRepos: DEFAULT_REPOS })))
 
 route('POST', '/api/config', guard(async (req, res, ctx) => {
   // 与桌面版一致：附加仓库做规范化（支持完整 URL）
@@ -171,6 +172,20 @@ route('POST', '/api/config', guard(async (req, res, ctx) => {
     }
     ctx.body.customRepos = out
     ctx.body._reposNormalized = out.length
+  }
+  // 统一仓库清单：每个条目规范化 + 去重（与桌面版 config:set 一致）
+  if (Array.isArray(ctx.body.repos)) {
+    const { normalizeRepo } = require('../core/crawler')
+    const seen = new Set(); const out = []
+    for (const it of ctx.body.repos) {
+      if (!it || !it.repo) continue
+      const n = normalizeRepo(it.repo)
+      const k = n ? n.toLowerCase() : ''
+      if (!k || seen.has(k)) continue // GitHub 仓库名大小写不敏感，按小写去重避免同一仓库存两份
+      seen.add(k)
+      out.push({ repo: n, enabled: it.enabled !== false, builtin: !!it.builtin, origin: it.origin || 'custom' })
+    }
+    ctx.body.repos = out
   }
   store.saveConfig(ctx.body)
   require('../core/net').applyConfig(store.config) // 网络设置改动即时生效

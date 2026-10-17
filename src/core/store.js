@@ -3,6 +3,7 @@
 const fs = require('fs')
 const path = require('path')
 const { usableCount } = require('./checker')
+const { DEFAULT_REPOS, normalizeRepo } = require('./crawler')
 
 const DEFAULT_CONFIG = {
   serverUrl: '',
@@ -31,6 +32,28 @@ const DEFAULT_CONFIG = {
   useJsdelivr: true,
   mirrorCustom: '',
   customRepos: [],
+  // ---------------- 统一仓库清单（v1.9.12，全部可管理） ----------------
+  // repos：内置/附加/发现三类仓库的统一清单，每项是 {repo, enabled, builtin, origin}。
+  // 用户可对任一仓库勾选「禁用」（本次不爬）或「删除」（从清单移除）；内置仓库删除后可用「恢复默认」找回。
+  // 未初始化（null）时由 _ensureRepoList 从 DEFAULT_REPOS + 旧 customRepos 播种；
+  // 一旦是数组（哪怕为空）即尊重用户编辑，不再自动播种。
+  // 注意：这里必须是 null 而不是 []——空数组表示「用户已清空清单」，不能再被播种覆盖。
+  repos: null,
+  // ---------------- 抓取发现（v1.9.9，借鉴 lxhub 关键词搜索发现） ----------------
+  // searchEnabled：用关键词在 GitHub 搜索新仓库，作为种子列表的增量补充（默认关，需手动开启）。
+  // searchKeywords：搜索关键词（中文）；maxReposPerKeyword/maxSearchReposTotal：每词/全局上限；
+  // searchMinStars：最小 star 门槛（0=不限），过滤噪声仓库，避免把 star 极少的仓库也爬进来。
+  searchEnabled: false,
+  searchKeywords: [
+    'lx 音源', '洛雪 音源', 'lx-music 音源', 'lx music 自定义源', 'lxmusic',
+    '洛雪音乐 音源', 'lx音乐源', '洛雪音乐 源', 'lx 源脚本', '洛雪音源js'
+  ],
+  maxReposPerKeyword: 20,
+  maxSearchReposTotal: 60,
+  searchMinStars: 0,
+  // ---------------- 接口域名探活（v1.9.10，借鉴 lxhub 的 api_hosts/api_alive） ----------------
+  // apiHostCheck：检测时额外对脚本引用的后端域名做轻量存活探测（默认关，开启会为每个音源多发若干请求）。
+  apiHostCheck: false,
   maxCandidatesPerRepo: 400,
   timeoutMs: 15000,
   linkTimeoutMs: 20000,
@@ -95,6 +118,8 @@ class Store {
     this.imported = this._read(this.importedFile) || {}
     // 多平台模型迁移：把旧版单账号字段收敛进 platforms 数组，保证向后兼容
     if (this._migratePlatforms()) this.saveConfig()
+    // 仓库清单迁移（v1.9.12）：首次启动把内置 38 个 + 旧附加仓库播种进统一 repos 清单
+    if (this._ensureRepoList()) this.saveConfig()
   }
 
   /**
@@ -103,6 +128,28 @@ class Store {
    *  - platforms 非空但 activePlatformId 缺失 → 指向第一个账号。
    * 返回是否有写入过迁移。
    */
+  /**
+   * 仓库清单迁移（v1.9.12）：首次启动（config.repos 未初始化）时，从内置 DEFAULT_REPOS
+   * （builtin）+ 旧 customRepos（custom）播种出统一清单，使所有仓库都进入可管理状态。
+   * 已有 repos 数组（哪怕为空）则尊重用户编辑，不再播种。返回是否发生过写入。
+   */
+  _ensureRepoList() {
+    if (Array.isArray(this.config.repos)) return false
+    const out = []
+    const seen = new Set()
+    for (const r of DEFAULT_REPOS) {
+      const n = normalizeRepo(r)
+      if (n && !seen.has(n)) { seen.add(n); out.push({ repo: n, enabled: true, builtin: true, origin: 'builtin' }) }
+    }
+    for (const r of (this.config.customRepos || [])) {
+      const n = normalizeRepo(r)
+      if (n && !seen.has(n)) { seen.add(n); out.push({ repo: n, enabled: true, builtin: false, origin: 'custom' }) }
+    }
+    this.config.repos = out
+    this.config.customRepos = [] // 旧字段已并入 repos，清空避免与 legacy 回退路径重复计数
+    return true
+  }
+
   _migratePlatforms() {
     let changed = false
     if (!Array.isArray(this.config.platforms) || this.config.platforms.length === 0) {
