@@ -443,8 +443,53 @@ async function testNetwork(opts) {
   }
 }
 
+/**
+ * 逐个镜像测速（v1.9.13 设置页「测速」按钮）。
+ * 与 testNetwork 的区别：testNetwork 跑「候选链」看整体通不通；
+ * 这里对每个镜像单独发一次请求，给出各自的耗时与状态，方便挑最快的那个固定下来。
+ * 只测「当前 setting 允许参与」的镜像：关掉 jsDelivr 就不测它，没填自定义基址就不测自定义。
+ */
+async function testMirrorSpeeds(opts) {
+  const o = opts || {}
+  const probe = String(o.url || 'https://raw.githubusercontent.com/zlyon/lx-hunter/main/plugin.json')
+  const saved = Object.assign({}, NETCFG)
+  const labelOf = (id) => {
+    const m = MIRROR_PRESETS.find(x => x.id === id)
+    if (m) return m.label
+    return id === 'custom' ? (NETCFG.mirrorCustom || '自定义') : id
+  }
+  try {
+    applyConfig({
+      crawlProxy: o.crawlProxy != null ? o.crawlProxy : saved.crawlProxy,
+      forceProxy: false,   // 测速只看镜像本身，不让代理插队，否则量到的是代理的速度
+      useJsdelivr: o.useJsdelivr != null ? o.useJsdelivr : saved.useJsdelivr,
+      mirrorCustom: o.mirrorCustom != null ? o.mirrorCustom : saved.mirrorCustom
+    })
+    const ids = MIRROR_PRESETS.map(m => m.id).slice()
+    if (NETCFG.mirrorCustom) ids.push('custom')
+    const out = []
+    for (const id of ids) {
+      if (id === 'jsdelivr' && !NETCFG.useJsdelivr) continue
+      const c = buildCandidates(probe, id).find(x => x.id === id)
+      if (!c) continue   // 被开关排除
+      const t0 = Date.now()
+      try {
+        const res = await fetchWithTimeout(c.url, { headers: { 'User-Agent': UA } }, o.timeoutMs || 8000)
+        out.push({ id, label: labelOf(id), url: c.url, status: res.status, ok: res.ok, ms: Date.now() - t0 })
+      } catch (e) {
+        out.push({ id, label: labelOf(id), url: c.url, ok: false, error: String((e && e.message) || e).slice(0, 90), ms: Date.now() - t0 })
+      }
+    }
+    // 通的排前面（按耗时升序），不通的沉底
+    out.sort((a, b) => (a.status != null ? 0 : 1) - (b.status != null ? 0 : 1) || a.ms - b.ms)
+    return { probe, results: out }
+  } finally {
+    Object.assign(NETCFG, saved)
+  }
+}
+
 module.exports = {
   fetchWithTimeout, fetchAnyWithTimeout, readText, buildCandidates, crawlFetch, sleep, UA, MIRROR_PRESETS,
   hostFetch, describeNetError, isConnLevel, buildDualChannel, dohLookup, isGhAssetUrl,
-  applyConfig, testNetwork, proxyFetchRaw, customPreset
+  applyConfig, testNetwork, testMirrorSpeeds, proxyFetchRaw, customPreset
 }

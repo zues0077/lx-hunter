@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=6">
+<link rel="stylesheet" href="styles.css?v=7">
 </head>
 <body>
 <div class="app">
@@ -14,7 +14,7 @@
       <div class="brand-logo">猎</div>
       <div class="brand-text">
         <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.12</div>
+        <div class="brand-sub">PC 版 v1.9.13</div>
       </div>
     </div>
     <nav class="nav">
@@ -281,17 +281,15 @@
         <h3 class="card-title">GitHub 爬取</h3>
         <div class="grid-form">
           <label class="field"><span>GitHub Token（可选，提升限额至 5000/小时）</span><input class="input" id="cfgToken" type="password" placeholder="ghp_xxx"></label>
-          <label class="field"><span>下载镜像</span>
-            <select class="input" id="cfgMirror">
-              <option value="auto">自动（直连优先，失败自动切换）</option>
-              <option value="direct">直连 GitHub</option>
-              <option value="ghfast">ghfast.top</option>
-              <option value="ghproxy">gh-proxy.com</option>
-              <option value="ghproxy-net">ghproxy.net</option>
-              <option value="lhlone">gh1.lhl.one</option>
-              <option value="jsdelivr">jsDelivr CDN</option>
-              <option value="custom">自定义…（在下方填写）</option>
-            </select>
+          <label class="field"><span>raw 加速镜像</span>
+            <div class="mirror-row">
+              <select class="input" id="cfgMirror">
+                <option value="auto">自动（直连优先，失败自动切换）</option>
+                <!-- 各镜像项由 JS 依后端 mirrors 动态生成（v1.9.13：新增镜像不用再改这里） -->
+                <option value="custom">自定义…（在下方填写）</option>
+              </select>
+              <button class="btn ghost" id="btnMirrorTest" type="button" title="逐个镜像实测耗时，挑最快的直接选用">测速</button>
+            </div>
           </label>
           <label class="field" id="rowMirrorCustom" style="display:none"><span>自定义镜像基址</span><input class="input" id="cfgMirrorCustom" type="text" placeholder="https://your-mirror.example.com"></label>
           <label class="field"><span>爬取代理（可选）</span><input class="input" id="cfgCrawlProxy" type="text" placeholder="http://192.168.1.246:7890"></label>
@@ -300,13 +298,15 @@
           <label class="field"><span>下载超时 (ms)</span><input class="input" id="cfgTmo" type="number"></label>
           <label class="field"><span>取链超时 (ms)</span><input class="input" id="cfgLinkTmo" type="number"></label>
         </div>
+        <div class="field-row"><span class="hint" id="mirrorTestResult" style="width:auto"></span></div>
+        <div id="mirrorSpeedList" class="mirror-list" hidden></div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgForceProxy"><span>强制代理：把代理排在候选链最前（代理稳定时省去逐个镜像试错）</span></label>
           <label class="chk"><input type="checkbox" id="cfgUseJsdelivr"><span>jsDelivr 加速（关闭后不再使用 jsDelivr 兜底，避免 CDN 缓存旧脚本）</span></label>
           <button class="ghost" id="btnNetTest" type="button" style="align-self:flex-start">测试网络连通</button>
         </div>
         <div class="field-row"><span class="hint" id="netTestResult"></span></div>
-        <div class="field-row"><span class="hint" style="width:auto">爬取代理只用于 GitHub 爬取（仓库扫描 / 脚本与压缩包下载），格式 <code>http://host:port</code>，不影响音源检测与灌入；内置镜像为 2026-10-15 实测可用（ghfast.top / gh-proxy.com / ghproxy.net / jsDelivr），失效镜像已剔除</span></div>
+        <div class="field-row"><span class="hint" style="width:auto">爬取代理只用于 GitHub 爬取（仓库扫描 / 脚本与压缩包下载），格式 <code>http://host:port</code>，不影响音源检测与灌入。<strong>raw 加速镜像</strong>可下拉直接指定某一个，点「测速」会逐个实测耗时并列出结果，点结果右边的「选用」即可把最快的那个固定下来（选「自动」则由程序直连优先、失败自动切换）。测速结果为「HTTP 404」表示这条通道本身是通的、只是探针文件不在，仍可选。</span></div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgAutoUnsafe"><span>脚本要求 VM 模式时自动放行（有安全风险）</span></label>
         </div>
@@ -314,7 +314,7 @@
           <label class="chk"><input type="checkbox" id="cfgQuick"><span>快速检测（首个平台可用即通过，剩余平台<strong>不测</strong>并标「未测?」——平台列只反映实测结果；要完整覆盖请点「补全平台覆盖」或关闭此项）</span></label>
           <label class="chk"><input type="checkbox" id="cfgSkipChecked"><span>跳过已检测且脚本内容未变的音源（单条手动检测仍会重测）</span></label>
           <label class="chk"><input type="checkbox" id="cfgHashDedupe"><span>爬取后先做内容指纹去重（只下载算哈希、不进沙箱），检测直接跳过重复项</span></label>
-          <label class="chk"><input type="checkbox" id="cfgApiHostCheck"><span><strong>接口域名存活探测</strong>（v1.9.10，借鉴 lxhub）：检测时对脚本引用的后端域名做轻量探活，后端全挂的音源提前标记。默认关——开启会为每个音源多发若干请求，量大时偏慢</span></label>
+          <label class="chk"><input type="checkbox" id="cfgApiHostCheck"><span><strong>接口域名存活探测</strong>：检测时对脚本引用的后端域名做轻量探活，后端全挂的音源提前标记。默认关——开启会为每个音源多发若干请求，量大时偏慢</span></label>
         </div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>每次灌入自动剔除<strong>高危混淆/反调试</strong>脚本（安全建议，依据 lx-ikun issue#8 与 NAS CPU 占用实测：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门，<strong>空转死循环 while(!![]){}、混淆自调度定时器等反调试特征会独吞 CPU</strong>；检测与灌入阶段都会剔除，局部混淆只标注不剔除）</span></label>
@@ -322,7 +322,7 @@
       </div>
 
       <div class="card">
-        <h3 class="card-title">GitHub 搜索发现（v1.9.9，借鉴 lxhub）</h3>
+        <h3 class="card-title">GitHub 搜索发现</h3>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgSearchEnabled"><span><strong>开启关键词搜索发现</strong>：用下方关键词在 GitHub 搜索新仓库（按 stars 排序），作为内置 38 个种子之外的<strong>增量补充</strong>，自动收录新音源仓库（不替换种子，已收录的不会重复爬）</span></label>
         </div>
@@ -428,7 +428,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=35"></script>
-<script src="app.js?v=35"></script>
+<script src="web-bridge.js?v=36"></script>
+<script src="app.js?v=36"></script>
 </body>
 </html>

@@ -84,6 +84,7 @@
     configGet: () => call('/api/config'),
     configSet: patch => call('/api/config', patch),
     netTest: opts => call('/api/net/test', opts || {}),
+    mirrorTest: opts => call('/api/net/mirror-test', opts || {}),
     serviceTest: cfg => call('/api/service/test', cfg || {}),
     serviceList: () => call('/api/service/list'),
     serviceReconcile: (platformId, liveIds) => call('/api/service/reconcile', { platformId, liveIds }),

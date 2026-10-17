@@ -223,6 +223,7 @@ async function loadConfig() {
   state.activePlatformId = c.activePlatformId || (state.platforms[0] && state.platforms[0].id) || null
   renderPlatforms()
   $('cfgToken').value = c.ghToken || ''
+  populateMirrors(c.mirrors)
   $('cfgMirror').value = c.mirror || 'auto'
   $('cfgMirrorCustom').value = c.mirrorCustom || ''
   $('cfgMirrorCustom').parentNode.style.display = (c.mirror === 'custom') ? '' : 'none'
@@ -415,9 +416,85 @@ $('btnRestoreRepos').addEventListener('click', async () => {
   if (ok) toast(added ? ('已恢复 ' + added + ' 个内置仓库') : '内置仓库已齐全，无需恢复', 'ok')
 })
 
-// 下载镜像选「自定义…」时才露出基址输入框
+// raw 加速镜像选「自定义…」时才露出基址输入框
 $('cfgMirror').addEventListener('change', () => {
   $('cfgMirrorCustom').parentNode.style.display = ($('cfgMirror').value === 'custom') ? '' : 'none'
+})
+
+// ---------------- raw 加速镜像下拉 + 测速（v1.9.13） ----------------
+// 下拉项由后端 MIRROR_PRESETS 动态生成：以后新增/剔除镜像只改 net.js，不用再动 HTML。
+function populateMirrors(list) {
+  const sel = $('cfgMirror')
+  if (!sel || !Array.isArray(list) || !list.length) return
+  // 保留首尾两个固定项（自动 / 自定义），中间整段替换为后端给的镜像
+  const head = sel.querySelector('option[value="auto"]')
+  const tail = sel.querySelector('option[value="custom"]')
+  for (const o of Array.from(sel.options)) {
+    if (o !== head && o !== tail) o.remove()
+  }
+  for (const m of list) {
+    const op = document.createElement('option')
+    op.value = m.id
+    op.textContent = m.label
+    if (tail) sel.insertBefore(op, tail)
+    else sel.appendChild(op)
+  }
+}
+
+/** 渲染测速结果：每个镜像一行，含耗时/状态与「选用」按钮 */
+function renderMirrorSpeeds(res) {
+  const box = $('mirrorSpeedList')
+  const tip = $('mirrorTestResult')
+  if (!box) return
+  const list = (res && res.results) || []
+  if (!list.length) { box.hidden = true; box.innerHTML = ''; if (tip) tip.textContent = '没有可测的镜像（可能都已被开关排除）'; return }
+  const fastest = list.find(r => r.status != null)
+  box.innerHTML = list.map(r => {
+    const good = r.status != null
+    const st = good ? ('HTTP ' + r.status) : '不通'
+    const detail = good ? '' : ('：' + esc(r.error || '连接失败'))
+    const cls = !good ? 'ms-down' : (r.ok ? 'ms-up' : 'ms-warn')
+    const pick = `<button class="btn sm" data-mirror="${esc(r.id)}">选用</button>`
+    return `<div class="ms-row ${cls}">
+        <span class="ms-name">${esc(r.label)}</span>
+        <span class="ms-ms">${good ? r.ms + ' ms' : '—'}</span>
+        <span class="ms-st">${st}${detail}</span>
+        ${pick}
+      </div>`
+  }).join('')
+  box.hidden = false
+  box.querySelectorAll('button[data-mirror]').forEach(b => {
+    b.addEventListener('click', () => {
+      $('cfgMirror').value = b.getAttribute('data-mirror')
+      $('cfgMirrorCustom').parentNode.style.display = ($('cfgMirror').value === 'custom') ? '' : 'none'
+      toast('已选用「' + b.closest('.ms-row').querySelector('.ms-name').textContent + '」，记得点保存', 'ok')
+    })
+  })
+  if (tip) {
+    tip.textContent = fastest
+      ? `测速完成：最快为「${fastest.label}」${fastest.ms}ms。点某行「选用」即可固定（选后需保存）。`
+      : '测速完成：所有镜像均不通（可能是网络/代理问题，或镜像已失效）。'
+  }
+}
+
+$('btnMirrorTest').addEventListener('click', async () => {
+  const tip = $('mirrorTestResult')
+  const btn = $('btnMirrorTest')
+  if (tip) tip.textContent = '正在逐个镜像测速…（每个最多 8 秒）'
+  if (btn) btn.disabled = true
+  try {
+    const r = await api.mirrorTest({
+      mirrorCustom: $('cfgMirrorCustom').value.trim(),
+      crawlProxy: $('cfgCrawlProxy').value.trim(),
+      useJsdelivr: $('cfgUseJsdelivr').checked
+    })
+    if (!r.ok) { if (tip) tip.textContent = '测速失败：' + (r.error || '未知错误'); return }
+    renderMirrorSpeeds(r.data)
+  } catch (e) {
+    if (tip) tip.textContent = '测速失败：' + String((e && e.message) || e)
+  } finally {
+    if (btn) btn.disabled = false
+  }
 })
 
 // 网络连通性测试：按当前表单里的设置（未保存也行）跑一遍完整候选链

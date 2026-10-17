@@ -1,6 +1,6 @@
 {
   "name": "lx-hunter-pc",
-  "version": "1.9.12",
+  "version": "1.9.13",
   "description": "音源猎手 PC 版 — GitHub 洛雪音源爬取、沙箱可用性检测、批量灌入自建 LX MUSIC 服务",
   "main": "src/main/index.js",
   "author": "lx-hunter-pc",
@@ -10,7 +10,7 @@
     "start:web": "node src/server/web.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
-    "test": "node tests/net-layer.test.js && node tests/sandbox-e2e.test.js && node tests/sandbox-guard.test.js && node tests/checker-verify.test.js && node tests/hint.test.js && node tests/patrol-gate.test.js && node tests/patrol-judge.test.js && node tests/patrol-autodelete.test.js && node tests/async-init.test.js && node tests/doh-dead-domain.test.js && node tests/archive-crawl.test.js && node tests/deep-fail-kind.test.js && node tests/platform-sync.test.js && node tests/owner-routing.test.js && node tests/crawl-releases.test.js && node tests/obfuscation.test.js && node tests/obf-import-gate.test.js && node tests/table-sort.test.js && node tests/portable-mode.test.js && node tests/public-cleanup.test.js && node tests/platform-adapters.test.js && node tests/multi-import.test.js && node tests/auto-pipeline.test.js && node tests/net-accel.test.js && node tests/search-probe.test.js && node tests/api-host.test.js && node tests/mirror-lifecycle.test.js && node tests/repo-manage.test.js",
+    "test": "node tests/net-layer.test.js && node tests/sandbox-e2e.test.js && node tests/sandbox-guard.test.js && node tests/checker-verify.test.js && node tests/hint.test.js && node tests/patrol-gate.test.js && node tests/patrol-judge.test.js && node tests/patrol-autodelete.test.js && node tests/async-init.test.js && node tests/doh-dead-domain.test.js && node tests/archive-crawl.test.js && node tests/deep-fail-kind.test.js && node tests/platform-sync.test.js && node tests/owner-routing.test.js && node tests/crawl-releases.test.js && node tests/obfuscation.test.js && node tests/obf-import-gate.test.js && node tests/table-sort.test.js && node tests/portable-mode.test.js && node tests/public-cleanup.test.js && node tests/platform-adapters.test.js && node tests/multi-import.test.js && node tests/auto-pipeline.test.js && node tests/net-accel.test.js && node tests/search-probe.test.js && node tests/api-host.test.js && node tests/mirror-lifecycle.test.js && node tests/mirror-speed.test.js && node tests/repo-manage.test.js",
     "test:dist": "node tests/dist-selfcheck.js"
   },
   "devDependencies": {

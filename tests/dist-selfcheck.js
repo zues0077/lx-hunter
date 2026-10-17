@@ -557,7 +557,11 @@ ck('内置镜像不含旧失效域名 gh1.lh1.one', !/gh1\.lh1\.one/.test(preset
 ck('checker 累计 apiDownStreak（全挂才 +1，有可达即清零）', has(chkSrc, /entry\.apiDownStreak/))
 ck('checker 提供 apiDownVerdict 判定', has(chkSrc, /function apiDownVerdict/))
 ck('hunter 巡检接入后端域名存活判定', has(huntSrc, /apiDownVerdict\(e, cfg\)/))
-ck('镜像下拉提供 gh1.lhl.one', has(html, /value="lhlone"/))
+// v1.9.13 起下拉项由后端 mirrors 动态生成，HTML 里不再硬编码 <option value="lhlone">，
+// 因此这里改判「后端是否把 MIRROR_PRESETS（含 lhlone）下发给前端」。
+ck('镜像下拉项由后端 mirrors 下发（含 gh1.lhl.one）',
+  has(webSrc9, /mirrors:/) && has(webSrc9, /MIRROR_PRESETS\.map/) &&
+  has(mainSrc, /mirrors:/) && has(mainSrc, /MIRROR_PRESETS\.map/))
 ck('列表展示后端域名存活徽章', has(appSrc, /apiAliveBadge/))
 ck('镜像与遥测测试存在且被纳入 npm test',
   /mirror-lifecycle\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/mirror-lifecycle.test.js')))
@@ -583,6 +587,21 @@ ck('renderer 提供清单渲染 / 增加 / 删除 / 恢复默认',
 ck('内置仓库删除后可恢复（依赖 defaultRepos）', has(appSrc, /state\.defaultRepos/))
 ck('仓库清单测试存在且被纳入 npm test',
   /repo-manage\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/repo-manage.test.js')))
+
+// ---- v1.9.13：raw 加速镜像下拉 + 逐镜像测速 ----
+// 此前下拉项硬编码在 HTML，新增/删除镜像要改三处；改由后端 MIRROR_PRESETS 动态生成。
+console.log('\n== v1.9.13 raw 加速镜像下拉与测速 ==')
+ck('net.js 提供 testMirrorSpeeds', has(netSrc, /function testMirrorSpeeds/))
+ck('Web 路由：/api/net/mirror-test', has(webSrc, /'\/api\/net\/mirror-test'/))
+ck('桌面版 IPC：net:mirrorTest', has(mainSrc, /ipcMain\.handle\('net:mirrorTest'/))
+ck('web-bridge 暴露 mirrorTest', has(wbSrc, /mirrorTest:/))
+ck('preload 暴露 mirrorTest', has(preSrc, /mirrorTest:/))
+ck('设置页有「测速」按钮', has(html, /id="btnMirrorTest"/))
+ck('设置页有测速结果容器', has(html, /id="mirrorSpeedList"/))
+ck('renderer 提供 populateMirrors', has(appSrc, /function populateMirrors/))
+ck('renderer 提供 renderMirrorSpeeds', has(appSrc, /function renderMirrorSpeeds/))
+ck('raw 加速镜像测试存在且被纳入 npm test',
+  /mirror-speed\.test\.js/.test(srcPkg) && fs.existsSync(path.join(ROOT, 'tests/mirror-speed.test.js')))
 
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

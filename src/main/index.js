@@ -177,7 +177,13 @@ function guard(fn) {
   }
 }
 
-ipcMain.handle('config:get', guard(() => ({ config: store.config, dataDir: getDataDir(), defaultRepos: DEFAULT_REPOS })))
+// mirrors：内置镜像清单（v1.9.13 起设置页下拉由它动态生成，新增镜像不用再改 HTML）
+ipcMain.handle('config:get', guard(() => ({
+  config: store.config,
+  dataDir: getDataDir(),
+  defaultRepos: DEFAULT_REPOS,
+  mirrors: require('../core/net').MIRROR_PRESETS.map(m => ({ id: m.id, label: m.label }))
+})))
 
 ipcMain.handle('config:set', guard((e, patch) => {
   // 附加仓库做规范化（支持完整 URL），避免 Not Found
@@ -213,6 +219,12 @@ ipcMain.handle('config:set', guard((e, patch) => {
 ipcMain.handle('net:test', guard(async (e, opts) => {
   const { testNetwork } = require('../core/net')
   return await testNetwork(opts || {})
+}))
+
+// 逐镜像测速（设置页「测速」按钮）
+ipcMain.handle('net:mirrorTest', guard(async (e, opts) => {
+  const { testMirrorSpeeds } = require('../core/net')
+  return await testMirrorSpeeds(opts || {})
 }))
 
 ipcMain.handle('service:test', guard(async (e, cfgOverride) => {

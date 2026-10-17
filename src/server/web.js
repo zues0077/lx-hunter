@@ -159,7 +159,13 @@ function route(method, pattern, handler) { routes.push({ method, pattern, handle
 
 route('GET', '/api/health', guard(() => ({ app: 'lx-hunter-pc', mode: 'web', version: require('../../package.json').version, dataDir: DATA_DIR })))
 
-route('GET', '/api/config', guard(() => ({ config: store.config, dataDir: DATA_DIR, defaultRepos: DEFAULT_REPOS })))
+// mirrors：内置镜像清单（v1.9.13 起设置页下拉由它动态生成，新增镜像不用再改 HTML）
+route('GET', '/api/config', guard(() => ({
+  config: store.config,
+  dataDir: DATA_DIR,
+  defaultRepos: DEFAULT_REPOS,
+  mirrors: require('../core/net').MIRROR_PRESETS.map(m => ({ id: m.id, label: m.label }))
+})))
 
 route('POST', '/api/config', guard(async (req, res, ctx) => {
   // 与桌面版一致：附加仓库做规范化（支持完整 URL）
@@ -196,6 +202,12 @@ route('POST', '/api/config', guard(async (req, res, ctx) => {
 route('POST', '/api/net/test', guard(async (req, res, ctx) => {
   const { testNetwork } = require('../core/net')
   return await testNetwork(ctx.body || {})
+}))
+
+// 逐镜像测速（设置页「测速」按钮）：每个镜像单独计时，供挑最快的固定下来
+route('POST', '/api/net/mirror-test', guard(async (req, res, ctx) => {
+  const { testMirrorSpeeds } = require('../core/net')
+  return await testMirrorSpeeds(ctx.body || {})
 }))
 
 route('POST', '/api/service/test', guard(async (req, res, ctx) => {

@@ -209,6 +209,20 @@ textarea.input { width: 100%; resize: vertical; font-family: inherit; }
 .vt-down { background: rgba(248,113,113,.16); color: var(--dead); }
 .vt-warn { background: rgba(251,191,36,.16); color: var(--warn); }
 
+/* raw 加速镜像下拉 + 测速（v1.9.13） */
+.mirror-row { display: flex; align-items: center; gap: 8px; }
+.mirror-row select { flex: 1 1 auto; min-width: 0; }
+.mirror-row .btn { flex: 0 0 auto; white-space: nowrap; }
+.mirror-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--card-2); }
+.ms-row { display: flex; align-items: center; gap: 10px; padding: 4px 2px; font-size: 12.5px; }
+.ms-row + .ms-row { border-top: 1px dashed var(--border); }
+.ms-name { flex: 0 0 150px; font-weight: 600; }
+.ms-ms { flex: 0 0 74px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.ms-st { flex: 1 1 auto; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-up .ms-st { color: var(--ok); }
+.ms-warn .ms-st { color: var(--warn); }
+.ms-down .ms-st { color: var(--dead); }
+
 /* 仓库清单管理（v1.9.12） */
 .repo-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px; background: var(--card-2); }
 .repo-row { display: flex; align-items: center; gap: 10px; padding: 4px 2px; }
