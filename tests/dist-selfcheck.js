@@ -21,6 +21,7 @@ const huntSrc = read('src/core/hunter.js')
 const appSrc = read('src/renderer/app.js')
 const preSrc = read('src/main/preload.js')
 const html = read('src/renderer/index.html')
+const cssSrc = read('src/renderer/styles.css')
 const pkg = JSON.parse(read('package.json'))
 
 console.log('== 版本 ==')
@@ -684,6 +685,23 @@ ck('跳过分支本地补写探针（不发网络请求）', has(huntSrc, /!e\.p
 ck('已有探针不被覆盖（只补缺失）', has(huntSrc, /if \(!e\.probe && e\.deep/) && has(huntSrc, /applyProbeRecord\(e, e\.deep\)/))
 ck('设置说明更新：检测选中始终强制重测', has(html, /单条手动检测与「检测选中 \/ 检测并灌入」始终强制重测/))
 ck('按钮提示写明强制重测', has(html, /id="btnCheck" title="强制重测勾选的条目/))
+
+// ---- v1.9.17：已灌入列表的平台列细化（停用红色 / 启用绿色）----
+// 用户实跑反馈：在 LX 管理页把某个音源的某个平台禁用了，猎手这边平台列仍是清一色绿，
+// 状态列只会笼统显示「已停用」，看不出到底停了哪个平台。
+console.log('\n== v1.9.17 已灌入平台列按停用状态着色 ==')
+ck('抽出统一的平台徽章渲染 platBadges', has(appSrc, /function platBadges\(s\)/))
+ck('禁用平台渲染红色 .plat.off', has(appSrc, /class="plat off"/))
+ck('启用平台仍是绿色 .plat.usable', has(appSrc, /class="plat usable"/))
+ck('平台列的红色样式已定义（删除线，对齐 LX 端）',
+  has(cssSrc, /\.plat\.off \{/) && has(cssSrc, /line-through/))
+ck('分用同一份服务端数据 supportedSources + disabledSources',
+  has(appSrc, /s\.supportedSources/) && has(appSrc, /s\.disabledSources/))
+ck('不支持的平台不显示（按用户要求保留原样）',
+  !/class="plat none"/.test(appSrc) && has(appSrc, /\.filter\(k => sup\.includes\(k\)\)/))
+ck('已灌入行与公共清理页共用同一渲染',
+  (appSrc.match(/platBadges\(s\)/g) || []).length >= 3, '命中 ' + (appSrc.match(/platBadges\(s\)/g) || []).length + ' 处')
+ck('页面上给出颜色图例说明', has(html, /平台列：/) && has(html, /停用<\/span> 该平台在服务端被禁用/))
 
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

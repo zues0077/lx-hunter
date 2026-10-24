@@ -1650,13 +1650,30 @@ async function refreshInstalled() {
 }
 
 /** 一行已灌入音源（纯 DOM 构造，排序时复用，不重新拉服务端） */
+// 平台徽章两态（v1.9.17，对齐 LX 管理页的显示方式）：
+//   启用 = 绿 / 被停用（disabledSources 里有，LX 端删除线置灰）= 红；
+//   **音源不支持的平台照旧不显示**（用户明确要求：不要补灰的占位）。
+// 数据来自服务端 list 已返回的 supportedSources + disabledSources，不需要额外请求。
+// 之前只按 supportedSources 全渲染成绿色，lx-music 端停用了某平台完全看不出来。
+function platBadges(s) {
+  const sup = Array.isArray(s && s.supportedSources) ? s.supportedSources : []
+  const ds = new Set(Array.isArray(s && s.disabledSources) ? s.disabledSources : [])
+  // 按五平台固定顺序展示，脚本自报的非标准平台附加在后（顺序稳定才方便横向对比）
+  const known = PLAT.map(x => x.k).filter(k => sup.includes(k))
+  const extra = sup.filter(k => !PLAT.some(x => x.k === k))
+  return known.concat(extra).map(k => {
+    const t = PLAT.find(x => x.k === k)
+    const label = t ? t.t : esc(k)
+    return ds.has(k)
+      ? `<span class="plat off" title="${label}：已停用（LX 端删除线置灰，取歌时跳过该平台）">${label}</span>`
+      : `<span class="plat usable" title="${label}：启用">${label}</span>`
+  }).join('')
+}
+
 function installedRow(s, st, active) {
   const tr = document.createElement('tr')
   tr.dataset.rank = st.rank
-  const plats = (s.supportedSources || []).map(p => {
-    const t = PLAT.find(x => x.k === p)
-    return `<span class="plat usable">${t ? t.t : esc(p)}</span>`
-  }).join('') || '<span class="nm-sub">—</span>'
+  const plats = platBadges(s) || '<span class="nm-sub">—</span>'
   // 停用分两种，必须分开说清（v1.6.5 前「已停用」一个词混用两者，用户对照 LX 管理页显示
   // 「已启用」会以为状态不同步）：
   //  - 平台级停用（disabledSources）：本工具/巡检写的，只写服务端 states.json，
@@ -1916,10 +1933,7 @@ function renderPublic() {
   body.innerHTML = ''
   for (const s of state.pubList) {
     const tr = document.createElement('tr')
-    const plats = (s.supportedSources || []).map(p => {
-      const t = PLAT.find(x => x.k === p)
-      return `<span class="plat usable">${t ? t.t : esc(p)}</span>`
-    }).join('') || '<span class="nm-sub">—</span>'
+    const plats = platBadges(s) || '<span class="nm-sub">—</span>'
     const ds = Array.isArray(s.disabledSources) ? s.disabledSources : []
     const badge = s.enabled === false
       ? '<span class="badge gray">已禁用</span>'

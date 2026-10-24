@@ -242,6 +242,8 @@ textarea.input { width: 100%; resize: vertical; font-family: inherit; }
   font-size: 11px; background: var(--card-2); color: var(--muted);
 }
 .plat.usable { background: rgba(52,211,153,.18); color: var(--ok); font-weight: 600; }
+/* v1.9.17：被停用的平台（服务端 disabledSources 里有）= 红色 + 删除线，对齐 LX 端「停用」显示 */
+.plat.off { background: rgba(248,113,113,.14); color: var(--dead); text-decoration: line-through; }
 .plat.failed { background: rgba(248,113,113,.12); color: var(--dead); opacity: .8; }
 .plat.skipped { opacity: .5; }
 /* 快速模式没测的平台：虚线边框 + 问号，明确区别于「实测失败」 */
