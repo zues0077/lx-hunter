@@ -1,6 +1,7 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
 const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch } = require('./crawler')
+const { fetchCommunityRepos } = require('./community')
 const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
 const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
@@ -213,14 +214,15 @@ class Hunter {
       // 未迁移（repos 非数组）时回退到旧逻辑（DEFAULT_REPOS + customRepos），保证兼容。
       const rl = Array.isArray(cfg.repos) ? cfg.repos : null
       repos = buildRepoSeeds(cfg)
+      // knownRepos 含全部 cfg.repos（含被禁用的）与库内已有仓库——
+      // 搜索发现（v1.9.9）与社区精选（v1.9.18）共用：已禁用的不会被重新发现并启用。
+      const knownRepos = new Set()
+      if (rl) for (const r of rl) { const n = normalizeRepo(r.repo); if (n) knownRepos.add(n) }
+      for (const e of this.store.getSources()) if (e && e.repo) knownRepos.add(normalizeRepo(e.repo) || e.repo)
       // v1.9.9 搜索发现：用关键词在 GitHub 搜索新仓库，作为种子的增量补充（不替换种子）。
       // 仅在非定向爬取（reposOverride 为空）且用户开启 searchEnabled 时触发。
       if (cfg.searchEnabled && Array.isArray(cfg.searchKeywords) && cfg.searchKeywords.length) {
         try {
-          // knownRepos 含全部 cfg.repos（含被禁用的），避免已禁用仓库被搜索重新发现并重新启用。
-          const knownRepos = new Set()
-          if (rl) for (const r of rl) { const n = normalizeRepo(r.repo); if (n) knownRepos.add(n) }
-          for (const e of this.store.getSources()) if (e && e.repo) knownRepos.add(normalizeRepo(e.repo) || e.repo)
           const d = await discoverReposViaSearch({
             keywords: cfg.searchKeywords, token: cfg.ghToken,
             maxReposPerKeyword: Number(cfg.maxReposPerKeyword) || 20,
@@ -258,6 +260,40 @@ class Hunter {
           }
         } catch (e) {
           this.log('搜索发现失败：' + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
+        }
+      }
+      // v1.9.18 社区精选订阅（借鉴 lx-hub 的 community.json market）：
+      // 拉取人工审核过的精选清单，type=repo 的条目并入种子（origin=community）。
+      // 与搜索发现互补——搜索靠关键词自动发掘，精选是社区实打实验证过的活跃源。
+      // 人工审核过 → 跳过 verifyRepoHasSource 省配额；拉取失败只记 warn，不影响爬取。
+      if (cfg.communityEnabled !== false) {
+        try {
+          const cf = await fetchCommunityRepos(cfg)
+          if (cf.ok) {
+            // 仓库大小写不敏感，与已知清单/清单内已有条目都按小写比对，避免同仓不同写法重复入库
+            const knownLower = new Set(Array.from(knownRepos).map(x => String(x).toLowerCase()))
+            const fresh = cf.repos.filter(n => !knownLower.has(n.toLowerCase()))
+            if (fresh.length) {
+              for (const n of fresh) { knownRepos.add(n); knownLower.add(n.toLowerCase()) }
+              repos = repos.concat(fresh)
+              if (rl) {
+                const have = new Set(rl.map(r => { const k = normalizeRepo(r.repo); return k ? k.toLowerCase() : '' }))
+                let changed = false
+                for (const n of fresh) {
+                  const k = normalizeRepo(n)
+                  if (k && !have.has(k.toLowerCase())) { rl.push({ repo: k, enabled: true, builtin: false, origin: 'community' }); have.add(k.toLowerCase()); changed = true }
+                }
+                if (changed) this.store.saveConfig()
+              }
+              this.log(`社区精选新增 ${fresh.length} 个仓库（订阅源更新于 ${cf.updatedAt || '未知时间'}，精选共 ${cf.total} 条）`, '爬取')
+            } else {
+              this.log('社区精选：暂无新增（精选仓库均已收录）', '爬取')
+            }
+          } else {
+            this.log('社区精选：feed 格式异常（' + (cf.error || '未知') + '），本轮跳过', '爬取', 'warn')
+          }
+        } catch (e) {
+          this.log('社区精选拉取失败：' + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
         }
       }
     }

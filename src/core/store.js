@@ -55,6 +55,14 @@ const DEFAULT_CONFIG = {
   // 实测 60 个命中里只有 32 个真含音源，其余是客户端/播放器/API。开启后逐个看文件树
   // 抽检 .js、并放行「压缩包分发」与「Release 资产分发」两类仓库。默认开。
   searchVerify: true,
+  // ---------------- 社区精选订阅（v1.9.18，借鉴 lx-hub 的 community.json market） ----------------
+  // communityEnabled：爬取时拉取 zlyon/lx-hunter-market 维护的社区精选清单
+  // （人工提交、维护者审核，带 submitter/approvedAt），把其中 type=repo 的条目并入种子
+  // （origin=community，进统一仓库清单后可单独禁用/删除）。默认开：只多一次 HTTP 拉取
+  // （30 分钟缓存，走镜像链），不额外烧 GitHub 配额；拉取失败只记 warn 不影响爬取。
+  // communityFeedUrl：自定义订阅源地址（留空 = 内置官方地址）。
+  communityEnabled: true,
+  communityFeedUrl: '',
   // ---------------- 接口域名探活（v1.9.10，借鉴 lxhub 的 api_hosts/api_alive） ----------------
   // apiHostCheck：检测时额外对脚本引用的后端域名做轻量存活探测（默认关，开启会为每个音源多发若干请求）。
   apiHostCheck: false,
