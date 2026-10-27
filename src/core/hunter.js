@@ -202,10 +202,36 @@ class Hunter {
    *  已抓取的默认不重抓（blob sha / release 资产 key 判重），只收新音源；
    *  内容有变化的就地更新（压缩包/release 资产）或标记待重下（树内 .js）。
    */
+  /**
+   * 加速镜像自动维护（v1.9.19）：爬取前刷新一次镜像池，低频（默认 24 小时一次）。
+   * 实测候选域名，通的入池、池内连续失败的剔除 —— 第三方反代域名经常整站下线，
+   * 靠发版手工增删跟不上。force=true 时无视时间窗（设置页「自动发现镜像」按钮走它）。
+   */
+  async refreshMirrorPool(force) {
+    const cfg = this.store.config
+    if (!force && cfg.mirrorAutoDiscover === false) return null
+    const hours = Math.max(1, Number(cfg.mirrorDiscoverHours) || 24)
+    const last = Number(cfg.mirrorDiscoverAt) || 0
+    if (!force && last && Date.now() - last < hours * 3600 * 1000) return null
+    try {
+      const { discoverMirrors } = require('./net')
+      const r = await discoverMirrors({ timeoutMs: Math.min(8000, Number(cfg.timeoutMs) || 15000) })
+      this.store.saveConfig({ mirrorPool: r.pool, mirrorDiscoverAt: Date.now() })
+      const ok = (r.results || []).filter(x => x.ok).length
+      this.log(`镜像自动发现：实测 ${r.total} 个候选，可用 ${ok} 个，新入池 ${r.added} 个、剔除失效 ${r.removed} 个`, '网络')
+      return r
+    } catch (e) {
+      this.log('镜像自动发现失败：' + String((e && e.message) || e).slice(0, 80), '网络', 'warn')
+      return null
+    }
+  }
+
   async runCrawl(opts) {
     if (this.job.running) throw new Error('已有任务在运行')
     const cfg = this.store.config
     const incremental = !!(opts && opts.incremental)
+    // 爬取前顺手刷新镜像池（低频，失败不影响爬取）
+    try { await this.refreshMirrorPool(false) } catch (e) {}
     // reposOverride 非空时只爬这些仓库（省 GitHub 配额，也便于定向补源）
     let repos
     if (Array.isArray(cfg.reposOverride) && cfg.reposOverride.length) {
