@@ -301,6 +301,11 @@
         </div>
         <div class="field-row"><span class="hint" id="mirrorTestResult" style="width:auto"></span></div>
         <div id="mirrorSpeedList" class="mirror-list" hidden></div>
+        <div class="mirror-row">
+          <button class="btn ghost" id="btnMirrorDiscover" type="button" title="实测一批公开反代域名，可用的自动加入镜像池，失效的自动剔除（直连不参与）">自动发现镜像</button>
+          <span class="hint" id="mirrorDiscoverResult" style="width:auto"></span>
+        </div>
+        <div id="mirrorPoolList" class="mirror-list" hidden></div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgForceProxy"><span>强制代理：把代理排在候选链最前（代理稳定时省去逐个镜像试错）</span></label>
           <label class="chk"><input type="checkbox" id="cfgUseJsdelivr"><span>jsDelivr 加速（关闭后不再使用 jsDelivr 兜底，避免 CDN 缓存旧脚本）</span></label>
@@ -407,6 +412,18 @@
           <button class="btn btn-sm ghost" id="btnRestoreRepos">恢复默认仓库</button>
           <button class="btn btn-sm danger-ghost" id="btnClearDiscovered">清除搜索发现的仓库</button>
         </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">音源采集站</h3>
+        <p class="hint">把第三方音源筛选站（lxhub 类）挂进来，lx-hunter 直接上去把<strong>站点实测可用</strong>的音源采回来。站点类型自动识别（deerwan 系 / zlyon 系），判重走站点自带的 sha256 —— 与 lx-hunter 内容指纹同算法，<strong>无需下载脚本即可去重</strong>；只有真正新增的条目会在检测 / 巡检时才下载一次。站点判定为可用的先入库，本地检测与巡检负责复检。</p>
+        <div id="hubList" class="repo-list"></div>
+        <div class="repo-add">
+          <input class="input" id="hubAddInput" type="text" placeholder="添加采集站：https://lxhub.example.com 或 .../data.json">
+          <button class="btn btn-sm" id="btnAddHub">探测并添加</button>
+          <button class="btn btn-sm" id="btnSyncHubs">立即采集</button>
+        </div>
+        <p class="hint">添加时会先探测站点（识别类型 + 统计可用条数），失败会给出原因。采集结果按站点分别统计，可在上方列表里看到「上次采集」。<strong>推荐站点</strong>：<code>https://lxhub.lllh.de</code>（原版站）、<code>https://zlyon.github.io/lx-hub</code>（每日实测演示站）。</p>
       </div>
 
       <div class="card">
