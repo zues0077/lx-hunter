@@ -263,6 +263,8 @@ async function loadConfig() {
   state.defaultRepos = Array.isArray(meta.defaultRepos) ? meta.defaultRepos
     : (Array.isArray(c.defaultRepos) ? c.defaultRepos : [])
   renderRepoList(c.repos, state.defaultRepos)
+  renderHubList(c.hubs)
+  renderMirrorPool(c.mirrorPool)
   $('cfgSearchEnabled').checked = !!c.searchEnabled
   $('cfgSearchKeywords').value = (c.searchKeywords || []).join('\n')
   $('cfgMaxReposPerKeyword').value = c.maxReposPerKeyword || 20
@@ -320,6 +322,7 @@ $('btnSaveCfg').addEventListener('click', async () => {
   if (!r.ok) return toast('保存失败: ' + r.error, 'err')
   state.config = r.data
   renderRepoList(state.config.repos, state.defaultRepos)
+  renderHubList(state.config.hubs)
   renderInstalledAccountInfo()
   // 保存时把两处「看起来对、实际不会触发」的组合说明白，别让用户以为设好了却没动静：
   //  ① 自动灌入是从属于定时爬取的（没开定时爬取就不会有「爬取结束」这个时机）；
@@ -414,6 +417,106 @@ $('btnAddRepo').addEventListener('click', async () => {
   if (!added) return toast('没有可添加的新仓库（可能格式不对或已存在）', 'warn')
   const ok = await persistRepos()
   if (ok) toast('已添加 ' + added + ' 个仓库', 'ok')
+})
+
+// ---------------- 音源采集站（v1.9.19）----------------
+// 与仓库清单并列的一类音源来源：挂第三方筛选站，由 lx-hunter 自己去采「站点实测可用」的音源。
+function hubKindLabel(k) {
+  return ({ deerwan: 'deerwan 系', zlyon: 'zlyon 系', 'zlyon-flat': 'zlyon 系' })[String(k || '')] || (k ? String(k) : '未识别')
+}
+
+function renderHubList(hubs) {
+  if (Array.isArray(hubs)) state.config.hubs = hubs
+  const list = state.config.hubs || []
+  const box = $('hubList')
+  if (!box) return
+  if (!list.length) {
+    box.innerHTML = '<p class="hint" style="margin:0">还没有采集站 —— 在下方输入框填站点地址，点「探测并添加」。</p>'
+    return
+  }
+  box.innerHTML = list.map(h => {
+    const on = h.enabled !== false
+    const ls = h.lastSync || null
+    const stat = !ls ? '尚未采集'
+      : (ls.ok ? `上次采集：新增 ${ls.added || 0} 条（可用 ${ls.usable || 0} / 共 ${ls.total || 0}，已有 ${ls.known || 0}）`
+        : '上次采集失败：' + esc(String(ls.error || '').slice(0, 40)))
+    return `<div class="repo-row" data-hub="${esc(h.id)}">
+      <label class="repo-toggle"><input type="checkbox" class="hub-enabled" ${on ? 'checked' : ''}><span>${on ? '启用' : '已禁用'}</span></label>
+      <span class="repo-name" title="${esc(h.url)}">${esc(h.name || h.url)}</span>
+      <span class="repo-origin origin-custom">${hubKindLabel(h.kind)}</span>
+      <span class="hint" style="flex:1;min-width:0">${stat}</span>
+      <button class="btn btn-sm danger-ghost hub-del" title="移除该采集站（已采回的音源保留在库中）">删除</button>
+    </div>`
+  }).join('')
+}
+
+$('hubList').addEventListener('change', async (ev) => {
+  const cb = ev.target.closest('.hub-enabled')
+  if (!cb) return
+  const row = cb.closest('.repo-row')
+  const id = row && row.getAttribute('data-hub')
+  const r = await api.hubsUpdate({ id, enabled: cb.checked })
+  if (!r.ok) return toast('采集站状态保存失败: ' + r.error, 'err')
+  state.config.hubs = r.data.hubs
+  renderHubList(state.config.hubs)
+})
+
+$('hubList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.hub-del')
+  if (!btn) return
+  const row = btn.closest('.repo-row')
+  const id = row && row.getAttribute('data-hub')
+  if (!id) return
+  const r = await api.hubsRemove(id)
+  if (!r.ok) return toast('移除失败: ' + r.error, 'err')
+  state.config.hubs = r.data.hubs
+  renderHubList(state.config.hubs)
+  toast('已移除采集站', 'ok')
+})
+
+// 探测并添加：先试站点能否识别，识别成功才入库
+$('btnAddHub').addEventListener('click', async () => {
+  const url = ($('hubAddInput').value || '').trim()
+  if (!url) return toast('请填写采集站地址', 'warn')
+  const btn = $('btnAddHub')
+  btn.disabled = true
+  btn.textContent = '探测中…'
+  try {
+    // 先探测（拿到类型与可用条数），再把结果带给添加接口，避免同一个站探测两遍
+    const t = await api.hubsTest(url)
+    const det = (t.ok && t.data) ? t.data : null
+    if (det && det.ok === false) return toast('无法识别为音源采集站：' + (det.error || '未知原因'), 'err')
+    const r = await api.hubsAdd(url, '', det)
+    if (!r.ok || !r.data || r.data.ok === false) {
+      return toast('添加失败：' + ((r.data && r.data.error) || r.error || '未知原因'), 'err')
+    }
+    $('hubAddInput').value = ''
+    state.config.hubs = r.data.hubs
+    renderHubList(state.config.hubs)
+    const d = r.data.detect || {}
+    toast(`已添加：${hubKindLabel(d.kind)}，实测可用 ${d.usable}/${d.total} 条`, 'ok')
+  } finally {
+    btn.disabled = false
+    btn.textContent = '探测并添加'
+  }
+})
+
+// 立即采集一轮（不跑 GitHub 爬取）
+$('btnSyncHubs').addEventListener('click', async () => {
+  const btn = $('btnSyncHubs')
+  btn.disabled = true
+  btn.textContent = '采集中…'
+  try {
+    const r = await api.hubsSync()
+    if (!r.ok) return toast('采集失败：' + r.error, 'err')
+    const d = r.data || {}
+    const hubs = (d.perHub || []).map(x => `${x.name || x.id}: +${x.added || 0}`).join('，')
+    toast(d.added ? `采集完成：新增 ${d.added} 条（${hubs}）` : '采集完成：没有新增（都已在库中）', d.added ? 'ok' : 'warn')
+    loadSources()
+  } finally {
+    btn.disabled = false
+    btn.textContent = '立即采集'
+  }
 })
 
 // 清除搜索发现的仓库（v1.9.14）：早期版本用了 in:readme 搜索，把一堆无关仓库（ebooks、
@@ -533,6 +636,68 @@ $('btnMirrorTest').addEventListener('click', async () => {
     if (tip) tip.textContent = '测速失败：' + String((e && e.message) || e)
   } finally {
     if (btn) btn.disabled = false
+  }
+})
+
+// ---------------- 加速镜像自动发现（v1.9.19）----------------
+// 内置镜像写死在代码里，第三方反代域名说关就关。这里实测一批公开反代域名：
+// 通的自动进池作为兜底候选，池内连续失败 N 次的自动剔除（直连不参与，也不可能被删）。
+function renderMirrorPool(pool) {
+  const box = $('mirrorPoolList')
+  if (!box) return
+  const list = Array.isArray(pool) ? pool : []
+  if (!list.length) { box.hidden = true; box.innerHTML = ''; return }
+  box.innerHTML = list.slice().sort((a, b) => (a.ms || 9e9) - (b.ms || 9e9)).map(m => {
+    const off = m.enabled === false
+    const when = m.lastOk ? new Date(m.lastOk).toLocaleString('zh-CN', { hour12: false }) : '—'
+    return `<div class="ms-row ${off ? 'ms-down' : 'ms-up'}" data-mp="${esc(m.id)}">
+        <span class="ms-name" title="${esc(m.base)}">${esc(m.label || m.base)}</span>
+        <span class="ms-ms">${m.ms ? m.ms + ' ms' : '—'}</span>
+        <span class="ms-st">实测于 ${esc(when)}${m.failStreak ? `，连续失败 ${m.failStreak} 次` : ''}</span>
+        <button class="btn sm" data-mp-toggle="${esc(m.id)}">${off ? '启用' : '禁用'}</button>
+        <button class="btn sm" data-mp-del="${esc(m.id)}">移除</button>
+      </div>`
+  }).join('')
+  box.hidden = false
+  box.querySelectorAll('button[data-mp-toggle]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const id = b.getAttribute('data-mp-toggle')
+      const cur = (state.config.mirrorPool || []).find(x => x.id === id)
+      const r = await api.mirrorPoolSet({ enable: { [id]: cur ? cur.enabled === false : false } })
+      if (!r.ok) return toast('操作失败: ' + r.error, 'err')
+      state.config.mirrorPool = r.data.pool
+      renderMirrorPool(state.config.mirrorPool)
+    })
+  })
+  box.querySelectorAll('button[data-mp-del]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const r = await api.mirrorPoolSet({ remove: [b.getAttribute('data-mp-del')] })
+      if (!r.ok) return toast('移除失败: ' + r.error, 'err')
+      state.config.mirrorPool = r.data.pool
+      renderMirrorPool(state.config.mirrorPool)
+    })
+  })
+}
+
+$('btnMirrorDiscover').addEventListener('click', async () => {
+  const tip = $('mirrorDiscoverResult')
+  const btn = $('btnMirrorDiscover')
+  if (btn) { btn.disabled = true; btn.textContent = '发现中…' }
+  if (tip) tip.textContent = '正在实测候选镜像（每个最多 8 秒）…'
+  try {
+    const r = await api.mirrorDiscover({})
+    if (!r.ok) { if (tip) tip.textContent = '发现失败：' + (r.error || '未知错误'); return }
+    const d = r.data || {}
+    state.config.mirrorPool = d.pool || []
+    renderMirrorPool(state.config.mirrorPool)
+    if (tip) {
+      const ok = (d.results || []).filter(x => x.ok).length
+      tip.textContent = `实测 ${d.total} 个候选：可用 ${ok} 个，新入池 ${d.added} 个，剔除失效 ${d.removed} 个，保留 ${d.kept} 个`
+    }
+  } catch (e) {
+    if (tip) tip.textContent = '发现失败：' + String((e && e.message) || e)
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '自动发现镜像' }
   }
 })
 
