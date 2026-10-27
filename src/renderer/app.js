@@ -685,7 +685,7 @@ $('btnMirrorDiscover').addEventListener('click', async () => {
   if (btn) { btn.disabled = true; btn.textContent = '发现中…' }
   if (tip) tip.textContent = '正在实测候选镜像（每个最多 8 秒）…'
   try {
-    const r = await api.mirrorDiscover({})
+    const r = await api.mirrorDiscover({ force: true })
     if (!r.ok) { if (tip) tip.textContent = '发现失败：' + (r.error || '未知错误'); return }
     const d = r.data || {}
     state.config.mirrorPool = d.pool || []
