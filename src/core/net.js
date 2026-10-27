@@ -208,13 +208,156 @@ const MIRROR_PRESETS = [
  * - mirrorCustom：镜像下拉选「自定义…」时的前缀镜像基址。
  * 零依赖实现：http 目标走代理绝对 URI；https 目标走 CONNECT 隧道 + TLS。
  */
-const NETCFG = { crawlProxy: '', forceProxy: false, useJsdelivr: true, mirrorCustom: '' }
+const NETCFG = { crawlProxy: '', forceProxy: false, useJsdelivr: true, mirrorCustom: '', mirrorPool: [] }
 function applyConfig(cfg) {
   if (!cfg) return
   if ('crawlProxy' in cfg) NETCFG.crawlProxy = String(cfg.crawlProxy || '').trim()
   if ('forceProxy' in cfg) NETCFG.forceProxy = !!cfg.forceProxy
   if ('useJsdelivr' in cfg) NETCFG.useJsdelivr = cfg.useJsdelivr !== false
   if ('mirrorCustom' in cfg) NETCFG.mirrorCustom = String(cfg.mirrorCustom || '').trim()
+  if (Array.isArray(cfg.mirrorPool)) NETCFG.mirrorPool = cfg.mirrorPool
+}
+
+/* ================= 加速镜像自动发现（v1.9.19） =================
+ * 内置镜像（MIRROR_PRESETS）是写死的，第三方反代域名说关就关——实测里 ghfast.top、
+ * gh1.lhl.one、gh.llkk.cc 都曾整站超时。与其每次发版手工增删，不如让程序自己找：
+ *   ① 拿一批公开流传的反代域名做种子（SEED_MIRROR_HOSTS）
+ *   ② 逐个拿探针 URL 实测，通的进池、不通的记失败次数
+ *   ③ 池内镜像连续失败 N 次自动剔除（「直连」永远不参与，也不存在被删的问题）
+ * 池子只作为**额外候选**追加在候选链末尾，改动/清空它都不会影响原有链路。
+ */
+const SEED_MIRROR_HOSTS = [
+  'https://gh-proxy.com', 'https://gh-proxy.org', 'https://ghfast.top', 'https://ghproxy.net',
+  'https://ghproxy.cc', 'https://gh.ddlc.top', 'https://gh.llkk.cc', 'https://gh.con.sh',
+  'https://gh-proxy.llyke.com', 'https://sevastopol36-ghproxy.net', 'https://gh.jasonzeng.dev',
+  'https://github.moeyy.xyz', 'https://gh.cuijiaxin.com', 'https://hub.gitmirror.com'
+]
+const DISCOVER_PROBE = 'https://raw.githubusercontent.com/zlyon/lx-hunter/main/plugin.json'
+
+function hostToId(base) {
+  return 'm-' + String(base).replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/[^A-Za-z0-9]+/g, '-').toLowerCase().slice(0, 40)
+}
+
+/** 内网地址不走代理（采集站可能就在局域网里，如自建的 lxhub 容器） */
+function isLanHost(url) {
+  try {
+    const h = new URL(String(url)).hostname
+    return /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|localhost$|::1$)/.test(h)
+  } catch (e) { return false }
+}
+
+/**
+ * 通用取数（v1.9.19，给采集站这类「非 GitHub raw」的第三方接口用）：
+ * 配了爬取代理且目标在外网 → 先走代理，代理也失败再直连；内网地址一律直连。
+ * 为什么需要它：像 lxhub.lllh.de 这种 Cloudflare 站点，容器里 Node 直连会 ETIMEDOUT，
+ * 而 curl 走代理能通 —— 爬虫的 crawlFetch 只处理 raw 链接，第三方接口得自己挑通道。
+ */
+async function fetchAuto(url, options, timeoutMs) {
+  const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15000
+  const opt = Object.assign({ headers: { 'User-Agent': UA } }, options || {})
+  if (NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy) && !isLanHost(url)) {
+    try {
+      return await proxyFetchRaw(url, opt, ms, NETCFG.crawlProxy)
+    } catch (e) { /* 代理不通就退回直连，不把整站判死 */ }
+  }
+  return await fetchWithTimeout(url, opt, ms)
+}
+
+/** 池内镜像 → preset 形态（供候选链使用），按实测耗时升序 */
+function poolPresets() {
+  const pool = Array.isArray(NETCFG.mirrorPool) ? NETCFG.mirrorPool : []
+  return pool
+    .filter(m => m && m.base && m.enabled !== false && /^https?:\/\//i.test(m.base))
+    .sort((a, b) => (Number(a.ms) || 99999) - (Number(b.ms) || 99999))
+    .map(m => ({ id: m.id || hostToId(m.base), label: m.label || m.base, prefix: true, build: u => String(m.base).replace(/\/+$/, '') + '/' + u }))
+}
+
+/**
+ * 自动发现 + 自动维护镜像池：实测候选域名，通的入池，池内连续失败 N 次的剔除。
+ * 直连（direct / jsDelivr 这类非前缀型）不参与发现，也不会被删除。
+ * @returns {{probe:string, total:number, added:number, removed:number, kept:number, pool:Array, results:Array}}
+ */
+async function discoverMirrors(opts) {
+  const o = opts || {}
+  const probe = String(o.probe || DISCOVER_PROBE)
+  const timeoutMs = Number(o.timeoutMs) || 8000
+  const maxFails = Math.max(1, Number(o.maxFails) || 3)
+  const pool = (Array.isArray(NETCFG.mirrorPool) ? NETCFG.mirrorPool : []).slice()
+  const byId = new Map()
+  for (const m of pool) if (m && m.id) byId.set(m.id, m)
+
+  const hosts = []
+  const seen = new Set()
+  const addHost = (base, source) => {
+    const b = String(base || '').trim().replace(/\/+$/, '')
+    if (!/^https?:\/\//i.test(b)) return
+    const id = hostToId(b)
+    if (seen.has(id)) return
+    seen.add(id)
+    hosts.push({ id, base: b, source })
+  }
+  const seeds = Array.isArray(o.hosts) && o.hosts.length ? o.hosts : SEED_MIRROR_HOSTS
+  for (const h of seeds) addHost(h, 'seed')
+  for (const m of pool) addHost(m.base, 'pool')
+  if (NETCFG.mirrorCustom) addHost(NETCFG.mirrorCustom, 'custom')
+  // 远端清单（可选）：填了就抓一份 JSON（数组或 {mirrors:[...]}），域名并入候选
+  for (const f of (Array.isArray(o.feeds) ? o.feeds : [])) {
+    try {
+      const r = await fetchWithTimeout(f, { headers: { 'User-Agent': UA } }, timeoutMs)
+      if (!r || !r.ok) continue
+      const d = JSON.parse(await readText(r, timeoutMs))
+      const arr = Array.isArray(d) ? d : (d.mirrors || d.items || d.hosts || [])
+      for (const it of arr) addHost(typeof it === 'string' ? it : (it.base || it.url || it.host || it.domain), 'feed')
+    } catch (e) { /* 清单抓不到就跳过，不影响种子探测 */ }
+  }
+
+  const results = []
+  const limit = Math.max(1, Math.min(8, Number(o.concurrency) || 4))
+  let idx = 0
+  const workers = new Array(Math.min(limit, hosts.length)).fill(0).map(async () => {
+    for (;;) {
+      const i = idx++
+      if (i >= hosts.length) return
+      const h = hosts[i]
+      const rec = { id: h.id, base: h.base, source: h.source, ok: false }
+      const t0 = Date.now()
+      try {
+        const res = await fetchWithTimeout(h.base + '/' + probe, { headers: { 'User-Agent': UA } }, timeoutMs)
+        rec.ms = Date.now() - t0
+        rec.status = res.status
+        rec.ok = !!res.ok
+      } catch (e) {
+        rec.ms = Date.now() - t0
+        rec.error = String((e && e.message) || e).slice(0, 80)
+      }
+      results.push(rec)
+    }
+  })
+  await Promise.all(workers)
+
+  let added = 0, removed = 0, kept = 0
+  for (const r of results) {
+    const cur = byId.get(r.id)
+    if (r.ok) {
+      if (cur) { cur.ms = r.ms; cur.lastOk = Date.now(); cur.failStreak = 0; cur.error = null; kept++ }
+      else {
+        const m = { id: r.id, label: r.base, base: r.base, ms: r.ms, lastOk: Date.now(), failStreak: 0, addedAt: Date.now(), enabled: true }
+        pool.push(m); byId.set(r.id, m); added++
+      }
+    } else if (cur) {
+      cur.failStreak = Number(cur.failStreak || 0) + 1
+      cur.lastFail = Date.now()
+      cur.error = r.error || ('HTTP ' + (r.status != null ? r.status : '不可达'))
+      if (cur.failStreak >= maxFails) {
+        const i = pool.findIndex(x => x.id === cur.id)
+        if (i >= 0) pool.splice(i, 1)
+        removed++
+      } else kept++
+    }
+  }
+  NETCFG.mirrorPool = pool
+  results.sort((a, b) => (a.ok ? 0 : 1) - (b.ok ? 0 : 1) || (a.ms || 9e9) - (b.ms || 9e9))
+  return { probe, total: hosts.length, added, removed, kept, pool, results }
 }
 
 function parseProxyUrl(p) {
@@ -371,12 +514,19 @@ function buildCandidates(rawUrl, mirrorId) {
       if (m.id === 'direct' || (m.id === 'jsdelivr' && !jsdelivrAllowed())) continue
       try { push(m.id, m.gh ? m.build(p.owner, p.repo, p.ref, p.path) : m.build(rawUrl)) } catch (e) {}
     }
+    // v1.9.19：自动发现出来的镜像池（按实测耗时升序）作为额外兜底，排在内置之后
+    for (const m of poolPresets()) {
+      try { push(m.id, m.build(rawUrl)) } catch (e) {}
+    }
     const cp = customPreset()
     if (cp && mirrorId !== 'custom') { try { push(cp.id, cp.build(rawUrl)) } catch (e) {} }
   } else if (isGhAssetUrl(rawUrl)) {
     // github.com releases 资产：只有前缀型镜像能代理（jsdelivr/fastgit 仅服务 raw 路径）
     for (const m of MIRROR_PRESETS) {
       if (m.id === 'direct' || m.gh) continue
+      try { push(m.id, m.build(rawUrl)) } catch (e) {}
+    }
+    for (const m of poolPresets()) {
       try { push(m.id, m.build(rawUrl)) } catch (e) {}
     }
     const cp = customPreset()
@@ -491,5 +641,6 @@ async function testMirrorSpeeds(opts) {
 module.exports = {
   fetchWithTimeout, fetchAnyWithTimeout, readText, buildCandidates, crawlFetch, sleep, UA, MIRROR_PRESETS,
   hostFetch, describeNetError, isConnLevel, buildDualChannel, dohLookup, isGhAssetUrl,
-  applyConfig, testNetwork, testMirrorSpeeds, proxyFetchRaw, customPreset
+  applyConfig, testNetwork, testMirrorSpeeds, proxyFetchRaw, customPreset,
+  discoverMirrors, poolPresets, hostToId, SEED_MIRROR_HOSTS, fetchAuto, isLanHost
 }
