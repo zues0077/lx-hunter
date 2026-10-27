@@ -210,6 +210,31 @@ route('POST', '/api/net/mirror-test', guard(async (req, res, ctx) => {
   return await testMirrorSpeeds(ctx.body || {})
 }))
 
+// 加速镜像自动发现（v1.9.19）：实测一批公开反代域名，通的进池、池内连续失败自动剔除（直连不参与）
+route('POST', '/api/net/mirror-discover', guard(async (req, res, ctx) => {
+  const { discoverMirrors } = require('../core/net')
+  const r = await discoverMirrors(ctx.body || {})
+  store.saveConfig({ mirrorPool: r.pool })
+  pushLog({
+    msg: `镜像自动发现：候选 ${r.total} 个，新增 ${r.added} 个、剔除失效 ${r.removed} 个、保留 ${r.kept} 个`,
+    module: '网络', level: 'info', at: Date.now()
+  })
+  return r
+}))
+
+// 镜像池手动维护：{remove:[id]} 或 {enable:{id:true/false}}
+route('POST', '/api/net/mirror-pool', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  let pool = Array.isArray(store.config.mirrorPool) ? store.config.mirrorPool.slice() : []
+  if (Array.isArray(b.remove) && b.remove.length) pool = pool.filter(m => !b.remove.includes(m.id))
+  if (b.enable && typeof b.enable === 'object') {
+    for (const m of pool) if (b.enable[m.id] != null) m.enabled = !!b.enable[m.id]
+  }
+  store.saveConfig({ mirrorPool: pool })
+  require('../core/net').applyConfig({ mirrorPool: pool })
+  return { ok: true, pool }
+}))
+
 route('POST', '/api/service/test', guard(async (req, res, ctx) => {
   const svc = resolveService(store.config, ctx.body)
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
@@ -242,6 +267,83 @@ route('GET', '/api/sources', guard(() => {
 
 route('GET', '/api/logs', guard(() => logs.slice(-800)))
 route('POST', '/api/logs/clear', guard(() => { logs.length = 0; return true }))
+
+// ---------------- 音源采集站（v1.9.19）----------------
+// 第三方音源筛选站（lxhub 类）挂进来后，lx-hunter 自己上去采「站点实测可用」的音源。
+// 判重零下载：站点返回的 sha256 与 lx-hunter contentHash 同算法（实测一致），直接采信。
+const hubfeed = require('../core/hubfeed')
+
+function normHub(h) {
+  if (!h || !h.url) return null
+  const url = String(h.url).trim().replace(/\/+$/, '')
+  return {
+    id: String(h.id || hubfeed.makeHubId(url)),
+    name: String(h.name || url).slice(0, 80),
+    url,
+    kind: String(h.kind || ''),
+    enabled: h.enabled !== false,
+    entriesUrl: String(h.entriesUrl || ''),
+    detailUrl: String(h.detailUrl || ''),
+    lastSync: h.lastSync || null,
+    addedAt: h.addedAt || Date.now()
+  }
+}
+
+function hubList() { return Array.isArray(store.config.hubs) ? store.config.hubs : [] }
+
+route('GET', '/api/hubs', guard(() => ({ hubs: hubList() })))
+
+// 添加前试探：识别站点类型、返回可用条目数（不入库）
+route('POST', '/api/hubs/test', guard(async (req, res, ctx) => {
+  const url = String((ctx.body && ctx.body.url) || '').trim()
+  if (!url) throw new Error('缺少站点地址')
+  return await hubfeed.detectHub(url, store.config.timeoutMs)
+}))
+
+route('POST', '/api/hubs', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  const url = String(b.url || '').trim()
+  if (!url) throw new Error('缺少站点地址')
+  // 前端若已探测过（/api/hubs/test）就把结果带过来，避免同一个站重复探测一轮
+  // ——慢站点（如 Cloudflare 后的 lxhub.lllh.de）挨个试候选地址可能要几十秒
+  const det = (b.detect && b.detect.ok) ? b.detect : await hubfeed.detectHub(url, store.config.timeoutMs)
+  if (!det.ok) return { ok: false, error: '无法识别为音源采集站：' + det.error }
+  const list = hubList().slice()
+  const key = url.replace(/\/+$/, '')
+  if (list.some(h => String(h.url).replace(/\/+$/, '') === key)) return { ok: false, error: '该站点已在列表中' }
+  const h = normHub({
+    id: hubfeed.makeHubId(url), name: b.name || url, url,
+    kind: det.kind, entriesUrl: det.entriesUrl, detailUrl: det.detailUrl
+  })
+  list.push(h)
+  store.saveConfig({ hubs: list })
+  pushLog({ msg: `已添加音源采集站「${h.name}」（${det.kindLabel}，实测可用 ${det.usable}/${det.total} 条）`, module: '采集', level: 'info', at: Date.now() })
+  return { ok: true, hub: h, detect: det, hubs: list }
+}))
+
+// 改名 / 启停（enabled）
+route('POST', '/api/hubs/update', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  const list = hubList()
+  const i = list.findIndex(h => h.id === b.id)
+  if (i < 0) throw new Error('站点不存在')
+  if (b.name != null) list[i].name = String(b.name).slice(0, 80)
+  if (b.enabled != null) list[i].enabled = !!b.enabled
+  if (b.url != null) list[i].url = String(b.url).trim().replace(/\/+$/, '')
+  store.saveConfig({ hubs: list })
+  return { ok: true, hubs: list }
+}))
+
+route('POST', '/api/hubs/remove', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  const list = hubList().filter(h => h.id !== b.id)
+  store.saveConfig({ hubs: list })
+  pushLog({ msg: '已移除音源采集站：' + String(b.id || ''), module: '采集', level: 'info', at: Date.now() })
+  return { ok: true, hubs: list }
+}))
+
+// 立即采集一轮（不跑 GitHub 爬取）
+route('POST', '/api/hubs/sync', guard(async () => await hunter.runHubSync()))
 
 route('POST', '/api/crawl', guard(async () => await hunter.runCrawl()))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
