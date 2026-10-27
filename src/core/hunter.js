@@ -2,6 +2,7 @@
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
 const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch } = require('./crawler')
 const { fetchCommunityRepos } = require('./community')
+const { collectFromHubs } = require('./hubfeed')
 const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
 const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
@@ -296,6 +297,25 @@ class Hunter {
           this.log('社区精选拉取失败：' + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
         }
       }
+      // v1.9.19 音源采集站：挂进来的第三方筛选站，在爬取时一并采回「站点实测可用」的音源。
+      // 判重零下载——站点返回的 sha256 与 lx-hunter contentHash 同算法，直接采信（见 hubfeed.js）。
+      // 站点标 usable 的信任其判定入库，本地检测/巡检负责复检。失败只记日志，不影响 GitHub 爬取。
+      if (Array.isArray(cfg.hubs) && cfg.hubs.length) {
+        try {
+          const hr = await collectFromHubs({
+            store: this.store, cfg, timeoutMs: cfg.timeoutMs,
+            onLog: (msg, module, level) => this.log(msg, module || '采集', level),
+            shouldStop: () => this.cancelRequested
+          })
+          if (hr.hubTotal) {
+            if (hr.added) { merge.added += hr.added; total = merge.added }
+            this.log(`采集站：${hr.hubTotal} 个站点，新增 ${hr.added} 条`, '采集')
+            this.progress({ added: total })
+          }
+        } catch (e) {
+          this.log('采集站采集失败：' + String((e && e.message) || e).slice(0, 100), '采集', 'warn')
+        }
+      }
     }
     this.job = { running: true, type: 'crawl', cancel: false, progress: { reposDone: 0, repoTotal: repos.length, added: 0, linksFound: 0 }, step: '' }
     this.emit('job', { running: true, type: 'crawl' })
@@ -345,6 +365,44 @@ class Hunter {
       })
     }
     return { added: total, updated: merge.updated, skipped: merge.skipped }
+  }
+
+  /**
+   * 单独跑一轮「音源采集站」采集（v1.9.19）：不动 GitHub 爬取，只从已添加的站点采可用音源。
+   *
+   * 与 runCrawl 内嵌的采集站阶段共用 collectFromHubs，之所以再开一个入口：
+   *  1. 采集站是纯 JSON 抓取（毫秒级），没必要等一轮完整爬取（几十个仓库的文件树 + 资产）；
+   *  2. 用户添加新站点后想立刻看效果，点一下就能验；
+   *  3. 判重零下载，所以这一轮几乎不消耗 GitHub 配额，可以放心反复点。
+   *
+   * @returns {{added:number, perHub:Array, hubTotal:number}}
+   */
+  async runHubSync() {
+    if (this.job.running) throw new Error('已有任务在运行')
+    const cfg = this.store.config
+    const hubs = Array.isArray(cfg.hubs) ? cfg.hubs.filter(h => h && h.enabled !== false && h.url) : []
+    if (!hubs.length) return { added: 0, perHub: [], hubTotal: 0 }
+    this.job = { running: true, type: 'crawl', cancel: false, progress: { hubsDone: 0, hubTotal: hubs.length, added: 0 }, step: '采集站' }
+    this.emit('job', { running: true, type: 'crawl' })
+    this.log(`采集 ${hubs.length} 个音源采集站的可用音源（判重零下载）…`, '采集')
+    let out = { added: 0, perHub: [], hubTotal: hubs.length }
+    try {
+      out = await collectFromHubs({
+        store: this.store, cfg, timeoutMs: cfg.timeoutMs,
+        onLog: (msg, module, level) => this.log(msg, module || '采集', level),
+        shouldStop: () => this.cancelRequested
+      })
+      out.hubTotal = hubs.length
+      this.log(`采集站采集完成：新增 ${out.added} 条`, '采集')
+      // 新增条目可能与库内已有内容重复（同一脚本被多个仓库搬运）→ 交给去重裁决
+      if (out.added && !this.cancelRequested) await this.dedupe()
+    } catch (e) {
+      this.log('采集站采集异常：' + String((e && e.message) || e), '采集', 'error')
+    } finally {
+      this.job.running = false
+      this.emit('job', { running: false, type: 'crawl', done: true, summary: { hubs: out.perHub.length, added: out.added } })
+    }
+    return out
   }
 
   /**
