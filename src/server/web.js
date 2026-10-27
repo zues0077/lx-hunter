@@ -212,9 +212,15 @@ route('POST', '/api/net/mirror-test', guard(async (req, res, ctx) => {
 
 // 加速镜像自动发现（v1.9.19）：实测一批公开反代域名，通的进池、池内连续失败自动剔除（直连不参与）
 route('POST', '/api/net/mirror-discover', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  // force：走与定时爬取同一条路径（无视 24h 时间窗），并写入 mirrorDiscoverAt
+  if (b.force) {
+    const r = await hunter.refreshMirrorPool(true)
+    return r || { ok: false, error: '自动发现未执行（已在设置里关闭）' }
+  }
   const { discoverMirrors } = require('../core/net')
-  const r = await discoverMirrors(ctx.body || {})
-  store.saveConfig({ mirrorPool: r.pool })
+  const r = await discoverMirrors(b)
+  store.saveConfig({ mirrorPool: r.pool, mirrorDiscoverAt: Date.now() })
   pushLog({
     msg: `镜像自动发现：候选 ${r.total} 个，新增 ${r.added} 个、剔除失效 ${r.removed} 个、保留 ${r.kept} 个`,
     module: '网络', level: 'info', at: Date.now()
