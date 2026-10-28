@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=7">
+<link rel="stylesheet" href="styles.css?v=8">
 </head>
 <body>
 <div class="app">
@@ -435,32 +435,52 @@
 
       <div class="card">
         <h3 class="card-title">数据</h3>
-        <div class="row-form">
-          <button class="btn ghost" id="btnOpenData">打开数据目录</button>
-          <button class="btn ghost" id="btnImport">导入音源库（合并检测结果）</button>
-          <button class="btn ghost" id="btnExportUsable" title="把「检测可用」的音源（含检测结果与内容指纹）导出为 JSON，可导入到其他机器或直接灌入">导出有效音源</button>
-          <button class="btn danger-ghost" id="btnClearDb">清空音源库</button>
+
+        <div class="data-block">
+          <div class="data-block-title">音源库</div>
+          <div class="row-form">
+            <button class="btn ghost" id="btnImport">导入音源库（合并检测结果）</button>
+            <button class="btn ghost" id="btnExportUsable" title="把「检测可用」的音源（含检测结果与内容指纹）导出为 JSON，可导入到其他机器或直接灌入">导出有效音源</button>
+            <button class="btn danger-ghost" id="btnClearDb">清空音源库</button>
+            <button class="btn ghost" id="btnOpenData" style="margin-left:auto">打开数据目录</button>
+          </div>
         </div>
-        <div class="row-form">
-          <span class="muted" style="min-width:104px">仓库清单</span>
-          <button class="btn sm ghost" id="btnReposExport">导出</button>
-          <button class="btn sm ghost" id="btnReposImport">导入</button>
-          <span class="hint" style="width:auto">爬取范围（内置 + 追加 + 搜索发现，含启停状态）</span>
+
+        <div class="data-block">
+          <div class="data-block-title">配置搬家<span class="data-block-sub">导出为 JSON 文件备份；导入按内容合并，不覆盖本机已有配置</span></div>
+          <div class="data-grid">
+            <div class="dg-row">
+              <div class="dg-name">仓库清单</div>
+              <div class="dg-desc">爬取范围（内置 + 追加 + 搜索发现，含启停状态）</div>
+              <div class="dg-ops">
+                <button class="btn sm ghost" id="btnReposExport">导出</button>
+                <button class="btn sm ghost" id="btnReposImport">导入</button>
+              </div>
+            </div>
+            <div class="dg-row">
+              <div class="dg-name">音源采集站</div>
+              <div class="dg-desc">挂接的采集站地址与采集状态（按网址去重合并，不覆盖已有统计）</div>
+              <div class="dg-ops">
+                <button class="btn sm ghost" id="btnHubsExport">导出</button>
+                <button class="btn sm ghost" id="btnHubsImport">导入</button>
+              </div>
+            </div>
+            <div class="dg-row">
+              <div class="dg-name">raw 加速镜像</div>
+              <div class="dg-desc">镜像池（自动发现结果）与当前选中的镜像 / 自定义基址</div>
+              <div class="dg-ops">
+                <button class="btn sm ghost" id="btnMirrorsExport">导出</button>
+                <button class="btn sm ghost" id="btnMirrorsImport">导入</button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="row-form">
-          <span class="muted" style="min-width:104px">音源采集站</span>
-          <button class="btn sm ghost" id="btnHubsExport">导出</button>
-          <button class="btn sm ghost" id="btnHubsImport">导入</button>
-          <span class="hint" style="width:auto">挂接的采集站地址与采集状态（按网址去重合并，不覆盖已有统计）</span>
-        </div>
-        <div class="row-form">
-          <span class="muted" style="min-width:104px">raw 加速镜像</span>
-          <button class="btn sm ghost" id="btnMirrorsExport">导出</button>
-          <button class="btn sm ghost" id="btnMirrorsImport">导入</button>
-          <span class="hint" style="width:auto">镜像池（自动发现结果）与当前选中的镜像 / 自定义基址</span>
-        </div>
-        <p class="hint">音源库导出在「音源库」页工具栏（范围可选），这里新增「导出有效音源」一键导出全部检测可用项。导出文件含检测结果（含内容指纹），换机器后先「爬取仓库」入库再导入，即可按内容指纹补齐检测结果，无需重跑检测。仓库 / 采集站 / 镜像三类的导出文件互相独立，导入时按内容合并、不会覆盖本机已有的其他配置。</p>
-        <p class="hint"><strong>便携模式（数据与软件同目录）</strong>：便携单文件版首次运行后，数据（音源库 / 配置 / 已灌入记录）会自动存放在 exe 同级的 <code>userData</code> 目录里。换电脑时<strong>把 exe 和它旁边的 userData 文件夹一起拷贝</strong>即可，数据不丢；旧位置（系统用户目录）的数据会在首次便携运行时自动迁移过去，原文件保留作备份。若软件目录不可写（如装在 Program Files），自动回退系统用户目录。</p>
+
+        <details class="data-more">
+          <summary>说明与便携模式</summary>
+          <p class="hint">音源库导出在「音源库」页工具栏（范围可选），这里「导出有效音源」可一键导出全部检测可用项。导出文件含检测结果（含内容指纹），换机器后先「爬取仓库」入库再导入，即可按内容指纹补齐检测结果，无需重跑检测。仓库 / 采集站 / 镜像三类的导出文件互相独立。</p>
+          <p class="hint"><strong>便携模式（数据与软件同目录）</strong>：便携单文件版首次运行后，数据（音源库 / 配置 / 已灌入记录）会自动存放在 exe 同级的 <code>userData</code> 目录里。换电脑时<strong>把 exe 和它旁边的 userData 文件夹一起拷贝</strong>即可，数据不丢；旧位置（系统用户目录）的数据会在首次便携运行时自动迁移过去，原文件保留作备份。若软件目录不可写（如装在 Program Files），自动回退系统用户目录。</p>
+        </details>
       </div>
     </section>
 
