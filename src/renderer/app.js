@@ -48,6 +48,8 @@ const state = {
   // 已灌入列表多选删除（v1.8.0）：勾选池装的是服务端音源 id
   insSel: new Set(),
   config: null,
+  // 后端镜像清单（configGet 返回的 mirrors，populateMirrors 会写入），供镜像池变化时重建下拉
+  mirrors: null,
   // 多平台多账号（v1.8.0）：平台账号列表与当前选中账号
   platforms: [],
   activePlatformId: null,
@@ -227,7 +229,7 @@ async function loadConfig() {
   state.activePlatformId = c.activePlatformId || (state.platforms[0] && state.platforms[0].id) || null
   renderPlatforms()
   $('cfgToken').value = c.ghToken || ''
-  populateMirrors(meta.mirrors)
+  populateMirrors(meta.mirrors, c.mirrorPool)
   $('cfgMirror').value = c.mirror || 'auto'
   // 配置里存了个当前清单没有的 id 时，<select> 会静默变成空值，回落到「自动」更安全
   if (!$('cfgMirror').value) $('cfgMirror').value = 'auto'
@@ -564,22 +566,40 @@ const MIRROR_FALLBACK = [
   { id: 'jsdelivr', label: 'jsDelivr CDN' }
 ]
 
-function populateMirrors(list) {
+function populateMirrors(list, pool) {
   const sel = $('cfgMirror')
   if (!sel) return
   const use = (Array.isArray(list) && list.length) ? list : MIRROR_FALLBACK
+  state.mirrors = use
   // 保留首尾两个固定项（自动 / 自定义），中间整段替换为镜像清单
   const head = sel.querySelector('option[value="auto"]')
   const tail = sel.querySelector('option[value="custom"]')
   for (const o of Array.from(sel.options)) {
     if (o !== head && o !== tail) o.remove()
   }
-  for (const m of use) {
+  for (const g of Array.from(sel.querySelectorAll('optgroup'))) g.remove()
+  const mk = (m) => {
     const op = document.createElement('option')
     op.value = m.id
     op.textContent = m.label
+    return op
+  }
+  for (const m of use) {
+    const op = mk(m)
     if (tail) sel.insertBefore(op, tail)
     else sel.appendChild(op)
+  }
+  // v1.9.20：自动发现的镜像池作为独立分组参与下拉，可像内置镜像一样固定选用
+  const poolList = (Array.isArray(pool) ? pool : [])
+    .filter(m => m && m.base && m.enabled !== false && /^https?:\/\//i.test(m.base))
+    .sort((a, b) => (a.ms || 9e9) - (b.ms || 9e9))
+  if (poolList.length && tail) {
+    const g = document.createElement('optgroup')
+    g.label = '自动发现（镜像池）'
+    for (const m of poolList) {
+      g.appendChild(mk({ id: m.id, label: (m.label || m.base) + (m.ms ? `（${m.ms}ms）` : '') }))
+    }
+    sel.insertBefore(g, tail)
   }
 }
 
@@ -646,6 +666,8 @@ function renderMirrorPool(pool) {
   const box = $('mirrorPoolList')
   if (!box) return
   const list = Array.isArray(pool) ? pool : []
+  // 池子变化（发现/启停/移除/导入）后同步刷新镜像下拉的「自动发现（镜像池）」分组
+  populateMirrors(state.mirrors, list)
   if (!list.length) { box.hidden = true; box.innerHTML = ''; return }
   box.innerHTML = list.slice().sort((a, b) => (a.ms || 9e9) - (b.ms || 9e9)).map(m => {
     const off = m.enabled === false
@@ -731,6 +753,35 @@ $('btnNetTest').addEventListener('click', async () => {
     if (d.ok && d.via === 'proxy') toast('代理通道可用', 'ok')
   } catch (e) {
     el.textContent = '测试失败：' + String((e && e.message) || e)
+  }
+})
+
+// 爬取代理有效性检测（v1.9.20）：只验证代理本身（隧道 + 取回响应 + 耗时），附直连对照
+$('btnProxyTest').addEventListener('click', async () => {
+  const el = $('proxyTestResult')
+  const btn = $('btnProxyTest')
+  if (!el) return
+  const proxy = $('cfgCrawlProxy').value.trim()
+  if (!proxy) { el.textContent = '请先填写爬取代理（格式 http://host:port）'; return }
+  el.textContent = '正在测试代理…（最多 10 秒）'
+  if (btn) btn.disabled = true
+  try {
+    const r = await api.proxyTest({ proxy })
+    if (!r.ok) { el.textContent = '测试失败：' + (r.error || '未知错误'); return }
+    const d = r.data || {}
+    const via = d.ok
+      ? `代理可用：HTTP ${d.status}，耗时 ${d.ms}ms`
+      : `代理不可用：${d.error || '未知原因'}`
+    const direct = d.directOk === true
+      ? `；直连对照：可用（${d.directMs}ms）`
+      : '；直连对照：不可用（此时开代理收益最大）'
+    el.textContent = via + direct
+    if (d.ok) toast('代理可用（' + d.ms + 'ms）', 'ok')
+    else toast('代理不可用：' + (d.error || '未知原因'), 'err')
+  } catch (e) {
+    el.textContent = '测试失败：' + String((e && e.message) || e)
+  } finally {
+    if (btn) btn.disabled = false
   }
 })
 
@@ -2503,6 +2554,56 @@ $('btnClearDb').addEventListener('click', async () => {
   if (!confirm('清空本地音源库（不影响服务端已灌入的音源）？')) return
   await api.dbClear(); state.selected.clear(); state.page = 1; loadSources(); toast('已清空', 'ok')
 })
+
+// ---------------- 数据导入/导出（v1.9.20，仓库/采集站/镜像三类配置搬家）----------------
+// 「导出有效音源」复用音源库导出通道（含检测结果与内容指纹），只是范围固定为检测可用项
+$('btnExportUsable').addEventListener('click', async () => {
+  const ids = state.sources.filter(e => e.usable).map(e => e.id)
+  if (!ids.length) return toast('库里还没有「检测可用」的音源', 'warn')
+  const r = await api.dbExport(ids)
+  if (r.ok && r.data && r.data.exported) toast(`已导出 ${r.data.count} 条有效音源（含检测结果）到 ${r.data.path}`, 'ok')
+  else if (r.ok && r.data && !r.data.exported) toast('已取消导出', 'info')
+  else toast('导出失败: ' + r.error, 'err')
+})
+
+const DATA_SCOPE_LABELS = { repos: '仓库清单', hubs: '音源采集站', mirrors: 'raw 加速镜像' }
+
+async function handleDataExport(scope) {
+  const r = await api.dataExport(scope)
+  if (r.ok && r.data && r.data.exported) toast(`已导出${DATA_SCOPE_LABELS[scope]}到 ${r.data.path || '浏览器下载'}`, 'ok')
+  else if (r.ok && r.data && r.data.exported === false) toast('已取消导出', 'info')
+  else toast('导出失败: ' + (r.error || '未知错误'), 'err')
+}
+
+async function handleDataImport(scope) {
+  const r = await api.dataImport(scope)
+  if (!r.ok) return toast('导入失败: ' + (r.error || '未知错误'), 'err')
+  if (!r.data || !r.data.imported) return // 用户取消了文件选择
+  const s = r.data.summary || {}
+  toast(`导入${DATA_SCOPE_LABELS[scope]}完成：新增 ${s.added}、更新 ${s.updated}（现有 ${s.total} 条）`, 'ok')
+  // 重新拉配置并整体刷新相关区块（仓库/采集站/镜像池/下拉选择）
+  const cr = await api.configGet()
+  if (!cr.ok) return
+  state.config = cr.data.config
+  const c = state.config
+  renderRepoList(c.repos, state.defaultRepos)
+  renderHubList(c.hubs)
+  renderMirrorPool(c.mirrorPool)
+  if (scope === 'mirrors') {
+    populateMirrors(state.mirrors, c.mirrorPool)
+    $('cfgMirror').value = c.mirror || 'auto'
+    if (!$('cfgMirror').value) $('cfgMirror').value = 'auto'
+    $('cfgMirrorCustom').value = c.mirrorCustom || ''
+    $('cfgMirrorCustom').parentNode.style.display = (c.mirror === 'custom') ? '' : 'none'
+  }
+}
+
+$('btnReposExport').addEventListener('click', () => handleDataExport('repos'))
+$('btnReposImport').addEventListener('click', () => handleDataImport('repos'))
+$('btnHubsExport').addEventListener('click', () => handleDataExport('hubs'))
+$('btnHubsImport').addEventListener('click', () => handleDataImport('hubs'))
+$('btnMirrorsExport').addEventListener('click', () => handleDataExport('mirrors'))
+$('btnMirrorsImport').addEventListener('click', () => handleDataImport('mirrors'))
 
 function clampPage() {
   const total = Math.max(1, Math.ceil(filtered().length / PAGE_SIZE))
