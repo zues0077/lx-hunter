@@ -80,6 +80,48 @@
     })
   }
 
+  // 数据导入/导出（v1.9.20，仓库/采集站/镜像三类配置搬家）：
+  // 导出 = 服务端附件下载；导入 = 选文件读原文 POST（桌面版走保存/打开对话框，签名一致）
+  async function dataExport(scope) {
+    const r = await fetch('/api/data/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope })
+    })
+    if (!r.ok) return { ok: false, error: '导出失败（HTTP ' + r.status + '）' }
+    const blob = await r.blob()
+    const disposition = r.headers.get('Content-Disposition') || ''
+    const m = /filename="?([^"]+)"?/.exec(disposition)
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = (m && m[1]) || ('lx-hunter-' + scope + '.json')
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000)
+    return { ok: true, data: { exported: true, path: '浏览器下载' } }
+  }
+
+  function dataImport(scope) {
+    return new Promise(resolve => {
+      const inp = document.createElement('input')
+      inp.type = 'file'
+      inp.accept = '.json,application/json'
+      inp.onchange = async () => {
+        const f = inp.files && inp.files[0]
+        if (!f) return resolve({ ok: true, data: { imported: false } })
+        try {
+          const text = await f.text()
+          const r = await fetch('/api/data/import', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope, raw: text })
+          })
+          resolve(await r.json())
+        } catch (e) { resolve({ ok: false, error: String((e && e.message) || e) }) }
+      }
+      inp.click()
+    })
+  }
+
   window.api = {
     configGet: () => call('/api/config'),
     configSet: patch => call('/api/config', patch),
@@ -87,6 +129,9 @@
     mirrorTest: opts => call('/api/net/mirror-test', opts || {}),
     mirrorDiscover: opts => call('/api/net/mirror-discover', opts || {}),
     mirrorPoolSet: patch => call('/api/net/mirror-pool', patch),
+    proxyTest: opts => call('/api/net/proxy-test', opts || {}),
+    dataExport,
+    dataImport,
     serviceTest: cfg => call('/api/service/test', cfg || {}),
     serviceList: () => call('/api/service/list'),
     serviceReconcile: (platformId, liveIds) => call('/api/service/reconcile', { platformId, liveIds }),
