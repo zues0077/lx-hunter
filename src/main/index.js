@@ -227,6 +227,139 @@ ipcMain.handle('net:mirrorTest', guard(async (e, opts) => {
   return await testMirrorSpeeds(opts || {})
 }))
 
+// 加速镜像自动发现（v1.9.19）：与 Web 版同一条路径（force 无视 24h 窗口）
+// 注意：v1.9.19 只给 Web 版加了这两个通道，桌面版点「自动发现镜像」会报
+// api.mirrorDiscover is not a function —— v1.9.20 补齐，桌面/网页行为从此一致。
+ipcMain.handle('net:mirrorDiscover', guard(async (e, opts) => {
+  const b = opts || {}
+  if (b.force) {
+    const r = await hunter.refreshMirrorPool(true)
+    return r || { ok: false, error: '自动发现未执行（已在设置里关闭）' }
+  }
+  const { discoverMirrors } = require('../core/net')
+  const r = await discoverMirrors(b)
+  store.saveConfig({ mirrorPool: r.pool, mirrorDiscoverAt: Date.now() })
+  pushLog({
+    msg: `镜像自动发现：候选 ${r.total} 个，新增 ${r.added} 个、剔除失效 ${r.removed} 个、保留 ${r.kept} 个`,
+    module: '网络', level: 'info', at: Date.now()
+  })
+  return r
+}))
+
+// 镜像池手动维护：{remove:[id]} 或 {enable:{id:true/false}}
+ipcMain.handle('net:mirrorPoolSet', guard((e, patch) => {
+  const b = patch || {}
+  let pool = Array.isArray(store.config.mirrorPool) ? store.config.mirrorPool.slice() : []
+  if (Array.isArray(b.remove) && b.remove.length) pool = pool.filter(m => !b.remove.includes(m.id))
+  if (b.enable && typeof b.enable === 'object') {
+    for (const m of pool) if (b.enable[m.id] != null) m.enabled = !!b.enable[m.id]
+  }
+  store.saveConfig({ mirrorPool: pool })
+  require('../core/net').applyConfig({ mirrorPool: pool })
+  return { ok: true, pool }
+}))
+
+// 爬取代理有效性检测（v1.9.20 设置页「测试代理」按钮）
+ipcMain.handle('net:proxyTest', guard(async (e, opts) => {
+  const { testProxy } = require('../core/net')
+  return await testProxy(opts || {})
+}))
+
+// ---------------- 音源采集站（v1.9.20 补桌面版通道，逻辑与 Web 版一致）----------------
+const hubfeed = require('../core/hubfeed')
+
+function normHubMain(h) {
+  if (!h || !h.url) return null
+  const url = String(h.url).trim().replace(/\/+$/, '')
+  return {
+    id: String(h.id || hubfeed.makeHubId(url)),
+    name: String(h.name || url).slice(0, 80),
+    url,
+    kind: String(h.kind || ''),
+    enabled: h.enabled !== false,
+    entriesUrl: String(h.entriesUrl || ''),
+    detailUrl: String(h.detailUrl || ''),
+    lastSync: h.lastSync || null,
+    addedAt: h.addedAt || Date.now()
+  }
+}
+
+ipcMain.handle('hubs:get', guard(() => ({ hubs: Array.isArray(store.config.hubs) ? store.config.hubs : [] })))
+
+ipcMain.handle('hubs:test', guard(async (e, url) => {
+  return await hubfeed.detectHub(String(url || '').trim(), store.config.timeoutMs)
+}))
+
+ipcMain.handle('hubs:add', guard(async (e, payload) => {
+  const b = payload || {}
+  const url = String(b.url || '').trim()
+  if (!url) throw new Error('缺少站点地址')
+  const det = (b.detect && b.detect.ok) ? b.detect : await hubfeed.detectHub(url, store.config.timeoutMs)
+  if (!det.ok) return { ok: false, error: '无法识别为音源采集站：' + det.error }
+  const list = Array.isArray(store.config.hubs) ? store.config.hubs.slice() : []
+  if (list.some(h => String(h.url).replace(/\/+$/, '') === url.replace(/\/+$/, ''))) return { ok: false, error: '该站点已在列表中' }
+  const h = normHubMain({ id: hubfeed.makeHubId(url), name: b.name || url, url, kind: det.kind, entriesUrl: det.entriesUrl, detailUrl: det.detailUrl })
+  list.push(h)
+  store.saveConfig({ hubs: list })
+  pushLog({ msg: `已添加音源采集站「${h.name}」（${det.kindLabel}，实测可用 ${det.usable}/${det.total} 条）`, module: '采集', level: 'info', at: Date.now() })
+  return { ok: true, hub: h, detect: det, hubs: list }
+}))
+
+ipcMain.handle('hubs:update', guard((e, patch) => {
+  const b = patch || {}
+  const list = Array.isArray(store.config.hubs) ? store.config.hubs : []
+  const i = list.findIndex(h => h.id === b.id)
+  if (i < 0) throw new Error('站点不存在')
+  if (b.name != null) list[i].name = String(b.name).slice(0, 80)
+  if (b.enabled != null) list[i].enabled = !!b.enabled
+  if (b.url != null) list[i].url = String(b.url).trim().replace(/\/+$/, '')
+  store.saveConfig({ hubs: list })
+  return { ok: true, hubs: list }
+}))
+
+ipcMain.handle('hubs:remove', guard((e, id) => {
+  const list = (Array.isArray(store.config.hubs) ? store.config.hubs : []).filter(h => h.id !== id)
+  store.saveConfig({ hubs: list })
+  pushLog({ msg: '已移除音源采集站：' + String(id || ''), module: '采集', level: 'info', at: Date.now() })
+  return { ok: true, hubs: list }
+}))
+
+ipcMain.handle('hubs:sync', guard(async () => await hunter.runHubSync()))
+
+// ---------------- 数据导入/导出（v1.9.20，仓库/采集站/镜像三类配置搬家）----------------
+const dataio = require('../core/dataio')
+const DATA_NAMES = { repos: 'lx-hunter-repos', hubs: 'lx-hunter-hubs', mirrors: 'lx-hunter-mirrors' }
+const DATA_TITLES = { repos: '仓库清单', hubs: '音源采集站', mirrors: 'raw 加速镜像' }
+
+ipcMain.handle('data:export', guard(async (e, scope) => {
+  const res = await dialog.showSaveDialog(win, {
+    title: `导出${DATA_TITLES[scope] || '数据'}`,
+    defaultPath: `${DATA_NAMES[scope] || 'lx-hunter-data'}-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  })
+  if (res.canceled || !res.filePath) return { exported: false }
+  fs.writeFileSync(res.filePath, JSON.stringify(dataio.buildExport(store, scope), null, 2), 'utf8')
+  return { exported: true, path: res.filePath }
+}))
+
+ipcMain.handle('data:import', guard(async (e, scope) => {
+  const res = await dialog.showOpenDialog(win, {
+    title: `导入${DATA_TITLES[scope] || '数据'}`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile']
+  })
+  if (res.canceled || !res.filePaths || !res.filePaths[0]) return { imported: false }
+  const data = JSON.parse(fs.readFileSync(res.filePaths[0], 'utf8'))
+  const summary = dataio.importData(store, scope, data)
+  pushLog({
+    msg: `导入${summary.label}：新增 ${summary.added}、更新 ${summary.updated}（现有 ${summary.total} 条）`,
+    module: '数据', level: 'info', at: Date.now()
+  })
+  require('../core/net').applyConfig(store.config)
+  return { imported: true, summary }
+}))
+
+
 ipcMain.handle('service:test', guard(async (e, cfgOverride) => {
   const svc = resolveService(store.config, cfgOverride)
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
