@@ -148,8 +148,13 @@ function parseJsonBody(raw) {
 
 function guard(fn) {
   return async (req, res, ctx) => {
-    try { sendJson(res, 200, { ok: true, data: await fn(req, res, ctx) }) }
-    catch (e) { sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }) }
+    try {
+      const data = await fn(req, res, ctx)
+      // 导出类接口（db/export、data/export）自行写完附件响应，这里不能二次写
+      if (!res.writableEnded) sendJson(res, 200, { ok: true, data })
+    } catch (e) {
+      if (!res.writableEnded) sendJson(res, 200, { ok: false, error: String((e && e.message) || e) })
+    }
   }
 }
 
@@ -239,6 +244,42 @@ route('POST', '/api/net/mirror-pool', guard(async (req, res, ctx) => {
   store.saveConfig({ mirrorPool: pool })
   require('../core/net').applyConfig({ mirrorPool: pool })
   return { ok: true, pool }
+}))
+
+// 爬取代理有效性检测（v1.9.20 设置页「测试代理」按钮）：只验证代理本身通不通、耗时多少
+route('POST', '/api/net/proxy-test', guard(async (req, res, ctx) => {
+  const { testProxy } = require('../core/net')
+  return await testProxy(ctx.body || {})
+}))
+
+// ---------------- 数据导入/导出（v1.9.20，仓库/采集站/镜像三类配置搬家）----------------
+const dataio = require('../core/dataio')
+
+// 导出：浏览器直接触发文件下载（桌面版走保存对话框，同一个 buildExport）
+route('POST', '/api/data/export', guard(async (req, res, ctx) => {
+  const scope = String((ctx.body && ctx.body.scope) || '')
+  const json = JSON.stringify(dataio.buildExport(store, scope), null, 2)
+  const day = new Date().toISOString().slice(0, 10)
+  const names = { repos: 'lx-hunter-repos', hubs: 'lx-hunter-hubs', mirrors: 'lx-hunter-mirrors' }
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${names[scope] || 'lx-hunter-data'}-${day}.json"`
+  })
+  res.end(json)
+  return undefined // 已自行写完响应
+}))
+
+// 导入：{scope, raw}（raw 为导出文件原文），合并逻辑见 core/dataio
+route('POST', '/api/data/import', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  const data = typeof b.raw === 'string' ? parseJsonBody(Buffer.from(b.raw)) : b.raw
+  const summary = dataio.importData(store, String(b.scope || ''), data)
+  pushLog({
+    msg: `导入${summary.label}：新增 ${summary.added}、更新 ${summary.updated}（现有 ${summary.total} 条）`,
+    module: '数据', level: 'info', at: Date.now()
+  })
+  // 与桌面版 data:import 返回同构：{imported, summary}
+  return { imported: true, summary }
 }))
 
 route('POST', '/api/service/test', guard(async (req, res, ctx) => {
