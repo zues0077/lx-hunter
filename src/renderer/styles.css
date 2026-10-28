@@ -160,6 +160,35 @@ textarea.input { width: 100%; resize: vertical; font-family: inherit; }
 .field-row { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 14px; }
 .row-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
+/* ---------- 数据页（音源库 / 配置搬家） ---------- */
+.data-block { margin-bottom: 16px; }
+.data-block-title {
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  margin-bottom: 8px; text-transform: none; letter-spacing: .02em;
+}
+.data-block-sub { font-weight: 400; color: var(--muted); font-size: 12px; }
+.data-grid { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.dg-row {
+  display: grid; grid-template-columns: 108px minmax(0, 1fr) auto;
+  gap: 12px; align-items: center; padding: 9px 12px;
+  border-bottom: 1px solid var(--line); background: var(--card);
+}
+.dg-row:last-child { border-bottom: 0; }
+.dg-row:nth-child(even) { background: var(--card-2); }
+.dg-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.dg-desc { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.dg-ops { display: flex; gap: 6px; white-space: nowrap; }
+details.data-more { margin-top: 2px; }
+details.data-more summary {
+  cursor: pointer; user-select: none; list-style: none;
+  color: var(--muted); font-size: 12px; padding: 2px 0;
+}
+details.data-more summary::before { content: '▸ '; }
+details.data-more[open] summary::before { content: '▾ '; }
+details.data-more summary:hover { color: var(--text-2); }
+details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
+
 /* ---------- 表格 ---------- */
 .table-wrap { max-height: 52vh; overflow-y: auto; border-radius: 10px; border: 1px solid var(--line); }
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
