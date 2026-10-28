@@ -502,7 +502,13 @@ function buildCandidates(rawUrl, mirrorId) {
   const push = (id, url) => { if (url && out.every(o => !(o.id === id && o.url === url))) out.push({ id, url }) }
   if (NETCFG.forceProxy && NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy)) push('proxy', rawUrl)
   const p = parseRaw(rawUrl)
-  const pickPreset = (id) => id === 'custom' ? customPreset() : MIRROR_PRESETS.find(m => m.id === id)
+  // 可选镜像 = 内置清单 + 自定义 + 自动发现的镜像池（v1.9.20：池内镜像也能在下拉里直接固定选用）
+  const pickPreset = (id) => {
+    if (id === 'custom') return customPreset()
+    const m = MIRROR_PRESETS.find(x => x.id === id)
+    if (m) return m
+    return poolPresets().find(x => x.id === id) || null
+  }
   if (mirrorId && mirrorId !== 'auto' && mirrorId !== 'direct') {
     const pre = pickPreset(mirrorId)
     if (pre && p) push(pre.id, pre.gh ? pre.build(p.owner, p.repo, p.ref, p.path) : pre.build(rawUrl))
@@ -638,9 +644,48 @@ async function testMirrorSpeeds(opts) {
   }
 }
 
+/**
+ * 爬取代理有效性检测（v1.9.20 设置页「测试代理」按钮）。
+ * 与「测试网络连通」的区别：那条跑完整候选链，代理只是其中一条通道；
+ * 这里只验证代理本身 —— CONNECT 隧道能否建立、经代理能否拿到一个小响应、耗时多少。
+ * 探针用 api.github.com/zen（稳定、极小、无鉴权）；顺带测一次直连作对照，
+ * 「代理通、直连不通」正是这个代理最有价值的场景。
+ */
+async function testProxy(opts) {
+  const o = opts || {}
+  const proxy = String(o.proxy != null ? o.proxy : NETCFG.crawlProxy).trim()
+  if (!proxy) throw new Error('未填写爬取代理')
+  if (!parseProxyUrl(proxy)) throw new Error('代理格式无效（应为 http://host:port）')
+  const probe = String(o.url || 'https://api.github.com/zen')
+  const timeoutMs = Number(o.timeoutMs) || 10000
+  const out = { proxy, probe, ok: false, ms: null, status: null, error: null, directOk: null, directMs: null }
+  const t0 = Date.now()
+  try {
+    const res = await proxyFetchRaw(probe, { headers: { 'User-Agent': UA, Accept: 'application/json' } }, timeoutMs, proxy)
+    out.ms = Date.now() - t0
+    out.status = res.status
+    out.ok = !!res.ok
+    if (!res.ok) out.error = 'HTTP ' + res.status
+  } catch (e) {
+    out.ms = Date.now() - t0
+    out.error = String((e && e.message) || e).slice(0, 120)
+  }
+  // 直连对照（不阻塞主结论，失败只是记录）
+  const t1 = Date.now()
+  try {
+    const r2 = await fetchWithTimeout(probe, { headers: { 'User-Agent': UA, Accept: 'application/json' } }, timeoutMs)
+    out.directOk = !!r2.ok
+    out.directMs = Date.now() - t1
+  } catch (e) {
+    out.directOk = false
+    out.directMs = Date.now() - t1
+  }
+  return out
+}
+
 module.exports = {
   fetchWithTimeout, fetchAnyWithTimeout, readText, buildCandidates, crawlFetch, sleep, UA, MIRROR_PRESETS,
   hostFetch, describeNetError, isConnLevel, buildDualChannel, dohLookup, isGhAssetUrl,
   applyConfig, testNetwork, testMirrorSpeeds, proxyFetchRaw, customPreset,
-  discoverMirrors, poolPresets, hostToId, SEED_MIRROR_HOSTS, fetchAuto, isLanHost
+  discoverMirrors, poolPresets, hostToId, SEED_MIRROR_HOSTS, fetchAuto, isLanHost, testProxy
 }
