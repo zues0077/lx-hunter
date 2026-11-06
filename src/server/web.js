@@ -16,12 +16,15 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const { Store } = require('../core/store')
-const { Hunter, formatIntervalHours } = require('../core/hunter')
+const { Hunter, formatIntervalHours, patrolSchedule } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
 const { DEFAULT_REPOS } = require('../core/crawler')
 const { Auth, SESSION_TTL_MS } = require('../core/auth')
 
 const PORT = Number(process.env.PORT || 7970)
+// Docker 部署时浏览器访问的是宿主机映射端口（如 8191:7970 里的 8191），
+// 只把容器内监听端口写进启动日志会让人以为「端口不对」。compose 里显式给 PUBLIC_PORT。
+const PUBLIC_PORT = Number(process.env.PUBLIC_PORT || 0)
 const DATA_DIR = process.env.DATA_DIR || '/data'
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer')
 const MAX_BODY = 192 * 1024 * 1024 // 导入音源库 JSON 可能几十 MB，放宽上限
@@ -450,7 +453,8 @@ route('POST', '/api/db/delete', guard((req, res, ctx) => {
   if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')
   const r = store.removeSources(ids)
   pushLog({
-    msg: `手动删除音源 ${r.deleted} 条${r.missing.length ? `（${r.missing.length} 条库里已不存在）` : ''}；累计 ${r.blocked} 条不再自动采集`,
+    msg: `手动删除音源 ${r.deleted} 条${r.missing.length ? `（${r.missing.length} 条库里已不存在）` : ''}；累计 ${r.blocked} 条不再自动采集` +
+      (r.ledgerDropped ? `；同步清理 ${r.ledgerDropped} 条占位灌入账本` : ''),
     module: '音源库', level: 'info', at: Date.now()
   })
   return r
@@ -714,11 +718,14 @@ hunter = new Hunter(store, emitAll)
 require('../core/net').applyConfig(store.config)
 
 server.listen(PORT, '0.0.0.0', () => {
+  const portNote = (PUBLIC_PORT && PUBLIC_PORT !== PORT)
+    ? `外部访问端口 ${PUBLIC_PORT}（容器内监听 ${PORT}）`
+    : `端口 ${PORT}（容器部署时请按宿主机映射端口访问）`
   pushLog({
-    msg: `音源猎手 Web/Docker 版已启动：端口 ${PORT}，数据目录 ${DATA_DIR}（挂载卷迁移数据；界面功能与 PC 桌面版一致）`,
+    msg: `音源猎手 Web/Docker 版已启动：${portNote}，数据目录 ${DATA_DIR}（挂载卷迁移数据；界面功能与 PC 桌面版一致）`,
     module: '系统', level: 'info', at: Date.now()
   })
-  console.log(`[web] lx-hunter-pc listening on :${PORT}, dataDir=${DATA_DIR}`)
+  console.log(`[web] lx-hunter-pc listening on :${PORT}${PUBLIC_PORT && PUBLIC_PORT !== PORT ? ` (public :${PUBLIC_PORT})` : ''}, dataDir=${DATA_DIR}`)
 
   // 定时巡检 / 定时爬取（与桌面版同一套逻辑，v1.9.0 起爬取可接自动灌入）
   // 「每分钟检查一次」是**轮询节奏**，不是**执行频率**：到期判据 = 距上次执行 ≥ 设置里的间隔，
@@ -728,11 +735,35 @@ server.listen(PORT, '0.0.0.0', () => {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.patrolEnabled || hunter.job.running) return
-      const last = (store.db.patrol && store.db.patrol.lastRun) || 0
-      const hours = Math.max(1, Number(cfg.patrolIntervalHours) || 12)
-      if (Date.now() - last >= hours * 3600 * 1000) {
-        pushLog({ msg: `定时巡检到期（间隔 ${formatIntervalHours(hours)}），开始重测已灌入音源…`, module: '巡检', level: 'info', at: Date.now() })
-        hunter.runPatrol().catch(e => pushLog({ msg: '定时巡检失败：' + String((e && e.message) || e), module: '巡检', level: 'error', at: Date.now() }))
+      const sched = patrolSchedule(cfg, store.db.patrol, Date.now())
+      const last = sched.last
+      const hours = sched.hours
+      // 主判据仍是「距上次执行 ≥ 设定间隔」；上一轮失败时另按 patrolRetryMinutes 退避。
+      // 关键：触发前就写 lastAttempt。旧代码只在 runPatrol 成功收尾写 lastRun，推送服务端一关，
+      // 每分钟轮询都会判「到期」并真跑一轮，日志被 fetch failed 刷屏（2026-11-06 实测）。
+      if (Date.now() - last >= hours * 3600 * 1000 || sched.dueByRetry) {
+        store.db.patrol = Object.assign({}, store.db.patrol, { lastAttempt: Date.now(), lastError: null })
+        store.saveDb()
+        pushLog({
+          msg: sched.failed
+            ? `上次巡检未成功，按失败重试间隔 ${sched.retryMinutes} 分钟后重试…`
+            : `定时巡检到期（间隔 ${formatIntervalHours(hours)}），开始重测已灌入音源…`,
+          module: '巡检', level: 'info', at: Date.now()
+        })
+        hunter.runPatrol()
+          .then(() => {
+            store.db.patrol = Object.assign({}, store.db.patrol, { lastError: null })
+            store.saveDb()
+          })
+          .catch(e => {
+            const msg = String((e && e.message) || e)
+            store.db.patrol = Object.assign({}, store.db.patrol, { lastError: msg })
+            store.saveDb()
+            pushLog({
+              msg: `定时巡检失败：${msg}；已按 ${sched.retryMinutes} 分钟延后重试，不会每分钟重复尝试（可在设置里调整失败重试间隔，或关闭「启用定时巡检」）`,
+              module: '巡检', level: 'error', at: Date.now()
+            })
+          })
       }
     } catch (e) {}
   }, 60 * 1000)

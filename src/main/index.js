@@ -3,7 +3,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { Store } = require('../core/store')
-const { Hunter, formatIntervalHours } = require('../core/hunter')
+const { Hunter, formatIntervalHours, patrolSchedule } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
 const { DEFAULT_REPOS } = require('../core/crawler')
 
@@ -136,11 +136,35 @@ app.whenReady().then(() => {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.patrolEnabled || hunter.job.running) return
-      const last = (store.db.patrol && store.db.patrol.lastRun) || 0
-      const hours = Math.max(1, Number(cfg.patrolIntervalHours) || 12)
-      if (Date.now() - last >= hours * 3600 * 1000) {
-        pushLog({ msg: `定时巡检到期（间隔 ${formatIntervalHours(hours)}），开始重测已灌入音源…`, module: '巡检', level: 'info', at: Date.now() })
-        hunter.runPatrol().catch(e => pushLog({ msg: '定时巡检失败：' + String((e && e.message) || e), module: '巡检', level: 'error', at: Date.now() }))
+      const sched = patrolSchedule(cfg, store.db.patrol, Date.now())
+      const last = sched.last
+      const hours = sched.hours
+      // 主判据仍是「距上次执行 ≥ 设定间隔」；上一轮失败时另按 patrolRetryMinutes 退避。
+      // 关键：触发前就写 lastAttempt。旧代码只在 runPatrol 成功收尾写 lastRun，推送服务端一关，
+      // 每分钟轮询都会判「到期」并真跑一轮，日志被 fetch failed 刷屏（2026-11-06 实测）。
+      if (Date.now() - last >= hours * 3600 * 1000 || sched.dueByRetry) {
+        store.db.patrol = Object.assign({}, store.db.patrol, { lastAttempt: Date.now(), lastError: null })
+        store.saveDb()
+        pushLog({
+          msg: sched.failed
+            ? `上次巡检未成功，按失败重试间隔 ${sched.retryMinutes} 分钟后重试…`
+            : `定时巡检到期（间隔 ${formatIntervalHours(hours)}），开始重测已灌入音源…`,
+          module: '巡检', level: 'info', at: Date.now()
+        })
+        hunter.runPatrol()
+          .then(() => {
+            store.db.patrol = Object.assign({}, store.db.patrol, { lastError: null })
+            store.saveDb()
+          })
+          .catch(e => {
+            const msg = String((e && e.message) || e)
+            store.db.patrol = Object.assign({}, store.db.patrol, { lastError: msg })
+            store.saveDb()
+            pushLog({
+              msg: `定时巡检失败：${msg}；已按 ${sched.retryMinutes} 分钟延后重试，不会每分钟重复尝试（可在设置里调整失败重试间隔，或关闭「启用定时巡检」）`,
+              module: '巡检', level: 'error', at: Date.now()
+            })
+          })
       }
     } catch (e) {}
   }, 60 * 1000)
@@ -442,7 +466,8 @@ ipcMain.handle('db:clear', guard(() => {
 ipcMain.handle('db:delete', guard((e, ids) => {
   if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')
   const r = store.removeSources(ids)
-  hunter.log(`手动删除音源 ${r.deleted} 条；累计 ${r.blocked} 条不再自动采集`, '音源库', 'info')
+  hunter.log(`手动删除音源 ${r.deleted} 条；累计 ${r.blocked} 条不再自动采集` +
+    (r.ledgerDropped ? `；同步清理 ${r.ledgerDropped} 条占位灌入账本` : ''), '音源库', 'info')
   return r
 }))
 ipcMain.handle('db:deleted:list', guard(() => ({ ids: store.deletedIds() })))

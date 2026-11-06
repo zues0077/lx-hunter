@@ -40,6 +40,10 @@ const state = {
   installed: [],
   // state.installed 是「哪个账号」的服务端列表（统计卡要据此判断口径，避免拿 A 的列表去显示 B）
   installedFor: null,
+  // 断线时「已灌入」页保留上次成功读取的快照：installedAt 记读取时间，
+  // installedStale=true 表示当前显示的是旧快照（禁止拿它发删除/停用请求）。
+  installedAt: 0,
+  installedStale: false,
   // 已灌入页排序：key 为空 = 服务端原顺序；目前只有「状态」一列可排（失效/停用排在前面好批量删）
   insSort: { key: '', dir: 1 },
   // 公共音源清理（v1.7.4）：服务端公开源列表 + 勾选池（只可能是公开源，私有源不在其中）
@@ -48,6 +52,9 @@ const state = {
   // 已灌入列表多选删除（v1.8.0）：勾选池装的是服务端音源 id
   insSel: new Set(),
   config: null,
+  // 当前账号推送服务端的连通结果（testConn 写）：null=还没测过，true/false=已测。
+  // 断线时「已灌入」统计卡与音源库显示的都是本地数据，要给出可见提示，别让人当成实时状态。
+  connOk: null,
   // 后端镜像清单（configGet 返回的 mirrors，populateMirrors 会写入），供镜像池变化时重建下拉
   mirrors: null,
   // 多平台多账号（v1.8.0）：平台账号列表与当前选中账号
@@ -254,6 +261,7 @@ async function loadConfig() {
   $('cfgApiHostBackfillBudgetSec').value = Math.round((Number(c.apiHostBackfillBudgetMs) || 180000) / 1000)
   $('cfgPatrolOn').checked = !!c.patrolEnabled
   $('cfgPatrolHours').value = c.patrolIntervalHours || 12
+  $('cfgPatrolRetryMinutes').value = c.patrolRetryMinutes || 15
   $('cfgPatrolDisable').checked = c.patrolAutoDisable !== false
   $('cfgPatrolAutoDelete').checked = !!c.patrolAutoDelete
   $('cfgPatrolDeleteAfter').value = c.patrolDeleteAfter || 3
@@ -305,6 +313,7 @@ $('btnSaveCfg').addEventListener('click', async () => {
       (parseInt($('cfgApiHostBackfillBudgetSec').value, 10) || 180) * 1000)),
     patrolEnabled: $('cfgPatrolOn').checked,
     patrolIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgPatrolHours').value, 10) || 12)),
+    patrolRetryMinutes: Math.max(1, Math.min(1440, parseInt($('cfgPatrolRetryMinutes').value, 10) || 15)),
     patrolAutoDisable: $('cfgPatrolDisable').checked,
     patrolAutoDelete: $('cfgPatrolAutoDelete').checked,
     patrolDeleteAfter: Math.max(1, Math.min(20, parseInt($('cfgPatrolDeleteAfter').value, 10) || 3)),
@@ -802,6 +811,9 @@ async function testConn(explicit) {
   if (!active) {
     chip.className = 'conn err'
     txt.textContent = '未配置账号'
+    chip.title = '尚未配置服务平台账号：音源库与统计卡显示的是本地数据'
+    state.connOk = false
+    renderStats()
     if (explicit) toast('请先在「服务平台账号」里添加并选中一个账号', 'err')
     return
   }
@@ -811,12 +823,17 @@ async function testConn(explicit) {
   if (r.ok && r.data && r.data.ok) {
     chip.className = 'conn on'
     txt.textContent = '已连接'
+    chip.title = '推送服务端已连接'
+    state.connOk = true
     if (explicit) toast('连接成功：' + r.data.msg, 'ok')
   } else {
     chip.className = 'conn err'
     txt.textContent = '未连接'
+    chip.title = '推送服务端未连接：音源库与「已灌入」统计显示的是本地数据 / 上次成功读取的列表，不代表服务端现状'
+    state.connOk = false
     if (explicit) toast('连接失败：' + ((r.data && r.data.msg) || r.error), 'err')
   }
+  renderStats()
 }
 
 // ---------------- 多平台账号管理（v1.8.0） ----------------
@@ -976,11 +993,16 @@ $('btnAccTest').addEventListener('click', async () => {
   const r = await api.serviceTest(acc)
   if (r.ok && r.data && r.data.ok) {
     chip.className = 'conn on'; txt.textContent = '已连接'
+    chip.title = '推送服务端已连接'
+    state.connOk = true
     toast('连接成功：' + r.data.msg, 'ok')
   } else {
     chip.className = 'conn err'; txt.textContent = '未连接'
+    chip.title = '推送服务端未连接：音源库与「已灌入」统计显示的是本地数据，不代表服务端现状'
+    state.connOk = false
     toast('连接失败：' + ((r.data && r.data.msg) || r.error), 'err')
   }
+  renderStats()
 })
 
 async function setActiveAccount(id) {
@@ -1129,6 +1151,21 @@ function renderStats() {
     impCard.title = '未选择服务平台账号；这里显示的是本地账本里的灌入记录总数。\n到「设置」里选中一个账号后会按该账号显示'
   }
   if (lab) lab.textContent = state.activePlatformId ? '已灌入 · 当前账号' : '已灌入'
+  // 服务端离线时，卡片上的数字只是「上次成功读取的服务端列表」或本地灌入账本。
+  // 断线绝不清本地数据（否则一次网络抖动就会把整库记录误删，见 hunter.syncServer 的
+  // 清理口径：只有成功读到服务端列表才对账），但必须让人一眼看出这不是实时状态。
+  // 上面三个分支每次都会覆盖式重设 impCard.title，所以这里追加不会越叠越长。
+  if (state.connOk === false) {
+    impCard.classList.add('stat-offline')
+    impCard.title = (impCard.title || '') +
+      '\n\n当前未连接推送服务端：这里是上次成功读取的服务端列表或本地灌入账本，不是实时状态。' +
+      '音源库里「来源仓库」为 (服务端) 的条目也是本地快照，不会因断线消失；连接恢复后刷新「已灌入」页即可对账。'
+  } else {
+    impCard.classList.remove('stat-offline')
+  }
+  // 音源库行级「离线快照」角标由 body class 控制：connOk 一变（连接测试 / 切账号）
+  // 这里就会同步，不需要重建整张表，也不会打断正在进行的勾选与滚动。
+  document.body.classList.toggle('conn-offline', state.connOk === false)
 }
 
 function matchFilter(e) {
@@ -1287,12 +1324,18 @@ function rowHtml(e) {
   const al = apiAliveBadge(e)
   // 私人音源：手动导入的个人源，不参与去重废弃，也不参与健康巡检（可手动检测/灌入）
   const priv = e.private ? '<span class="badge private" title="私人音源：手动导入，不参与去重废弃，也不参与健康巡检（不会被自动重测、禁用或删除）；可在音源库手动检测 / 灌入">私人</span>' : ''
+  // (服务端) 占位条目是本地快照，不是服务端实时视图。断线时给一个灰色行级角标，
+  // 免得用户拿它当成「服务端上还挂着」去做删除决策（显隐由 body.conn-offline 控制，
+  // connOk 变化时不必整表重建）。
+  const snap = (e.fromServer || e.repo === '(服务端)')
+    ? '<span class="snap-tag" title="这是上次连接成功时同步进本地音源库的占位快照，不代表推送服务端现状；连接恢复后到「已灌入」页点「刷新」即可对账。要删除服务端上的脚本，请到「已灌入」页操作。">离线快照</span>'
+    : ''
   return `
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
     <td><span class="nm">${esc(e.scriptName || e.name)}</span>${priv}
         <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span>${vt}${al}</td>
     <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
-    <td class="c-repo"><span class="repo">${esc(e.repo)}</span></td>
+    <td class="c-repo"><span class="repo">${esc(e.repo)}</span>${snap}</td>
     <td class="c-status">${statusCell(e)}</td>
     <td class="c-op">
       <button class="btn sm" data-act="check" data-id="${esc(e.id)}">检测</button>
@@ -1504,13 +1547,20 @@ async function deleteSelected() {
   if (!ids.length) return toast('先在表格里勾选要删除的音源，再点「删除选中」', 'info')
   const picked = state.sources.filter(e => ids.indexOf(e.id) >= 0)
   const priv = picked.filter(e => e.private).length
+  const snapN = picked.filter(e => e.fromServer || e.repo === '(服务端)').length
   const names = picked.slice(0, 4).map(e => e.scriptName || e.name || e.id).join('、')
   const more = picked.length > 4 ? ` 等 ${picked.length} 条` : ''
   const extra = priv ? `（其中 ${priv} 条是私人音源）` : ''
+  // 占位快照最容易被误解成「服务端上还挂着的脚本」，把这句放到确认框最前面
+  const snapWarn = snapN
+    ? `注意：其中 ${snapN} 条是「(服务端)」本地占位快照 —— 删除只影响本地，服务端上的脚本不会消失。要撤掉服务端脚本，请到「已灌入」页删除。\n\n`
+    : ''
   if (!confirm(
     `确定从本地音源库删除 ${ids.length} 条音源${extra}？\n\n` +
     `${names}${more}\n\n` +
+    snapWarn +
     '· 只删本地记录，服务端上已灌入的脚本不会被删除（要撤掉请用「已灌入」页的删除）；\n' +
+    (snapN ? '· 占位条目的「已灌入」账本会一并清除，之后不再参与巡检与灌入判定；\n' : '') +
     '· 删掉的条目会记入「不再自动采集」名单，后续爬取 / 采集站不会立刻加回；\n' +
     '· 想恢复：设置 → 数据 → 清除删除记录后重新爬取，或导入含该条目的音源库 JSON。\n\n' +
     '此操作不可撤销（导出的备份文件不受影响）。'
@@ -1522,7 +1572,8 @@ async function deleteSelected() {
   state.page = 1
   await loadSources()
   await refreshDeletedInfo()
-  toast(`已删除 ${d.deleted || 0} 条音源${d.missing && d.missing.length ? `（${d.missing.length} 条库里已不存在）` : ''}；累计 ${d.blocked || 0} 条不再自动采集`, 'ok')
+  toast(`已删除 ${d.deleted || 0} 条音源${d.missing && d.missing.length ? `（${d.missing.length} 条库里已不存在）` : ''}；累计 ${d.blocked || 0} 条不再自动采集` +
+    (d.ledgerDropped ? `；同步清理 ${d.ledgerDropped} 条灌入账本` : ''), 'ok')
 }
 $('btnDeleteSel').addEventListener('click', deleteSelected)
 
@@ -1913,20 +1964,82 @@ async function refreshInstalled() {
     return
   }
   const r = await api.serviceList()
-  body.innerHTML = ''
   if (!r.ok) {
-    $('insInfo').textContent = '读取失败：' + r.error
-    $('insEmpty').hidden = false
+    // v1.10.2：断线不再清空「已灌入」页。读失败只说明链路断了，不等于服务端上没有
+    // 这些脚本；把整页抹掉既丢信息，又让人误以为服务端被清空。保留上次成功读取的
+    // 列表 + 黄条标注，同时清勾选池并禁止一切写操作 —— 旧快照绝不能拿去发删除请求。
+    if (state.installedFor !== active.id) state.installed = []   // 别拿别的账号的列表顶替
+    state.installedStale = true
+    state.insSel.clear()
+    renderInstalledRows()
+    applyInstalledStale()
+    const info = $('insInfo')
+    if (info) info.textContent = `读取失败：${r.error} · 当前显示的是本地快照（非实时）`
+    const empty = $('insEmpty')
+    if (empty && !(state.installed || []).length) empty.textContent = '尚未成功读取过该账号的服务端音源列表'
     return
   }
   state.installed = r.data || []
   state.installedFor = active.id
+  state.installedAt = Date.now()
+  state.installedStale = false
   // 账本对账：服务端已经删掉的音源，本地那条灌入记录跟着摘掉。不做的话，「删空服务端再重灌」
   // 会被库里那枚「已灌入」标记整体排除 —— 表现为「点了灌入但什么都没发生」（用户实测反馈）。
+  // 只在刚刚成功读到列表时才对账（上面的失败分支绝不能走到这里）。
   await reconcileLedger(active.id, state.installed)
   renderInstalledRows()
+  applyInstalledStale()
   // 顺带刷新「公共音源清理」面板：两者读的是同一份服务端数据，避免要用户点两次
   loadPublic()
+}
+
+/**
+ * 快照态的可见提示与禁写（v1.10.2）。
+ * 保留列表本身会带来一个新风险：旧快照被当成实时列表拿去删。所以显示快照的同时
+ * 必须清勾选池、禁用所有服务端写按钮；恢复成功后 refreshInstalled 会关掉这个状态。
+ */
+function applyInstalledStale() {
+  const on = !!state.installedStale
+  const banner = $('insSnapshot')
+  if (banner) {
+    banner.hidden = !on
+    if (on) {
+      const has = (state.installed || []).length > 0
+      const when = state.installedAt
+        ? new Date(state.installedAt).toLocaleString('zh-CN', { hour12: false })
+        : '时间未知'
+      banner.textContent = has
+        ? `当前未连接推送服务端：以下为上次成功读取的快照（${when}），列表可能已过期，请勿据此删除或停用音源。连接恢复后点「刷新」即可与服务端对账。`
+        : '当前未连接推送服务端：还没有成功读取过该账号的服务端列表，无法判断服务端现状。连接恢复后点「刷新」再操作。'
+    }
+  }
+  const card = $('insCard')
+  if (card) card.classList.toggle('stale', on)
+  const sels = '#insBody button[data-t], #insBody button[data-del], #insBody input[data-ins], #insChkAll, #btnInsDelSel, #btnInsSelFailed, #btnEnableAll, #btnRevokeSelected, #btnPubDelSel, #btnPubDelAll'
+  document.querySelectorAll(sels).forEach(el => {
+    if (on) { el.dataset.staleOff = '1'; el.disabled = true }
+    else if (el.dataset.staleOff === '1') { delete el.dataset.staleOff; el.disabled = false }
+  })
+  if (!on) renderInsSelInfo()   // btnInsDelSel / 全选框的启用条件要按勾选数重算
+}
+
+// 捕获阶段兜底：即使别处（如 setInsBusy(false)）把按钮重新启用，快照态也不允许
+// 拿旧列表发任何服务端写请求；键盘触发同样拦得住。
+const insCardEl = $('insCard')
+if (insCardEl) {
+  insCardEl.addEventListener('click', ev => {
+    if (!state.installedStale) return
+    if (ev.target.closest('button[data-t], button[data-del], #btnInsDelSel, #btnInsSelFailed, #btnEnableAll, #btnRevokeSelected, #btnPubDelSel, #btnPubDelAll')) {
+      ev.preventDefault(); ev.stopImmediatePropagation()
+      toast('当前显示的是离线快照：请先连接推送服务端并点「刷新」对账，再执行删除 / 停用', 'err')
+    }
+  }, true)
+  insCardEl.addEventListener('change', ev => {
+    if (!state.installedStale) return
+    if (ev.target.closest('input[data-ins], #insChkAll')) {
+      ev.preventDefault(); ev.stopImmediatePropagation(); ev.target.checked = false
+    }
+  }, true)
 }
 
 /** 一行已灌入音源（纯 DOM 构造，排序时复用，不重新拉服务端） */
@@ -2052,8 +2165,11 @@ async function syncInstalledQuiet(force) {
   if (!r || !r.ok) return
   state.installed = r.data || []
   state.installedFor = active.id
+  state.installedAt = Date.now()
+  state.installedStale = false
   await reconcileLedger(active.id, state.installed)
   renderInstalledRows()
+  applyInstalledStale()
 }
 
 /** 已灌入页表头排序箭头（只有「状态」一列可排） */

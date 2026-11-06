@@ -64,6 +64,45 @@ function formatIntervalHours(h) {
   return n % 24 === 0 ? `${n / 24} 天（${n} 小时）` : `${n} 小时`
 }
 
+/**
+ * 定时巡检的到期判定（v1.10.2 抽成纯函数，桌面版与 Web/Docker 版共用）。
+ *
+ * 背景（2026-11-06 用户实测）：推送服务端关闭时，runPatrol 第一步读服务端音源列表
+ * 就抛错，而旧代码**只在 runPatrol 成功收尾**才写 patrol.lastRun，于是 lastRun 永远停在
+ * 很早以前，每分钟的轮询每次都判定「到期」→ 每分钟真的跑一轮、刷一屏失败日志。
+ * 用户设的「间隔 1 天」在失败场景完全失效。
+ *
+ * 现在调度水位取 max(lastAttempt, lastRun)：
+ *  - lastRun：runPatrol 成功完成时间（保留给界面「上次巡检」展示与统计）
+ *  - lastAttempt：定时器每次真正触发前写入（含失败轮），保证失败也推进水位
+ *  - lastError：上一轮失败原因；存在时改用较短的 patrolRetryMinutes 退避（默认 15 分钟），
+ *    既不会每分钟刷屏，服务端恢复后也不用等满一整天；退避上限不超过主间隔。
+ *
+ * @param {object} cfg 配置（patrolIntervalHours / patrolRetryMinutes）
+ * @param {object} patrol store.db.patrol
+ * @param {number} now 当前时间戳（便于测试注入）
+ * @returns {{last:number,hours:number,retryMinutes:number,failed:boolean,
+ *            gapMs:number,dueByInterval:boolean,dueByRetry:boolean,due:boolean}}
+ */
+function patrolSchedule(cfg, patrol, now) {
+  const p = patrol || {}
+  const t = Number(now) || Date.now()
+  const hours = Math.max(1, Number(cfg && cfg.patrolIntervalHours) || 12)
+  const retryMinutes = Math.max(1, Math.min(1440, Number(cfg && cfg.patrolRetryMinutes) || 15))
+  const last = Math.max(Number(p.lastAttempt) || 0, Number(p.lastRun) || 0)
+  const failed = !!p.lastError
+  const intervalMs = hours * 3600 * 1000
+  const retryMs = Math.min(intervalMs, retryMinutes * 60 * 1000)
+  const gapMs = failed ? retryMs : intervalMs
+  const elapsed = t - last
+  return {
+    last, hours, retryMinutes, failed, gapMs,
+    dueByInterval: elapsed >= intervalMs,
+    dueByRetry: failed && elapsed >= retryMs,
+    due: elapsed >= gapMs
+  }
+}
+
 // 注：原先这里的规则只认英文 "fetch failed"，而沙箱抛的是中文「沙箱 fetch 失败」，
 // 导致全平台网络失败会被判死并自动禁用。现统一改由 checker.isLocalNetworkIssue 判定。
 
@@ -2045,7 +2084,12 @@ class Hunter {
     }
     await Promise.all(Array.from({ length: conc }, () => worker()))
     this.store.saveDb(); this.store.saveImported()
-    this.store.db.patrol = { lastRun: Date.now(), total: items.length, ok, disabled, unknown, reEnabled, deleted, cancelled: this.cancelRequested }
+    // 合并而非整体覆盖：调度器会往 patrol 写 lastAttempt / lastError（失败退避水位），
+    // 这里若整体赋值会把它们抹掉，导致下一轮又回到「失败不推进水位」的老问题。
+    this.store.db.patrol = Object.assign({}, this.store.db.patrol, {
+      lastRun: Date.now(), lastAttempt: Date.now(), lastError: null,
+      total: items.length, ok, disabled, unknown, reEnabled, deleted, cancelled: this.cancelRequested
+    })
     this.store.saveDb()
     const stillDisabled = Object.values(this.store.imported || {}).filter(r => r && r.disabledByPatrol).length
     this.log(this.cancelRequested
@@ -2165,6 +2209,11 @@ class Hunter {
         // sourceUrl 是它当年经 URL 导入时留存的原始脚本地址（upload 的没有），
         // 有地址的占位条目同样可以下载 + 沙箱检测（runCheck 已放行 fromServer 且有 url 的条目）
         const pid = 'srv:' + s.id
+        // v1.10.2：用户手动删过的占位不再由同步复活。删占位时对应的 imported
+        // 记录已一并摘掉，若这里照常重建，会表现为「删了又自己长回来」，
+        // 也与 deletedIds（不再自动采集名单）的语义冲突。
+        // 清除删除记录 / 导入音源库 JSON 解除名单后，同步可正常重新纳入。
+        if (this.store.isDeleted(pid)) { matched++; continue }
         if (!this.store.db.sources[pid]) {
           this.store.db.sources[pid] = {
             id: pid, name: s.name, path: '', repo: '(服务端)', url: s.sourceUrl || '',
@@ -2204,4 +2253,4 @@ class Hunter {
   }
 }
 
-module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildPatrolItems, buildRepoSeeds }
+module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, patrolSchedule, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildPatrolItems, buildRepoSeeds }

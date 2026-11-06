@@ -83,6 +83,10 @@ const DEFAULT_CONFIG = {
   hashDedupeAfterCrawl: true,
   patrolEnabled: false,
   patrolIntervalHours: 12,
+  // 巡检失败（常见于推送服务端没开 / 网络不通）后的重试间隔，单位分钟。
+  // 旧逻辑失败时不推进调度水位，每分钟轮询都会判「到期」并真跑一轮 → 日志刷屏。
+  // 默认 15 分钟：不刷屏，服务端恢复后也不用等满整个巡检间隔。上限不超过主间隔。
+  patrolRetryMinutes: 15,
   crawlScheduleEnabled: false,
   crawlIntervalHours: 24,
   crawlSinceDays: 0,
@@ -324,26 +328,36 @@ class Store {
    *  - 只动本地库：服务端上已灌入的脚本不受影响，要撤掉请用「已灌入」页的删除；
    *  - 保留 imported 账本（它描述的是服务端状态）；本地条目没了以后，巡检队列里
    *    取不到 sources[srcId] 会自动跳过，不会把已删条目当作待巡检目标；
+   *    **例外**：(服务端) 占位条目（srv:… / fromServer）要连账本一起摘掉 —— 它本来就
+   *    是本地快照，留着会成孤儿：巡检跳过它，而「只选未灌入」又因账本仍标已灌入
+   *    把它排除，结果既不再被巡检、想重灌也灌不进去；
    *  - 记入 deletedIds 后，runCrawl / 采集站 / 非增量合并都不会把它加回来；
    *  - 恢复途径：导入音源库 JSON（mergeFrom 自动解除）、重新导入同名私人源，
    *    或 clearDeletedIds() 清空记录后重新爬取。
-   * @returns {{deleted:number, missing:string[], blocked:number}}
+   * @returns {{deleted:number, missing:string[], blocked:number, ledgerDropped:number}}
    */
   removeSources(ids) {
     const list = Array.isArray(ids) ? ids.filter(x => typeof x === 'string' && x).slice(0, 5000) : []
-    if (!list.length) return { deleted: 0, missing: [], blocked: this.deletedIds().length }
+    if (!list.length) return { deleted: 0, missing: [], blocked: this.deletedIds().length, ledgerDropped: 0 }
     if (!Array.isArray(this.db.deletedIds)) this.db.deletedIds = []
     const gone = new Set(this.db.deletedIds)
     const missing = []
-    let deleted = 0
+    let deleted = 0, ledgerDropped = 0
     for (const id of new Set(list)) {
-      if (!this.db.sources[id]) { missing.push(id); continue }
+      const entry = this.db.sources[id]
+      if (!entry) { missing.push(id); continue }
       delete this.db.sources[id]
       if (!gone.has(id)) { this.db.deletedIds.push(id); gone.add(id) }
+      const isSnapshot = !!entry.fromServer || /^srv:/.test(id)
+      if (isSnapshot && this.imported && this.imported[id]) {
+        delete this.imported[id]
+        ledgerDropped++
+      }
       deleted++
     }
+    if (ledgerDropped) this.saveImported()
     if (deleted) this.saveDb()
-    return { deleted, missing, blocked: this.db.deletedIds.length }
+    return { deleted, missing, blocked: this.db.deletedIds.length, ledgerDropped }
   }
 
   /** 清空删除记录：这些音源后续可以重新被自动采集收录（不会自动立刻出现）。 */

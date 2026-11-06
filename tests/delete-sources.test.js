@@ -51,7 +51,8 @@ ok(r1.blocked === 2, '返回累计删除记录数')
 ok(!store.db.sources.a && !store.db.sources['private::我的私人音源'], '普通源与私人源都已从库里移除')
 ok(!!store.db.sources.b && !!store.db.sources.c, '未选中的条目一条都没动')
 ok(!!store.imported.a, 'imported 账本保留（它描述服务端状态，删本地条目不该抹掉）')
-ok(JSON.stringify(r1) === JSON.stringify({ deleted: 2, missing: ['not-there'], blocked: 2 }), '返回结构稳定，渲染层可直接取字段')
+ok(JSON.stringify(r1) === JSON.stringify({ deleted: 2, missing: ['not-there'], blocked: 2, ledgerDropped: 0 }),
+  '返回结构稳定（含占位账本清理计数；普通源为 0），渲染层可直接取字段')
 
 ok(store.removeSources([]).deleted === 0, '空 ids 不删任何条目')
 ok(store.removeSources(null).deleted === 0, 'null ids 被容错处理')

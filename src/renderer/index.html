@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=12">
+<link rel="stylesheet" href="styles.css?v=14">
 <script src="auth-bg.js?v=2"></script>
 </head>
 <body>
@@ -26,7 +26,7 @@
       <button class="nav-item" data-view="logs"><span class="ni">▤</span>日志</button>
     </nav>
     <div class="sidebar-foot">
-      <div class="conn" id="connChip"><span class="dot"></span><span id="connText">未连接</span></div>
+      <div class="conn" id="connChip" title="推送服务端连接状态；未连接时音源库仍显示本地数据，不代表服务端现状"><span class="dot"></span><span id="connText">未连接</span></div>
       <button class="btn-link" id="themeBtn">切换主题</button>
       <button class="btn-link" id="btnLogoutTop" hidden>退出登录</button>
       <a class="btn-link gh-link" id="ghLink" href="https://github.com/zues0077/lx-hunter" target="_blank" rel="noopener noreferrer" title="音源猎手源码（GitHub）">⌨ GitHub · lx-hunter</a>
@@ -179,7 +179,9 @@
           <button class="btn" id="btnRefreshInstalled">刷新</button>
         </div>
       </header>
-      <div class="card">
+      <div class="card" id="insCard">
+        <!-- 断线时保留上次成功读取的列表，并用黄条说明它是快照（v1.10.2） -->
+        <div class="snap-banner" id="insSnapshot" hidden></div>
         <div class="toolbar">
           <span class="muted" id="patrolInfo">尚未巡检</span>
           <label class="field inline"><span>当前账号</span>
@@ -412,6 +414,7 @@
         <h3 class="card-title">健康巡检（已灌入音源定期重测）</h3>
         <div class="grid-form">
           <label class="field"><span>巡检间隔（小时）</span><input class="input" id="cfgPatrolHours" type="number" min="1" max="720"></label>
+          <label class="field"><span>失败后的重试间隔（分钟）</span><input class="input" id="cfgPatrolRetryMinutes" type="number" min="1" max="1440" step="1"></label>
         </div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（按上面的间隔自动重测已灌入音源）</span></label>
@@ -422,6 +425,7 @@
         <p class="hint"><strong>「启用定时巡检」就是定时巡检的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次巡检是否已够间隔」，够了才真正开跑 —— <strong>实际触发比设定间隔最多晚 1 分钟</strong>，且<strong>软件必须保持运行</strong>。</p>
         <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
         <p class="hint"><strong>私人音源不参与巡检</strong>：用「导入单个音源」加入的个人脚本不会被自动重测、累计失效次数，也不会被巡检自动禁用或删除；要验证它请到音源库手动点「检测」。</p>
+        <p class="hint"><strong>推送服务端没开时，不会再一分钟试一次</strong>：巡检第一步要读服务端音源列表，连不上就整轮失败；旧版失败后不记录「已经试过」，于是每分钟核对都算「到期」，日志被失败刷满。现在失败后按上面的「失败后的重试间隔」退避（默认 15 分钟，最久不超过巡检间隔），日志会写明下次重试时间。巡检只<strong>重测</strong>已灌入的音源，不会灌入新音源；不需要自动巡检就直接取消勾选「启用定时巡检」。</p>
       </div>
 
       <div class="card">
@@ -606,6 +610,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=47"></script>
-<script src="app.js?v=48"></script>
+<script src="app.js?v=51"></script>
 </body>
 </html>

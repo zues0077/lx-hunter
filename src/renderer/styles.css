@@ -112,6 +112,14 @@ code { background: var(--card-2); padding: 1px 6px; border-radius: 5px; font-siz
 .stat-num.dead { color: var(--dead); }
 .stat-num.accent { color: var(--accent); }
 .stat-label { font-size: 12px; color: var(--muted); margin-top: 3px; }
+/* 推送服务端离线：统计卡上的数字只是本地快照，给个可见角标，别让人误读成服务端实时状态 */
+.card.stat.stat-offline { position: relative; border-color: var(--dead); }
+.card.stat.stat-offline::after {
+  content: '服务端离线'; position: absolute; top: 8px; right: 10px;
+  font-size: 10px; line-height: 1; color: var(--dead);
+  border: 1px solid var(--dead); border-radius: 5px; padding: 2px 4px;
+  opacity: .9; pointer-events: none;
+}
 
 /* ---------- 控件 ---------- */
 .btn {
@@ -501,3 +509,22 @@ html[data-theme="light"] .auth-bg-toggle:hover { background: #fff; }
   background: color-mix(in srgb, var(--ok) 15%, transparent);
   color: var(--ok); border-color: var(--ok);
 }
+
+/* ---------- 离线快照提示（v1.10.2） ----------
+   断线时「已灌入」页不清空列表，用黄条标明这是上次成功读取的快照；
+   音源库里 (服务端) 占位行同步给一个灰色行级角标，避免被当成服务端实时状态。 */
+.snap-banner {
+  margin: 0 0 12px; padding: 9px 12px; border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--line));
+  background: color-mix(in srgb, var(--warn) 12%, var(--card));
+  color: var(--text); font-size: 12.5px; line-height: 1.6;
+}
+#insCard.stale .table-wrap { opacity: .72; }
+#insCard.stale .snap-banner { opacity: 1; }
+.snap-tag {
+  display: none; margin-left: 6px; padding: 1px 5px; border-radius: 5px;
+  font-size: 10px; line-height: 1.5; white-space: nowrap; vertical-align: middle;
+  color: var(--muted); border: 1px solid var(--line); background: var(--card-2);
+  cursor: help;
+}
+body.conn-offline .snap-tag { display: inline-block; }
