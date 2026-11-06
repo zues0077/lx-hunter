@@ -431,9 +431,6 @@
           <label class="chk"><input type="checkbox" id="cfgCrawlOn"><span>启用定时爬取（按上面的间隔自动增量爬取）</span></label>
           <label class="chk"><input type="checkbox" id="cfgCrawlAutoImport"><span><strong>爬取结束后自动灌入</strong>（爬完先检测新音源，再把可用的灌到「灌入目标」账号）</span></label>
         </div>
-        <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgCrawlLatestOnly"><span><strong>只收最新版</strong>：同一音源的多版本候选（如 <code>xinghai-music-sourcev2.3.1.js … v2.3.17.js</code>、<code>xxx-v1.8.js</code>）只保留版本号最高的一个，旧版本不下载不入库。组内分不出版本号或名字太泛（如 <code>6.js</code>）时全部保留，交给内容指纹去重裁决</span></label>
-        </div>
         <p class="hint"><strong>「启用定时爬取」就是定时爬取的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次爬取是否已够间隔」（判据就是上面填的小时数），够了才真正开跑。所以设 2 天就是<strong>每 2 天跑一次</strong>，<strong>实际触发比设定间隔最多晚 1 分钟</strong>——「每分钟」只是核对节奏，不是爬取频率，两者不冲突；同时<strong>软件必须保持运行</strong>，关掉软件就不会跑。下面的「自动灌入」依赖它，上面没勾时不会触发。</p>
         <p class="hint">勾了「爬取结束后自动灌入」后，每轮定时任务变成全自动三连：<strong>增量爬取 → 检测新增/内容变化的音源 → 把通过检测的灌入「灌入目标」账号</strong>。灌入目标与手动「检测并灌入」完全一致（设置里勾了「参与批量灌入」的账号，一个都没勾则用当前选中账号）；已经灌好的不会重复灌，脚本自检名字等保护规则照常生效。全过程在「运行日志」里以「定时」模块记录，可随时点停止按钮中断。</p>
         <p class="hint">定时爬取为<strong>增量模式</strong>：同时读取仓库<strong>文件树</strong>与 <strong>Releases 资产</strong>（lx-ikun-music-sources 等仓库只把音源发在 release 里，旧版本不读 release 永远抓不到）；zip 压缩包自动下载解压。已抓取的按 blob sha / 资产标识判重<strong>跳过不重抓</strong>；内容有变化的标记「有更新」并重置检测结果，重新检测后灌入时按上面「灌入规则」卡片处理同名旧版（LX 里上传同名音源必须先删旧的，需要替换时猎手自动完成这两步；删除会触发服务端短暂重载，批量替换时留意服务端负载）。</p>
@@ -443,6 +440,10 @@
       <div class="card">
         <h3 class="card-title">仓库清单（全部可管理）</h3>
         <p class="hint">内置 38 个 + 你追加的 + 搜索发现的，<strong>全部可勾选「禁用」（本次不爬）或「删除」</strong>。删掉的内置仓库点「恢复默认仓库」即可找回。</p>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgCrawlLatestOnly"><span><strong>同组音源只保留最新版</strong>：文件名相同、只差结尾版本号的脚本归为一组（如 <code>xinghai-music-sourcev2.3.1.js … v2.3.17.js</code>），每组只收一个，旧版本不下载也不入库。判定时<strong>以页面表格标注的版本号与更新时间为准</strong>，其次看文件名里的版本号，最后用文件更新时间兜底；页面版本与文件名不一致时以页面为准（真站出现过文件名写 v2.3.17、实际是 v3.2.17）。一组内既分不出版本也分不出时间的，全部保留，交给内容指纹去重裁决。</span></label>
+        </div>
+        <p class="hint" style="margin-top:2px">这是<strong>全局采集偏好</strong>：手动「爬取仓库」、定时爬取、自动流水线、网页音源站采集都读这个开关，并非只对定时任务生效；取消勾选后，任何来源的多版本候选都会完整保留。</p>
         <div id="repoList" class="repo-list"></div>
         <div class="repo-add">
           <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo 或网页音源站网址（https://…），可多行 / 逗号批量">

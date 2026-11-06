@@ -1,6 +1,6 @@
 'use strict'
 /**
- * v1.10.2 回归：登录层 hidden 属性被 CSS 覆盖导致「登录后页面没反应」。
+ * v1.10.1-beta.2 回归：登录层 hidden 属性被 CSS 覆盖导致「登录后页面没反应」。
  *
  * 根因：index.html 用 HTML `hidden` 属性控制显隐，而 .auth-layer 自带
  * `display:flex`（作者样式）。UA 的 `[hidden]{display:none}` 优先级低于作者样式，
