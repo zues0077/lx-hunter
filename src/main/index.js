@@ -477,7 +477,7 @@ ipcMain.handle('db:import', guard(async () => {
   return { imported: true, summary, path: res.filePaths[0] }
 }))
 
-// 导入单个音源（v1.10.0）：选一个 .js 文件入库并标记「私人音源」（不参与去重与自动删除）
+// 导入单个音源：选一个 .js 文件入库并标记「私人音源」（不参与去重与巡检，可手动检测 / 灌入）
 ipcMain.handle('source:importSingle', guard(async () => {
   const res = await dialog.showOpenDialog(win, {
     title: '导入单个音源（标记私人音源）',
@@ -490,7 +490,7 @@ ipcMain.handle('source:importSingle', guard(async () => {
   const name = path.basename(file)
   const r = store.addPrivateSource(name, code)
   pushLog({
-    msg: `${r.added ? '已导入私人音源' : '已更新私人音源（重新导入）'}「${r.entry.name}」（不参与去重与自动删除）`,
+    msg: `${r.added ? '已导入私人音源' : '已更新私人音源（重新导入）'}「${r.entry.name}」（不参与去重与巡检，可手动检测 / 灌入）`,
     module: '音源库', level: 'info', at: Date.now()
   })
   return { imported: true, added: r.added, updated: r.updated, name: r.entry.name, path: file }

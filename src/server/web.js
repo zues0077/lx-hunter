@@ -630,12 +630,12 @@ route('POST', '/api/auth/password', guard(async (req, res, ctx) => {
 
 // ---------------- 单个音源导入（v1.10.0，标记私人） ----------------
 // 需求：音源库支持导入单个 .js 音源文件，导入即标「私人音源」——
-// 不参与去重废弃、不被巡检自动删除（保护规则见 hunter.js / store.addPrivateSource）。
+// 不参与去重废弃、也不参与健康巡检（保护规则见 hunter.js buildPatrolItems / store.addPrivateSource）。
 route('POST', '/api/source/import-single', guard(async (req, res, ctx) => {
   const b = ctx.body || {}
   const r = store.addPrivateSource(b.name, b.code)
   pushLog({
-    msg: `${r.added ? '已导入私人音源' : '已更新私人音源（重新导入）'}「${r.entry.name}」（不参与去重与自动删除）`,
+    msg: `${r.added ? '已导入私人音源' : '已更新私人音源（重新导入）'}「${r.entry.name}」（不参与去重与巡检，可手动检测 / 灌入）`,
     module: '音源库', level: 'info', at: Date.now()
   })
   return { imported: true, added: r.added, updated: r.updated, entry: Object.assign({}, r.entry, { code: undefined }) }

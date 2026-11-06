@@ -307,7 +307,8 @@ class Store {
   /**
    * 导入单个音源并标记「私人」（v1.10.0）：
    *  - id 固定为 private::<文件名>，repo 标「私人音源」，条目带 private:true；
-   *  - 私人源受保护：不参与去重废弃、不被巡检自动删除（见 hunter.js）；
+   *  - 私人源受保护：不参与去重废弃，且完全不参与健康巡检（不重测、不累计失效、
+   *    不自动禁用/删除，见 hunter.js buildPatrolItems）；用户仍可手动检测与灌入；
    *  - 同名（同文件名）重复导入 = 更新：换 code/hash、重置检测结果，保留原 addedAt。
    * @param {string} name 文件名（如 xxx.js，可不带扩展名）
    * @param {string} code 脚本全文

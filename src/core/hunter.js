@@ -160,6 +160,39 @@ function patrolAutoDeleteWanted(cfg, streak) {
   return Number(streak) >= deleteThreshold
 }
 
+/**
+ * 构建本次健康巡检的队列（v1.10.2 抽成纯函数，便于回归测试）。
+ *
+ * 私人音源（private:true，用户「导入单个音源」入库的个人脚本）**完全不参与巡检**：
+ * 不下载/沙箱重测、不累计 patrolFailStreak、不写 lastPatrol、不自动禁用/删除/恢复，
+ * 也不计入巡检统计。理由：私人脚本没有可信远端地址，系统定期重测既不必要，
+ * 还可能因临时网络/接口波动把它误判失效并自动禁用。用户仍可在音源库手动点
+ * 「检测 / 检测并灌入」主动验证自己的脚本（那是用户显式发起，不属巡检）。
+ *
+ * 其余过滤口径保持不变：只巡检「本工具灌入 / 同步纳入、服务端仍存在、
+ * 本地有脚本地址」的音源；服务端原生音源（无本地记录或 url 为空且无本地正文）跳过。
+ *
+ * @param {object} imported store.imported（srcId -> { lxId, ... }）
+ * @param {object} sources store.db.sources（srcId -> entry）
+ * @param {Set<string>|Array<string>} aliveLxIds 服务端现存的 lxId
+ * @returns {Array<{srcId:string, e:object, rec:object}>}
+ */
+function buildPatrolItems(imported, sources, aliveLxIds) {
+  const alive = aliveLxIds instanceof Set ? aliveLxIds : new Set(aliveLxIds || [])
+  const items = []
+  for (const [srcId, rec] of Object.entries(imported || {})) {
+    if (!rec || !rec.lxId || !alive.has(rec.lxId)) continue   // 服务端已不在（被手动删除）
+    const e = (sources || {})[srcId]
+    if (!e) continue
+    if (e.private) continue                                   // v1.10.2：私人音源不参与巡检
+    // 无脚本地址的跳过：手动灌入无本地记录，或服务端原生音源未留存 sourceUrl。
+    // 本地存有正文（code）的非私人条目仍可直接复测，不跳过。
+    if (!e.url && typeof e.code !== 'string') continue
+    items.push({ srcId, e, rec })
+  }
+  return items
+}
+
 class Hunter {
   constructor(store, emit) {
     this.store = store
@@ -1847,15 +1880,11 @@ class Hunter {
     // 身份口径自检：admin 等身份写的平台停用，LX 端用公开列表查看时看不到（假性不同步）
     const idNote = identityMismatch(cfg, serverList)
     if (idNote) this.log(idNote, '巡检', 'warn')
-    const items = []
-    for (const [srcId, rec] of Object.entries(this.store.imported || {})) {
-      if (!rec || !rec.lxId || !aliveLxIds.has(rec.lxId)) continue   // 服务端已不在（被手动删除）
-      const e = this.store.db.sources[srcId]
-      // 无脚本地址的跳过：手动灌入无本地记录，或服务端原生音源未留存 sourceUrl（无法下载重测）。
-      // 例外：私人音源（v1.10.0）正文随条目保存（url 为空），可直接复用 code 重测，不跳过。
-      if (!e || (!e.url && typeof e.code !== 'string')) continue
-      items.push({ srcId, e, rec })
-    }
+    const items = buildPatrolItems(this.store.imported, this.store.db.sources, aliveLxIds)
+    // 私人音源由 buildPatrolItems 整体排除；这里只做一次可见提示，避免用户以为「巡检漏了我的源」。
+    const privateSkipped = Object.keys(this.store.imported || {})
+      .filter(srcId => { const e = this.store.db.sources[srcId]; return e && e.private }).length
+    if (privateSkipped) this.log(`已跳过 ${privateSkipped} 个私人音源（不参与巡检，可在音源库手动检测）`, '巡检')
     if (!items.length) {
       this.log('没有可巡检的已灌入音源（仅支持「本工具灌入且本地有对应记录」的音源）', '巡检', 'warn')
       return { ok: 0, disabled: 0, unknown: 0, total: 0 }
@@ -1963,6 +1992,8 @@ class Hunter {
           // 私人音源（v1.10.0）绝不自动删除：用户手动导入的个人源，失效了也只禁用，本体留在库里。
           // （服务端侧删除同样跳过——私人源常由用户直接在平台上维护，自动删容易误伤。）
           const streak = Number(rec.patrolFailStreak) || 0
+          // !e.private 为纵深防御：buildPatrolItems 已在队列层把私人源全部排除，
+          // 这里再守一次，防止将来有人从别的入口直接塞条目进来时被误删。
           const wantDelete = patrolAutoDeleteWanted(cfg, streak) && !e.private
           if (wantDelete) {
             try {
@@ -2173,4 +2204,4 @@ class Hunter {
   }
 }
 
-module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildRepoSeeds }
+module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildPatrolItems, buildRepoSeeds }

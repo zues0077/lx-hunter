@@ -1285,8 +1285,8 @@ function apiAliveBadge(e) {
 function rowHtml(e) {
   const vt = e.validTier ? `<span class="vt vt-${e.validTier}" title="探针置信：${vtLabel(e.validTier)}">${vtLabel(e.validTier)}</span>` : ''
   const al = apiAliveBadge(e)
-  // 私人音源（v1.10.0）：手动导入的个人源，不参与去重废弃、不被巡检自动删除
-  const priv = e.private ? '<span class="badge private" title="私人音源：手动导入，不参与去重废弃，也不会被巡检自动删除（失效时仅禁用）">私人</span>' : ''
+  // 私人音源：手动导入的个人源，不参与去重废弃，也不参与健康巡检（可手动检测/灌入）
+  const priv = e.private ? '<span class="badge private" title="私人音源：手动导入，不参与去重废弃，也不参与健康巡检（不会被自动重测、禁用或删除）；可在音源库手动检测 / 灌入">私人</span>' : ''
   return `
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
     <td><span class="nm">${esc(e.scriptName || e.name)}</span>${priv}
@@ -2572,7 +2572,7 @@ $('btnImportSingle').addEventListener('click', async () => {
   if (!r.ok) return toast('导入失败: ' + (r.error || '未知错误'), 'err')
   if (!r.data || !r.data.imported) return
   const d = r.data
-  toast(`${d.updated ? '已更新私人音源' : '已导入私人音源'}「${d.entry ? d.entry.name : d.name}」（不参与去重与自动删除），可在音源库里检测 / 灌入`, 'ok')
+  toast(`${d.updated ? '已更新私人音源' : '已导入私人音源'}「${d.entry ? d.entry.name : d.name}」（不参与去重与巡检），可在音源库里手动检测 / 灌入`, 'ok')
   state.selected.clear()
   state.page = 1
   loadSources()

@@ -419,6 +419,7 @@
         </div>
         <p class="hint"><strong>「启用定时巡检」就是定时巡检的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次巡检是否已够间隔」，够了才真正开跑 —— <strong>实际触发比设定间隔最多晚 1 分钟</strong>，且<strong>软件必须保持运行</strong>。</p>
         <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
+        <p class="hint"><strong>私人音源不参与巡检</strong>：用「导入单个音源」加入的个人脚本不会被自动重测、累计失效次数，也不会被巡检自动禁用或删除；要验证它请到音源库手动点「检测」。</p>
       </div>
 
       <div class="card">
@@ -473,7 +474,7 @@
           <div class="data-block-title">音源库</div>
           <div class="row-form">
             <button class="btn ghost" id="btnImport">导入音源库（合并检测结果）</button>
-            <button class="btn ghost" id="btnImportSingle" title="选择一个 .js 音源脚本文件导入音源库，自动标记「私人音源」：不参与去重废弃、不被巡检自动删除">导入单个音源（标记私人）</button>
+            <button class="btn ghost" id="btnImportSingle" title="选择一个 .js 音源脚本文件导入音源库，自动标记「私人音源」：不参与去重废弃，也不参与健康巡检（可手动检测 / 灌入）">导入单个音源（标记私人）</button>
             <button class="btn ghost" id="btnExportUsable" title="把「检测可用」的音源（含检测结果与内容指纹）导出为 JSON，可导入到其他机器或直接灌入">导出有效音源</button>
             <button class="btn danger-ghost" id="btnClearDb">清空音源库</button>
             <button class="btn ghost" id="btnOpenData" style="margin-left:auto">打开数据目录</button>
@@ -559,6 +560,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=46"></script>
-<script src="app.js?v=46"></script>
+<script src="app.js?v=47"></script>
 </body>
 </html>
