@@ -9,10 +9,11 @@
  * 因此 index.html 可以无条件引用，桌面版行为不受影响。
  */
 (function () {
-  // Web/Docker 版标记：桌面版（window.api 已由 preload 注入）走不到这里。
-  // app.js 据此决定要不要跑登录流程（桌面版本地使用，无需登录）。
+  // Electron 桌面版：preload 已注入，保持原样并立即让位。
+  // 注意 LXH_WEB 标记必须放在 return 之后，否则桌面版也会被误标成 Web 版。
+  if (window.api) return
+  // Web/Docker 版标记：app.js 据此决定要不要跑登录流程（桌面版本地使用，无需登录）。
   window.LXH_WEB = true
-  if (window.api) return // Electron 桌面版：preload 已注入，保持原样
 
   async function call(url, body) {
     const opt = body === undefined

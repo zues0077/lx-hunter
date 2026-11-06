@@ -1,3 +1,9 @@
+/* v1.10.2：HTML hidden 属性必须能盖过作者样式的 display。
+   登录层 .auth-layer 自带 display:flex，若不显式声明带 !important 的 hidden 规则，
+   UA 默认样式会被作者样式覆盖，导致登录层永远盖住页面、hideAuth() 只改属性却毫无视觉变化
+   （登录后看起来「没反应」）。对 .auth-layer/.toast/.account-form 等一律生效。 */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #14161c;
   --bg-2: #191c24;

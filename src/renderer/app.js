@@ -2661,7 +2661,8 @@ async function renderAuthCard() {
   if (!st.ok) return
   const me = st.data && st.data.loggedIn ? st.data.user : null
   authMe = me
-  $('btnLogout').hidden = !me
+  // 侧边栏与设置页各有一个退出按钮（id 不可重复），两者都要跟着登录态显隐
+  for (const id of ['btnLogout', 'btnLogoutTop']) { const b = $(id); if (b) b.hidden = !me }
   $('btnPwdOpen').hidden = !me
   $('pwdForm').hidden = true
   const card = $('userList')
@@ -2708,11 +2709,17 @@ $('btnUserAdd').addEventListener('click', async () => {
   renderAuthCard()
 })
 
-$('btnLogout').addEventListener('click', async () => {
-  await api.authLogout()
-  toast('已退出登录', 'ok')
-  showAuth('login')
-})
+// 侧边栏（btnLogoutTop）与设置页（btnLogout）两个退出按钮都要绑定
+for (const id of ['btnLogout', 'btnLogoutTop']) {
+  const b = $(id)
+  if (!b) continue
+  b.addEventListener('click', async () => {
+    if (!window.LXH_WEB || !api.authLogout) return // 桌面版无登录体系
+    await api.authLogout()
+    toast('已退出登录', 'ok')
+    showAuth('login')
+  })
+}
 
 $('btnPwdOpen').addEventListener('click', () => { $('pwdForm').hidden = false })
 $('btnPwdCancel').addEventListener('click', () => { $('pwdForm').hidden = true })
