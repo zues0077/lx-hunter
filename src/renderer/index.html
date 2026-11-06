@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=11">
-<script src="auth-bg.js?v=1"></script>
+<link rel="stylesheet" href="styles.css?v=12">
+<script src="auth-bg.js?v=2"></script>
 </head>
 <body>
 <div class="app">
@@ -90,6 +90,7 @@
           <button class="btn ghost" id="btnHashDedupe" title="只下载并计算内容指纹（不进沙箱），先按内容去重，检测时直接跳过重复项">快速去重（内容指纹）</button>
           <button class="btn ghost" id="btnUndedupe" title="把被判为重复的条目全部恢复为候选（保留检测结果，可重新去重）">撤销去重</button>
           <button class="btn ghost" id="btnFullPlat" title="对已可用的音源跑「全平台完整检测」：逐个平台真实取链，补齐快速模式下没测的平台">补全平台覆盖</button>
+          <button class="btn danger-ghost" id="btnDeleteSel" title="把勾选的音源从本地音源库删除（不影响服务端已灌入的脚本）；删掉的条目会记入「不再自动采集」名单，可在设置页清除记录后重新爬取">删除选中</button>
           <button class="btn ghost" id="btnClearSel">清空选择</button>
         </div>
         <div class="plat-legend muted">
@@ -481,6 +482,13 @@
             <button class="btn ghost" id="btnOpenData" style="margin-left:auto">打开数据目录</button>
           </div>
           <p class="hint" style="margin-top:4px">「导入单个音源」适合收录你自己收藏的脚本：导入后在音源库列表显示「私人」徽章，可直接检测 / 灌入；同名重复导入视为更新（旧检测结果重置）。</p>
+
+          <div class="data-block-title" style="margin-top:12px">手动删除音源<span class="data-block-sub">在「音源库」工具栏勾选条目后点「删除选中」</span></div>
+          <div class="row-form">
+            <span class="muted" id="deletedInfo" title="被手动删除的音源会记入名单，后续自动爬取 / 采集站不再把它们加回来">删除记录：读取中…</span>
+            <button class="btn ghost" id="btnClearDeleted" title="清除名单后，这些音源可以在下一次自动爬取时重新被收录">清除删除记录</button>
+          </div>
+          <p class="hint" style="margin-top:4px">「删除选中」只移除本地音源库里的条目，<strong>不会删除已灌入到服务平台上的脚本</strong>（要撤掉请用「已灌入」页的删除）。被删条目会暂时记入名单，避免下一轮自动采集立刻加回；清除名单后重新爬取、或导入含该条目的音源库 JSON，即可恢复。</p>
         </div>
 
         <div class="data-block">
@@ -573,19 +581,21 @@
     </div>
     <p class="auth-bg-tip">挑一套配色，或用自己的图片。设置只保存在当前浏览器，不影响其他人。</p>
     <div class="auth-bg-swatches">
-      <button type="button" class="auth-bg-swatch sw-aurora" data-bg="aurora" aria-pressed="true"><i></i><span>极光</span></button>
-      <button type="button" class="auth-bg-swatch sw-dawn" data-bg="dawn" aria-pressed="false"><i></i><span>暖阳</span></button>
+      <button type="button" class="auth-bg-swatch sw-aurora" data-bg="aurora" aria-pressed="false"><i></i><span>极光</span></button>
+      <button type="button" class="auth-bg-swatch sw-dawn" data-bg="dawn" aria-pressed="true"><i></i><span>暖阳</span></button>
       <button type="button" class="auth-bg-swatch sw-mint" data-bg="mint" aria-pressed="false"><i></i><span>青碧</span></button>
       <button type="button" class="auth-bg-swatch sw-night" data-bg="night" aria-pressed="false"><i></i><span>星夜</span></button>
       <button type="button" class="auth-bg-swatch sw-plain" data-bg="plain" aria-pressed="false"><i></i><span>纯净</span></button>
     </div>
     <div class="auth-bg-custom">
-      <label class="auth-bg-label" for="authBgFile">本地图片（自动压缩，不会上传）</label>
+      <label class="auth-bg-label" for="authBgFile">本地图片</label>
       <input class="auth-bg-file" type="file" id="authBgFile" accept="image/*">
-      <label class="auth-bg-label" for="authBgUrl">或填写图片地址</label>
-      <input class="input" id="authBgUrl" type="url" placeholder="https://example.com/bg.jpg" autocomplete="off" spellcheck="false">
+      <label class="auth-bg-label" for="authBgUrl">图片地址或随机图接口</label>
+      <input class="input" id="authBgUrl" type="url" placeholder="https://example.com/random.php?type=bg" autocomplete="off" spellcheck="false">
+      <p class="auth-bg-note">支持带参数的随机图接口与跳转地址，每次打开登录页自动换一张。本地图片会自动压缩，偏好只存在当前浏览器。</p>
       <div class="auth-bg-ops">
         <button class="btn sm" type="button" id="btnAuthBgApply">应用地址</button>
+        <button class="btn sm ghost" type="button" id="btnAuthBgNext">换一张</button>
         <button class="btn sm ghost" type="button" id="btnAuthBgReset">恢复默认</button>
       </div>
       <p class="auth-bg-msg" id="authBgMsg"></p>
@@ -595,7 +605,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=46"></script>
-<script src="app.js?v=47"></script>
+<script src="web-bridge.js?v=47"></script>
+<script src="app.js?v=48"></script>
 </body>
 </html>

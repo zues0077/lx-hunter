@@ -366,8 +366,9 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
   position: fixed; inset: 0; z-index: 999;
   display: flex; align-items: center; justify-content: center;
   padding: 24px; overflow: hidden;
-  /* 预设只改色相 --auth-h1/--auth-h2；明度固定深色，登录页在任何主题下都是同一套观感。 */
-  --auth-h1: 222; --auth-h2: 268; --auth-l: 13%; --auth-s: 48%;
+  /* 预设只改色相 --auth-h1/--auth-h2；明度固定深色，登录页在任何主题下都是同一套观感。
+     这里的默认值 = 暖阳，保证 JS 执行前首屏也是暖阳，不会先闪一下极光。 */
+  --auth-h1: 20; --auth-h2: 334; --auth-l: 13%; --auth-s: 52%;
   --auth-grid: rgba(255,255,255,.055);
   /* 登录层是独立全屏门面：默认背景（含卡片）固定为深色，不随主界面浅色主题变白。
      用户 2026-11-06 指定以「极光深色渐变」为默认；只有「纯净」预设会回到主题原色。 */
@@ -483,7 +484,8 @@ html[data-theme="light"] .auth-bg-toggle:hover { background: #fff; }
   font-family: inherit; font-size: 11px; cursor: pointer;
 }
 .auth-bg-custom .input { width: 100%; background: var(--card-2); }
-.auth-bg-ops { display: flex; gap: 8px; margin-top: 10px; }
+.auth-bg-note { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.auth-bg-ops { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .auth-bg-msg { margin: 8px 0 0; min-height: 15px; color: var(--accent); font-size: 11px; }
 @media (max-width: 520px) {
   .auth-bg-toggle { right: 12px; bottom: 12px; }

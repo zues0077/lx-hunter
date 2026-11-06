@@ -135,6 +135,8 @@ class Store {
     this.db = this._read(this.dbFile) || { sources: {}, lastCrawl: 0, patrol: { lastRun: 0 } }
     if (!this.db.sources) this.db.sources = {}
     if (!this.db.patrol) this.db.patrol = { lastRun: 0 }
+    // v1.10.2 手动删除记录：被删掉的 id 不再由自动采集加回（见 removeSources）
+    if (!Array.isArray(this.db.deletedIds)) this.db.deletedIds = []
     // 兜底：清理进程中断残留的「检测中」标记
     for (const k of Object.keys(this.db.sources)) delete this.db.sources[k].checking
     this.imported = this._read(this.importedFile) || {}
@@ -231,7 +233,7 @@ class Store {
 
   addSources(items) {
     let added = 0
-    for (const it of items) {
+    for (const it of this._undeleted(items)) {
       if (!this.db.sources[it.id]) { this.db.sources[it.id] = it; added++ }
     }
     return added
@@ -252,7 +254,7 @@ class Store {
     const incremental = !opts || opts.incremental !== false
     const res = { added: 0, updated: 0, skipped: 0 }
     if (!incremental) return this._addCount(items, res)
-    for (const it of items || []) {
+    for (const it of this._undeleted(items)) {
       const cur = this.db.sources[it.id]
       if (!cur) { this.db.sources[it.id] = it; res.added++; continue }
       let changed = false
@@ -293,7 +295,7 @@ class Store {
   }
 
   _addCount(items, res) {
-    for (const it of items || []) {
+    for (const it of this._undeleted(items)) {
       if (!this.db.sources[it.id]) { this.db.sources[it.id] = it; res.added++ }
       else res.skipped++
     }
@@ -302,7 +304,58 @@ class Store {
 
   getSources() { return Object.values(this.db.sources) }
 
-  clearSources() { this.db.sources = {}; this.saveDb() }
+  /** 手动删除记录（不再自动采集名单）的快照，避免调用方直接改内部数组。 */
+  deletedIds() { return Array.isArray(this.db.deletedIds) ? this.db.deletedIds.slice() : [] }
+
+  isDeleted(id) {
+    return Array.isArray(this.db.deletedIds) && this.db.deletedIds.indexOf(id) >= 0
+  }
+
+  /** 自动入库统一过滤：被用户手动删掉的 id 不再由爬取 / 采集站 / 服务端同步加回。 */
+  _undeleted(items) {
+    const gone = this.deletedIds()
+    if (!gone.length) return items || []
+    const set = new Set(gone)
+    return (items || []).filter(it => it && it.id && !set.has(it.id))
+  }
+
+  /**
+   * 手动删除音源（v1.10.2）：按 id 从本地音源库移除，并记入「不再自动采集」名单。
+   *  - 只动本地库：服务端上已灌入的脚本不受影响，要撤掉请用「已灌入」页的删除；
+   *  - 保留 imported 账本（它描述的是服务端状态）；本地条目没了以后，巡检队列里
+   *    取不到 sources[srcId] 会自动跳过，不会把已删条目当作待巡检目标；
+   *  - 记入 deletedIds 后，runCrawl / 采集站 / 非增量合并都不会把它加回来；
+   *  - 恢复途径：导入音源库 JSON（mergeFrom 自动解除）、重新导入同名私人源，
+   *    或 clearDeletedIds() 清空记录后重新爬取。
+   * @returns {{deleted:number, missing:string[], blocked:number}}
+   */
+  removeSources(ids) {
+    const list = Array.isArray(ids) ? ids.filter(x => typeof x === 'string' && x).slice(0, 5000) : []
+    if (!list.length) return { deleted: 0, missing: [], blocked: this.deletedIds().length }
+    if (!Array.isArray(this.db.deletedIds)) this.db.deletedIds = []
+    const gone = new Set(this.db.deletedIds)
+    const missing = []
+    let deleted = 0
+    for (const id of new Set(list)) {
+      if (!this.db.sources[id]) { missing.push(id); continue }
+      delete this.db.sources[id]
+      if (!gone.has(id)) { this.db.deletedIds.push(id); gone.add(id) }
+      deleted++
+    }
+    if (deleted) this.saveDb()
+    return { deleted, missing, blocked: this.db.deletedIds.length }
+  }
+
+  /** 清空删除记录：这些音源后续可以重新被自动采集收录（不会自动立刻出现）。 */
+  clearDeletedIds() {
+    const cleared = this.deletedIds().length
+    this.db.deletedIds = []
+    if (cleared) this.saveDb()
+    return { cleared }
+  }
+
+  // 整库清空 = 从零开始，连同删除记录一起清掉，否则之后爬取会莫名少几条
+  clearSources() { this.db.sources = {}; this.db.deletedIds = []; this.saveDb() }
 
   /**
    * 导入单个音源并标记「私人」（v1.10.0）：
@@ -345,6 +398,8 @@ class Store {
       // 重复导入视为更新：旧内容换新，检测与可用性重置，废弃标记撤销（内容已是新的）
       if (prev.deprecated) { entry.dupOf = null; entry.dupReason = null }
     }
+    // 手动重新导入同名私人音源 = 明确恢复，解除「不再采集」记录
+    this.db.deletedIds = this.deletedIds().filter(x => x !== id)
     this.db.sources[id] = entry
     this.saveDb()
     return { entry, added: !prev, updated: !!prev }
@@ -360,6 +415,11 @@ class Store {
     if (!data || !Array.isArray(data.sources)) throw new Error('文件格式不正确：缺少 sources 数组')
     const res = { added: 0, updated: 0, copied: 0, importedAdded: 0, importedSkipped: 0, total: 0 }
     res.total = data.sources.length
+    // 用户主动导入音源库 = 明确想恢复：导入文件里出现的 id 一律解除「不再采集」记录，
+    // 否则从备份 JSON 也救不回被手动删掉的条目。
+    const revived = new Set()
+    for (const s of data.sources) if (s && s.id) revived.add(s.id)
+    if (revived.size) this.db.deletedIds = this.deletedIds().filter(id => !revived.has(id))
     // 内容哈希 -> 最佳检测结果（取 checkedAt 最新的）
     const bestByHash = {}
     for (const s of data.sources) {

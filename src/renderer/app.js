@@ -1494,6 +1494,57 @@ $('btnClearSel').addEventListener('click', () => {
   renderTable()
   if (n) toast(`已清空全部勾选（${n} 条）`, 'ok')
 })
+
+// ---------------- 手动删除选中音源（v1.10.2） ----------------
+// 此前只有「清空音源库」（整库）与「已灌入」页的服务端删除，删不掉本地指定的某几条。
+// 语义：只删本地条目；服务端已灌入脚本不动；删掉的 id 记入「不再自动采集」名单，
+// 避免下一轮爬取 / 采集站同步立刻把它们加回来（名单可在设置页清除）。
+async function deleteSelected() {
+  const ids = [...state.selected]
+  if (!ids.length) return toast('先在表格里勾选要删除的音源，再点「删除选中」', 'info')
+  const picked = state.sources.filter(e => ids.indexOf(e.id) >= 0)
+  const priv = picked.filter(e => e.private).length
+  const names = picked.slice(0, 4).map(e => e.scriptName || e.name || e.id).join('、')
+  const more = picked.length > 4 ? ` 等 ${picked.length} 条` : ''
+  const extra = priv ? `（其中 ${priv} 条是私人音源）` : ''
+  if (!confirm(
+    `确定从本地音源库删除 ${ids.length} 条音源${extra}？\n\n` +
+    `${names}${more}\n\n` +
+    '· 只删本地记录，服务端上已灌入的脚本不会被删除（要撤掉请用「已灌入」页的删除）；\n' +
+    '· 删掉的条目会记入「不再自动采集」名单，后续爬取 / 采集站不会立刻加回；\n' +
+    '· 想恢复：设置 → 数据 → 清除删除记录后重新爬取，或导入含该条目的音源库 JSON。\n\n' +
+    '此操作不可撤销（导出的备份文件不受影响）。'
+  )) return
+  const r = await api.dbDelete(ids)
+  if (!r.ok) return toast('删除失败：' + r.error, 'err')
+  const d = r.data || {}
+  for (const id of ids) state.selected.delete(id)
+  state.page = 1
+  await loadSources()
+  await refreshDeletedInfo()
+  toast(`已删除 ${d.deleted || 0} 条音源${d.missing && d.missing.length ? `（${d.missing.length} 条库里已不存在）` : ''}；累计 ${d.blocked || 0} 条不再自动采集`, 'ok')
+}
+$('btnDeleteSel').addEventListener('click', deleteSelected)
+
+/** 设置页「删除记录」计数：Web 与桌面版各有同名 api 实现 */
+async function refreshDeletedInfo() {
+  const el = $('deletedInfo')
+  if (!el) return
+  if (!api.dbDeletedList) { el.textContent = '删除记录：当前版本不支持'; return }
+  const r = await api.dbDeletedList()
+  if (!r.ok) { el.textContent = '删除记录：读取失败'; return }
+  const n = (r.data && Array.isArray(r.data.ids)) ? r.data.ids.length : 0
+  el.textContent = n ? `删除记录：${n} 条音源（后续自动采集不再加回）` : '删除记录：暂无'
+  const btn = $('btnClearDeleted')
+  if (btn) btn.disabled = !n
+}
+$('btnClearDeleted').addEventListener('click', async () => {
+  if (!confirm('清除全部删除记录？\n\n之后下一轮自动爬取 / 采集站同步时，这些音源可能被重新收录（不会立刻出现）。')) return
+  const r = await api.dbDeletedClear()
+  if (!r.ok) return toast('清除失败：' + r.error, 'err')
+  await refreshDeletedInfo()
+  toast(`已清除 ${(r.data && r.data.cleared) || 0} 条删除记录`, 'ok')
+})
 $('searchBox').addEventListener('input', e => { state.query = e.target.value; state.page = 1; renderTable() })
 $('hideDeprecated').addEventListener('change', e => { state.hideDeprecated = e.target.checked; state.page = 1; renderTable() })
 document.querySelectorAll('#filterSeg .seg-btn').forEach(b => {
@@ -2764,6 +2815,7 @@ window.addEventListener('lxh-auth-expired', () => showAuth('login', '登录已�
 async function boot() {
   await loadConfig()
   await loadSources()
+  await refreshDeletedInfo() // 设置页「手动删除音源」的名单计数
   syncExportScope()      // 初始化导出范围下拉（首次进入默认跟随页签）
   await autoSyncServer() // 静默同步服务端已有音源 → 纳入「已灌入」管理
   await syncInstalledQuiet()  // 静默对账：统计卡的「已灌入」要显示当前账号服务端上的真实条数

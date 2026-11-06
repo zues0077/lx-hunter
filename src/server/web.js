@@ -443,6 +443,25 @@ route('POST', '/api/db/undedupe', guard(() => {
 }))
 route('POST', '/api/db/clear', guard(() => { store.clearSources(); return { ok: true } }))
 
+// 手动删除选中音源（v1.10.2）：只动本地音源库，不动服务端已灌入的脚本。
+// 被删的 id 记入 store.deletedIds（不再自动采集名单），设置页可一键清除记录。
+route('POST', '/api/db/delete', guard((req, res, ctx) => {
+  const ids = (ctx.body || {}).ids
+  if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')
+  const r = store.removeSources(ids)
+  pushLog({
+    msg: `手动删除音源 ${r.deleted} 条${r.missing.length ? `（${r.missing.length} 条库里已不存在）` : ''}；累计 ${r.blocked} 条不再自动采集`,
+    module: '音源库', level: 'info', at: Date.now()
+  })
+  return r
+}))
+route('POST', '/api/db/deleted/list', guard(() => ({ ids: store.deletedIds() })))
+route('POST', '/api/db/deleted/clear', guard(() => {
+  const r = store.clearDeletedIds()
+  pushLog({ msg: `已清除 ${r.cleared} 条音源删除记录，后续自动采集可重新收录这些音源`, module: '音源库', level: 'info', at: Date.now() })
+  return r
+}))
+
 // 导出：浏览器直接触发文件下载（替代桌面版的保存对话框）
 route('POST', '/api/db/export', guard(async (req, res, ctx) => {
   const sources = store.getSources().map(x => { const c = Object.assign({}, x); delete c.checking; return c })

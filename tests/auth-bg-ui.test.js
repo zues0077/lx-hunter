@@ -63,7 +63,12 @@ function defaultStaysDark(text) {
 }
 const legacyDarkCss = '.auth-layer { --auth-l: 13%; } html[data-theme="light"] .auth-layer { --auth-l: 90%; }'
 ok(!defaultStaysDark(legacyDarkCss), '对照：旧 CSS 在浅色主题下会把默认背景冲淡成白色')
-ok(defaultStaysDark(cssRules), '默认极光背景与卡片固定深色，浅色主题也保持这张图')
+ok(defaultStaysDark(cssRules), '默认暖阳背景与卡片固定深色，浅色主题也保持这张图')
+const layerVars = /\.auth-layer\s*\{([^}]*)\}/.exec(cssRules)[1]
+ok(/--auth-h1\s*:\s*20\s*;/.test(layerVars) && /--auth-h2\s*:\s*334/.test(layerVars) && /--auth-s\s*:\s*52%/.test(layerVars),
+  '首屏默认色相就是暖阳，JS 执行前不会先闪极光')
+ok(/html\[data-auth-bg="dawn"\][^{]*\{[^}]*--auth-h1\s*:\s*20/.test(cssRules), '暖阳预设与默认值一致')
+ok(/html\[data-auth-bg="aurora"\][^{]*\{[^}]*--auth-h1\s*:\s*222/.test(cssRules), '极光仍作为可选预设保留')
 ok(/html\[data-theme="light"\]\[data-auth-bg="plain"\]/.test(cssRules), '「纯净」预设仍可回到浅色主题原色')
 ok(/html\[data-theme="light"\]\s+\.auth-bg-toggle/.test(cssRules), '浅色主题下背景按钮仍清晰可读')
 ok(/html\[data-auth-bg="custom"\][^{]*\{[^}]*--auth-custom/.test(cssRules), '自定义图片走 --auth-custom 变量')
@@ -71,9 +76,12 @@ ok(/html\[data-auth-bg="custom"\]\s+\.auth-layer::after/.test(cssRules), '自定
 ok(/html\[data-auth-bg="plain"\]\s+\.auth-layer::before\s*\{\s*display:\s*none/.test(cssRules), '「纯净」预设关闭网格纹理')
 
 console.log('--- ③ 背景面板 DOM 契约 ---')
-for (const id of ['btnAuthBg', 'authBgPanel', 'btnAuthBgClose', 'authBgFile', 'authBgUrl', 'btnAuthBgApply', 'btnAuthBgReset', 'authBgMsg']) {
+for (const id of ['btnAuthBg', 'authBgPanel', 'btnAuthBgClose', 'authBgFile', 'authBgUrl', 'btnAuthBgApply', 'btnAuthBgNext', 'btnAuthBgReset', 'authBgMsg']) {
   ok(new RegExp('id="' + id + '"').test(html), '面板元素存在：' + id)
 }
+ok(/data-bg="dawn" aria-pressed="true"/.test(html), 'HTML 初始选中态也是暖阳')
+ok(/class="auth-bg-note"/.test(html) && /随机图接口/.test(html), '面板说明写清随机图接口与自动换图')
+ok(!/<label class="auth-bg-label"[^>]*>[^<]*[（(]/.test(html), '功能标签不带括号标注')
 ok(/id="authBgPanel" hidden>/.test(html), '背景面板默认隐藏')
 const ids = [...html.matchAll(/id="([^"]+)"/g)].map(m => m[1])
 const dup = ids.filter((x, i) => ids.indexOf(x) !== i)
@@ -101,8 +109,9 @@ for (const bad of [
 
 console.log('--- ⑤ 偏好持久化容错与首屏应用 ---')
 ok(bg.STORE_KEY === 'lxh-auth-bg', '存储 key 固定')
-ok(JSON.stringify(bg.normalizeBgSetting('{坏 JSON')) === JSON.stringify({ mode: 'preset', preset: 'aurora' }), '坏 JSON 退回默认')
-ok(bg.normalizeBgSetting({ mode: 'preset', preset: '不存在' }).preset === 'aurora', '未知预设退回默认')
+ok(JSON.stringify(bg.normalizeBgSetting('{坏 JSON')) === JSON.stringify({ mode: 'preset', preset: bg.DEFAULT_PRESET }), '坏 JSON 退回默认暖阳')
+ok(bg.DEFAULT_PRESET === 'dawn', '默认预设常量固定为暖阳')
+ok(bg.normalizeBgSetting({ mode: 'preset', preset: '不存在' }).preset === 'dawn', '未知预设退回默认')
 ok(bg.normalizeBgSetting({ mode: 'image', image: 'javascript:1' }).mode === 'preset', '非法图片退回默认')
 ok(bg.normalizeBgSetting({ mode: 'preset', preset: 'mint' }).preset === 'mint', '合法预设保留')
 const saved = bg.normalizeBgSetting({ mode: 'image', image: goodUrl })
@@ -121,10 +130,36 @@ ok(fakeRoot.dataset.authBg === 'custom' && fakeRoot.style._v['--auth-custom'] ==
 bg.applySetting({ mode: 'preset', preset: 'dawn' }, fakeRoot)
 ok(fakeRoot.dataset.authBg === 'dawn' && !fakeRoot.style._v['--auth-custom'], '切回预设时清掉自定义图片')
 
-console.log('--- ⑥ 资源引入与缓存戳 ---')
+console.log('--- ⑥ 随机图 API 地址：带参数、跳转、缓存穿透 ---')
+const apiUrl = 'https://img.xjh.me/random_img.php?type=bg&ctype=acg&return=302'
+ok(bg.sanitizeImageUrl(apiUrl) === apiUrl, '带查询参数的随机图接口原样放行')
+ok(bg.sanitizeImageUrl('http://192.168.1.246:8191/random.php?return=302') !== null, '内网 http 随机图接口也放行')
+for (const bad of [
+  'https://a.com/random.php?x=1");color:red;--y:url(',
+  'https://a.com/random.php?x=1\u0000',
+  'javascript:fetch(1)',
+  'data:text/html;base64,PHNjcmlwdD4='
+]) ok(bg.sanitizeImageUrl(bad) === null, '带参数的注入地址仍被拒绝：' + bad.slice(0, 42))
+ok(bg.cacheBustedUrl('https://a.com/bg.jpg', 'n1') === 'https://a.com/bg.jpg?_lxh=n1', '无参数地址用 ? 追加一次性参数')
+ok(bg.cacheBustedUrl(apiUrl, 'n2') === apiUrl + '&_lxh=n2', '已有参数的地址用 & 追加')
+ok(bg.cacheBustedUrl('https://a.com/p?x=1#top', 'n3') === 'https://a.com/p?x=1&_lxh=n3#top', '参数加在 fragment 之前')
+ok(bg.cacheBustedUrl('data:image/png;base64,iVBORw0KGgo=', 'n1').startsWith('data:'), 'data URL 不追加参数')
+ok(bg.cacheBustedUrl(apiUrl, '') === apiUrl && bg.cacheBustedUrl(apiUrl) === apiUrl, '无 nonce 时保持原地址')
+ok(bg.cacheBustedUrl(apiUrl, 'a b"c') === apiUrl + '&_lxh=a%20b%22c', 'nonce 被编码，不会闭合 CSS 字符串')
+ok(/^[0-9a-z]+$/.test(bg.freshNonce()), 'nonce 只含安全字符')
+ok(bg.forRender({ mode: 'image', image: apiUrl }, 'n9').image === apiUrl + '&_lxh=n9', 'forRender 产出本次渲染地址')
+ok(bg.normalizeBgSetting({ mode: 'image', image: apiUrl }).image === apiUrl, '保存的设置仍是原始地址，不会积累 nonce')
+bg.applySetting({ mode: 'image', image: apiUrl }, fakeRoot, 'n7')
+ok(fakeRoot.style._v['--auth-custom'] === 'url("' + apiUrl + '&_lxh=n7' + '")', '渲染时 CSS 变量写带一次性参数的地址')
+let probeFlag = 'unset'
+bg.probeImage(apiUrl, f => { probeFlag = f })
+ok(probeFlag === null, 'Node 环境无 Image 时探测静默降级，不误报失败')
+
+console.log('--- ⑦ 资源引入与缓存戳 ---')
 const head = html.slice(0, html.indexOf('</head>'))
-ok(/<script src="auth-bg\.js\?v=\d+"><\/script>/.test(head), 'auth-bg.js 在 head 同步引入（首屏不闪默认背景）')
-ok(/styles\.css\?v=(\d+)/.test(head) && Number(/styles\.css\?v=(\d+)/.exec(head)[1]) >= 11, 'CSS 缓存戳已 bump')
+ok(/<script src="auth-bg\.js\?v=(\d+)"><\/script>/.test(head) && Number(/auth-bg\.js\?v=(\d+)/.exec(head)[1]) >= 2,
+  'auth-bg.js 缓存戳已 bump，并在 head 同步引入（首屏不闪默认背景）')
+ok(/styles\.css\?v=(\d+)/.test(head) && Number(/styles\.css\?v=(\d+)/.exec(head)[1]) >= 12, 'CSS 缓存戳已 bump')
 ok(pkg.scripts.test.includes('auth-bg-ui.test.js'), '新测试已注册进 npm test')
 ok(fs.existsSync(path.join(renderer, 'auth-bg.js')), '静态资源 auth-bg.js 存在（web.js 按目录直出 .js）')
 

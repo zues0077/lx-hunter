@@ -438,6 +438,20 @@ ipcMain.handle('db:clear', guard(() => {
   return { ok: true }
 }))
 
+// 手动删除选中音源（v1.10.2）：与 Web 版 /api/db/delete 同签名、同语义
+ipcMain.handle('db:delete', guard((e, ids) => {
+  if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')
+  const r = store.removeSources(ids)
+  hunter.log(`手动删除音源 ${r.deleted} 条；累计 ${r.blocked} 条不再自动采集`, '音源库', 'info')
+  return r
+}))
+ipcMain.handle('db:deleted:list', guard(() => ({ ids: store.deletedIds() })))
+ipcMain.handle('db:deleted:clear', guard(() => {
+  const r = store.clearDeletedIds()
+  hunter.log(`已清除 ${r.cleared} 条音源删除记录，后续自动采集可重新收录这些音源`, '音源库', 'info')
+  return r
+}))
+
 ipcMain.handle('db:export', guard(async (e, ids) => {
   const res = await dialog.showSaveDialog(win, {
     title: '导出音源库（含检测结果，可导入到其他机器）',
