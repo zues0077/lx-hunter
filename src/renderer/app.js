@@ -261,6 +261,7 @@ async function loadConfig() {
   $('cfgCrawlAutoImport').checked = !!c.crawlAutoImport
   $('cfgCrawlHours').value = c.crawlIntervalHours || 24
   $('cfgCrawlSinceDays').value = Math.max(0, Number(c.crawlSinceDays) || 0)
+  $('cfgCrawlLatestOnly').checked = c.crawlLatestOnly !== false
   $('cfgReplaceSame').checked = c.replaceSameNameOnImport !== false
   state.defaultRepos = Array.isArray(meta.defaultRepos) ? meta.defaultRepos
     : (Array.isArray(c.defaultRepos) ? c.defaultRepos : [])
@@ -311,6 +312,7 @@ $('btnSaveCfg').addEventListener('click', async () => {
     crawlAutoImport: $('cfgCrawlAutoImport').checked,
     crawlIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgCrawlHours').value, 10) || 24)),
     crawlSinceDays: Math.max(0, Math.min(365, parseInt($('cfgCrawlSinceDays').value, 10) || 0)),
+    crawlLatestOnly: $('cfgCrawlLatestOnly').checked,
     replaceSameNameOnImport: $('cfgReplaceSame').checked,
     repos: state.config.repos || [],
     searchEnabled: $('cfgSearchEnabled').checked,
@@ -342,9 +344,15 @@ $('btnTestConn').addEventListener('click', () => testConn(true))
 
 // ---------------- 仓库清单管理（v1.9.12：内置/附加/发现三类全部可禁用/删除） ----------------
 // 渲染端无法 require crawler，这里做一个等价的轻量规范化（owner/repo 小写、去协议/路径/.git）。
+// v1.10.0：非 GitHub 的 http(s) 网址原样放行（网页音源站采集，与核心层 normalizeRepo 口径一致）。
 function normRepo(s) {
-  let t = String(s || '').trim().toLowerCase()
-  t = t.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/\.git$/, '')
+  let t = String(s || '').trim()
+  if (/^https?:\/\//i.test(t)) {
+    t = t.replace(/\/+$/, '').replace(/\.git$/i, '')
+    const m = t.replace(/^https?:\/\//i, '').match(/^github\.com[\/:]([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)/i)
+    return m ? (m[1] + '/' + m[2]).toLowerCase() : t
+  }
+  t = t.toLowerCase().replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/\.git$/, '')
     .replace(/github\.com[/:]/, '').replace(/[:/]+$/, '')
   const m = t.match(/^([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/)
   return m ? (m[1] + '/' + m[2]) : null
@@ -364,10 +372,13 @@ function renderRepoList(repos, defaultRepos) {
   box.innerHTML = sorted.map(r => {
     const on = r.enabled !== false
     const o = ORIGIN_LABEL[r.origin] || '附加'
+    // v1.10.0：网址形态的条目是「网页音源站」，加绿色「网页」标记以区分 GitHub 仓库
+    const isWeb = /^https?:\/\//i.test(String(r.repo))
+    const kindTag = isWeb ? '<span class="repo-origin origin-web">网页</span>' : ''
     return `<div class="repo-row" data-repo="${esc(r.repo)}">
       <label class="repo-toggle"><input type="checkbox" class="repo-enabled" ${on ? 'checked' : ''}><span>${on ? '启用' : '已禁用'}</span></label>
       <span class="repo-name">${esc(r.repo)}</span>
-      <span class="repo-origin origin-${esc(r.origin)}">${o}</span>
+      ${kindTag}<span class="repo-origin origin-${esc(r.origin)}">${o}</span>
       <button class="btn btn-sm danger-ghost repo-del" title="从清单移除（内置仓库可「恢复默认」找回）">删除</button>
     </div>`
   }).join('')
@@ -1274,9 +1285,11 @@ function apiAliveBadge(e) {
 function rowHtml(e) {
   const vt = e.validTier ? `<span class="vt vt-${e.validTier}" title="探针置信：${vtLabel(e.validTier)}">${vtLabel(e.validTier)}</span>` : ''
   const al = apiAliveBadge(e)
+  // 私人音源（v1.10.0）：手动导入的个人源，不参与去重废弃、不被巡检自动删除
+  const priv = e.private ? '<span class="badge private" title="私人音源：手动导入，不参与去重废弃，也不会被巡检自动删除（失效时仅禁用）">私人</span>' : ''
   return `
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
-    <td><span class="nm">${esc(e.scriptName || e.name)}</span>
+    <td><span class="nm">${esc(e.scriptName || e.name)}</span>${priv}
         <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span>${vt}${al}</td>
     <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
     <td class="c-repo"><span class="repo">${esc(e.repo)}</span></td>
@@ -2550,6 +2563,20 @@ $('btnImport').addEventListener('click', async () => {
   state.page = 1
   loadSources()
 })
+
+// 导入单个音源（v1.10.0）：选 .js 文件入库并标记「私人音源」
+// （Web 版浏览器选文件上传；桌面版走打开对话框，签名一致无参数）
+$('btnImportSingle').addEventListener('click', async () => {
+  if (!api.sourceImportSingle) return toast('当前版本不支持单个音源导入', 'warn')
+  const r = await api.sourceImportSingle()
+  if (!r.ok) return toast('导入失败: ' + (r.error || '未知错误'), 'err')
+  if (!r.data || !r.data.imported) return
+  const d = r.data
+  toast(`${d.updated ? '已更新私人音源' : '已导入私人音源'}「${d.entry ? d.entry.name : d.name}」（不参与去重与自动删除），可在音源库里检测 / 灌入`, 'ok')
+  state.selected.clear()
+  state.page = 1
+  loadSources()
+})
 $('btnClearDb').addEventListener('click', async () => {
   if (!confirm('清空本地音源库（不影响服务端已灌入的音源）？')) return
   await api.dbClear(); state.selected.clear(); state.page = 1; loadSources(); toast('已清空', 'ok')
@@ -2610,8 +2637,124 @@ function clampPage() {
   if (state.page > total) state.page = total
 }
 
-// ---------------- 启动 ----------------
-;(async function boot() {
+// ---------------- 启动（v1.10.0 登录门控，仅 Web/Docker 版） ----------------
+// Web 版：未登录时盖住整个应用的登录层；首个用户注册管理员；会话过期自动重弹登录。
+// 桌面版（window.api 由 preload 注入，无 window.LXH_WEB）：本地使用，直接进主界面。
+let authMe = null
+
+function showAuth(mode, errText) {
+  const layer = $('authLayer')
+  if (!layer) return
+  layer.hidden = false
+  $('authLoginBox').hidden = mode !== 'login'
+  $('authRegBox').hidden = mode !== 'register'
+  const err = $('authErr')
+  if (errText) { err.textContent = errText; err.hidden = false } else err.hidden = true
+  setTimeout(() => { const el = mode === 'login' ? $('authName') : $('regName'); if (el) el.focus() }, 50)
+}
+
+function hideAuth() { const layer = $('authLayer'); if (layer) layer.hidden = true }
+
+async function renderAuthCard() {
+  if (!window.LXH_WEB || !api.authState) return
+  const st = await api.authState()
+  if (!st.ok) return
+  const me = st.data && st.data.loggedIn ? st.data.user : null
+  authMe = me
+  $('btnLogout').hidden = !me
+  $('btnPwdOpen').hidden = !me
+  $('pwdForm').hidden = true
+  const card = $('userList')
+  const addRow = $('userAddRow')
+  if (!me) { card.innerHTML = '<p class="muted">未登录</p>'; addRow.hidden = true; return }
+  if (!me.admin) {
+    card.innerHTML = `<p class="muted">当前账号：${esc(me.name)}（如需管理账号请联系管理员）</p>`
+    addRow.hidden = true
+    return
+  }
+  const r = await api.authUsers()
+  const users = (r.ok && r.data && r.data.users) ? r.data.users : []
+  card.innerHTML = users.map(u => `<div class="acct-row">
+      <div class="acct-main"><div class="acct-meta"><div class="acct-name">${esc(u.name)} ${u.admin ? '<span class="badge ok">管理员</span>' : ''}${u.name === me.name ? '<span class="badge accent">当前</span>' : ''}</div></div></div>
+      <div class="acct-ops">${u.name !== me.name
+        ? `<button class="btn sm" data-reset="${esc(u.name)}">重置密码</button><button class="btn sm danger-ghost" data-udel="${esc(u.name)}">删除</button>`
+        : ''}</div>
+    </div>`).join('') || '<p class="muted">没有其他账号</p>'
+  addRow.hidden = false
+  card.querySelectorAll('button[data-udel]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm(`确定删除账号「${b.dataset.udel}」？该账号的登录会话立即失效（其灌入记录不受影响）。`)) return
+    const r2 = await api.authUserDelete(b.dataset.udel)
+    if (!r2.ok) return toast('删除失败: ' + r2.error, 'err')
+    toast('已删除账号', 'ok')
+    renderAuthCard()
+  }))
+  card.querySelectorAll('button[data-reset]').forEach(b => b.addEventListener('click', async () => {
+    const np = prompt(`为账号「${b.dataset.reset}」设置新密码（至少 6 位）：`)
+    if (np == null) return
+    const r2 = await api.authUserReset(b.dataset.reset, np)
+    if (!r2.ok) return toast('重置失败: ' + r2.error, 'err')
+    toast('已重置密码', 'ok')
+  }))
+}
+
+$('btnUserAdd').addEventListener('click', async () => {
+  const name = $('userNewName').value.trim()
+  const pwd = $('userNewPwd').value
+  if (!name || !pwd) return toast('请填写账号名与密码', 'warn')
+  const r = await api.authUserAdd(name, pwd, $('userNewAdmin').checked)
+  if (!r.ok) return toast('添加失败: ' + r.error, 'err')
+  $('userNewName').value = ''; $('userNewPwd').value = ''; $('userNewAdmin').checked = false
+  toast(`已添加账号「${name}」`, 'ok')
+  renderAuthCard()
+})
+
+$('btnLogout').addEventListener('click', async () => {
+  await api.authLogout()
+  toast('已退出登录', 'ok')
+  showAuth('login')
+})
+
+$('btnPwdOpen').addEventListener('click', () => { $('pwdForm').hidden = false })
+$('btnPwdCancel').addEventListener('click', () => { $('pwdForm').hidden = true })
+$('btnPwdChange').addEventListener('click', async () => {
+  const oldPwd = $('pwdOld').value, newPwd = $('pwdNew').value
+  if (!oldPwd || !newPwd) return toast('请填写原密码与新密码', 'warn')
+  const r = await api.authPasswordChange(oldPwd, newPwd)
+  if (!r.ok) return toast('修改失败: ' + r.error, 'err')
+  $('pwdOld').value = ''; $('pwdNew').value = ''
+  $('pwdForm').hidden = true
+  toast('密码已修改', 'ok')
+})
+
+// 登录 / 注册按钮（含回车提交）
+async function doAuthLogin() {
+  const name = $('authName').value.trim(), pwd = $('authPwd').value
+  if (!name || !pwd) { showAuth('login', '请输入账号与密码'); return }
+  const r = await api.authLogin(name, pwd)
+  if (!r.ok) { showAuth('login', r.error || '登录失败'); return }
+  hideAuth()
+  renderAuthCard()
+  await boot()
+}
+async function doAuthRegister() {
+  const name = $('regName').value.trim(), pwd = $('regPwd').value
+  if (!name || !pwd) { showAuth('register', '请填写管理员账号与密码'); return }
+  const r = await api.authRegister(name, pwd)
+  if (!r.ok) { showAuth('register', r.error || '注册失败'); return }
+  hideAuth()
+  renderAuthCard()
+  await boot()
+}
+$('btnAuthLogin').addEventListener('click', doAuthLogin)
+$('btnAuthReg').addEventListener('click', doAuthRegister)
+for (const [inp, fn] of [[$('authName'), doAuthLogin], [$('authPwd'), doAuthLogin], [$('regName'), doAuthRegister], [$('regPwd'), doAuthRegister]]) {
+  if (inp) inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') fn() })
+}
+
+// 会话过期：任意接口返回 401（authRequired）时重弹登录层
+window.addEventListener('lxh-auth-expired', () => showAuth('login', '登录已过期，请重新登录'))
+
+async function boot() {
   await loadConfig()
   await loadSources()
   syncExportScope()      // 初始化导出范围下拉（首次进入默认跟随页签）
@@ -2624,5 +2767,23 @@ function clampPage() {
     for (const e of (lr.data || [])) frag.appendChild(logLine(e))
     box.appendChild(frag)
     box.scrollTop = box.scrollHeight
+  }
+}
+
+;(async function start() {
+  if (window.LXH_WEB && api.authState) {
+    const st = await api.authState()
+    const d = (st.ok && st.data) ? st.data : { loggedIn: false, hasUsers: true }
+    if (d.loggedIn) {
+      hideAuth()
+      renderAuthCard()
+      await boot()
+    } else if (d.hasUsers) {
+      showAuth('login')
+    } else {
+      showAuth('register')
+    }
+  } else {
+    await boot()
   }
 })()

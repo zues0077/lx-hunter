@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=8">
+<link rel="stylesheet" href="styles.css?v=9">
 </head>
 <body>
 <div class="app">
@@ -27,6 +27,7 @@
     <div class="sidebar-foot">
       <div class="conn" id="connChip"><span class="dot"></span><span id="connText">未连接</span></div>
       <button class="btn-link" id="themeBtn">切换主题</button>
+      <button class="btn-link" id="btnLogout" hidden>退出登录</button>
       <a class="btn-link gh-link" id="ghLink" href="https://github.com/zues0077/lx-hunter" target="_blank" rel="noopener noreferrer" title="音源猎手源码（GitHub）">⌨ GitHub · lx-hunter</a>
     </div>
   </aside>
@@ -279,6 +280,33 @@
       </div>
 
       <div class="card">
+        <h3 class="card-title">访问账号（登录）<span class="data-block-sub" style="margin-left:8px">仅 Web/Docker 版</span></h3>
+        <p class="hint" id="authCardHint">未登录时所有功能不可用。首个注册的账号自动成为管理员；管理员可在下方添加 / 删除账号。桌面版（Electron）本地使用，不需要登录。</p>
+        <div id="userList" class="acct-list"></div>
+        <div class="repo-add" id="userAddRow" hidden>
+          <input class="input" id="userNewName" type="text" placeholder="新账号名（2–32 位字母数字下划线中文）" style="max-width:280px">
+          <input class="input" id="userNewPwd" type="password" placeholder="密码（至少 6 位）" style="max-width:220px">
+          <label class="chk inline" style="white-space:nowrap"><input type="checkbox" id="userNewAdmin"><span>管理员</span></label>
+          <button class="btn btn-sm" id="btnUserAdd">添加账号</button>
+        </div>
+        <div class="row-form" style="margin-top:8px">
+          <button class="btn ghost" id="btnPwdOpen" hidden>修改我的密码</button>
+          <button class="btn ghost" id="btnLogout" hidden>退出登录</button>
+        </div>
+        <div class="card account-form" id="pwdForm" hidden>
+          <h4 class="card-title">修改我的密码</h4>
+          <div class="grid-form">
+            <label class="field"><span>原密码</span><input class="input" id="pwdOld" type="password"></label>
+            <label class="field"><span>新密码（至少 6 位）</span><input class="input" id="pwdNew" type="password"></label>
+          </div>
+          <div class="row-form">
+            <button class="btn primary" id="btnPwdChange">修改密码</button>
+            <button class="btn ghost" id="btnPwdCancel">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <h3 class="card-title">GitHub 爬取</h3>
         <div class="grid-form">
           <label class="field"><span>GitHub Token（可选，提升限额至 5000/小时）</span><input class="input" id="cfgToken" type="password" placeholder="ghp_xxx"></label>
@@ -403,6 +431,9 @@
           <label class="chk"><input type="checkbox" id="cfgCrawlOn"><span>启用定时爬取（按上面的间隔自动增量爬取）</span></label>
           <label class="chk"><input type="checkbox" id="cfgCrawlAutoImport"><span><strong>爬取结束后自动灌入</strong>（爬完先检测新音源，再把可用的灌到「灌入目标」账号）</span></label>
         </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgCrawlLatestOnly"><span><strong>只收最新版</strong>：同一音源的多版本候选（如 <code>xinghai-music-sourcev2.3.1.js … v2.3.17.js</code>、<code>xxx-v1.8.js</code>）只保留版本号最高的一个，旧版本不下载不入库。组内分不出版本号或名字太泛（如 <code>6.js</code>）时全部保留，交给内容指纹去重裁决</span></label>
+        </div>
         <p class="hint"><strong>「启用定时爬取」就是定时爬取的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次爬取是否已够间隔」（判据就是上面填的小时数），够了才真正开跑。所以设 2 天就是<strong>每 2 天跑一次</strong>，<strong>实际触发比设定间隔最多晚 1 分钟</strong>——「每分钟」只是核对节奏，不是爬取频率，两者不冲突；同时<strong>软件必须保持运行</strong>，关掉软件就不会跑。下面的「自动灌入」依赖它，上面没勾时不会触发。</p>
         <p class="hint">勾了「爬取结束后自动灌入」后，每轮定时任务变成全自动三连：<strong>增量爬取 → 检测新增/内容变化的音源 → 把通过检测的灌入「灌入目标」账号</strong>。灌入目标与手动「检测并灌入」完全一致（设置里勾了「参与批量灌入」的账号，一个都没勾则用当前选中账号）；已经灌好的不会重复灌，脚本自检名字等保护规则照常生效。全过程在「运行日志」里以「定时」模块记录，可随时点停止按钮中断。</p>
         <p class="hint">定时爬取为<strong>增量模式</strong>：同时读取仓库<strong>文件树</strong>与 <strong>Releases 资产</strong>（lx-ikun-music-sources 等仓库只把音源发在 release 里，旧版本不读 release 永远抓不到）；zip 压缩包自动下载解压。已抓取的按 blob sha / 资产标识判重<strong>跳过不重抓</strong>；内容有变化的标记「有更新」并重置检测结果，重新检测后灌入时按上面「灌入规则」卡片处理同名旧版（LX 里上传同名音源必须先删旧的，需要替换时猎手自动完成这两步；删除会触发服务端短暂重载，批量替换时留意服务端负载）。</p>
@@ -414,11 +445,12 @@
         <p class="hint">内置 38 个 + 你追加的 + 搜索发现的，<strong>全部可勾选「禁用」（本次不爬）或「删除」</strong>。删掉的内置仓库点「恢复默认仓库」即可找回。</p>
         <div id="repoList" class="repo-list"></div>
         <div class="repo-add">
-          <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo，可粘贴多行 / 逗号批量">
+          <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo 或网页音源站网址（https://…），可多行 / 逗号批量">
           <button class="btn btn-sm" id="btnAddRepo">添加</button>
           <button class="btn btn-sm ghost" id="btnRestoreRepos">恢复默认仓库</button>
           <button class="btn btn-sm danger-ghost" id="btnClearDiscovered">清除搜索发现的仓库</button>
         </div>
+        <p class="hint" style="margin-top:4px">除 GitHub 仓库外，也支持粘贴<strong>任意挂音源脚本的网页地址</strong>（如 <code>https://zrcdy.dpdns.org/lx/vers.php</code> 这类「插件下载中心」页面）：爬取时抓取页面里的 .js 直链，逐个甄别后入库。网页站不消耗 GitHub API 配额。列表里显示「网页」标记。</p>
       </div>
 
       <div class="card">
@@ -440,10 +472,12 @@
           <div class="data-block-title">音源库</div>
           <div class="row-form">
             <button class="btn ghost" id="btnImport">导入音源库（合并检测结果）</button>
+            <button class="btn ghost" id="btnImportSingle" title="选择一个 .js 音源脚本文件导入音源库，自动标记「私人音源」：不参与去重废弃、不被巡检自动删除">导入单个音源（标记私人）</button>
             <button class="btn ghost" id="btnExportUsable" title="把「检测可用」的音源（含检测结果与内容指纹）导出为 JSON，可导入到其他机器或直接灌入">导出有效音源</button>
             <button class="btn danger-ghost" id="btnClearDb">清空音源库</button>
             <button class="btn ghost" id="btnOpenData" style="margin-left:auto">打开数据目录</button>
           </div>
+          <p class="hint" style="margin-top:4px">「导入单个音源」适合收录你自己收藏的脚本：导入后在音源库列表显示「私人」徽章，可直接检测 / 灌入；同名重复导入视为更新（旧检测结果重置）。</p>
         </div>
 
         <div class="data-block">
@@ -499,9 +533,31 @@
   </main>
 </div>
 
+<!-- 登录层（v1.10.0，仅 Web/Docker 版）：未登录时盖住整个应用 -->
+<div class="auth-layer" id="authLayer" hidden>
+  <div class="auth-box">
+    <div class="auth-logo">猎</div>
+    <h2 class="auth-title">音源猎手 · Web 版</h2>
+    <!-- 登录 -->
+    <div id="authLoginBox">
+      <label class="field"><span>账号</span><input class="input" id="authName" autocomplete="username"></label>
+      <label class="field"><span>密码</span><input class="input" id="authPwd" type="password" autocomplete="current-password"></label>
+      <button class="btn primary" id="btnAuthLogin" style="width:100%">登录</button>
+    </div>
+    <!-- 首次使用：注册管理员 -->
+    <div id="authRegBox" hidden>
+      <p class="hint">首次使用：先创建管理员账号（之后可在设置页添加更多账号）。</p>
+      <label class="field"><span>管理员账号</span><input class="input" id="regName" autocomplete="username"></label>
+      <label class="field"><span>密码（至少 6 位）</span><input class="input" id="regPwd" type="password" autocomplete="new-password"></label>
+      <button class="btn primary" id="btnAuthReg" style="width:100%">创建并进入</button>
+    </div>
+    <p class="auth-err" id="authErr" hidden></p>
+  </div>
+</div>
+
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=44"></script>
-<script src="app.js?v=44"></script>
+<script src="web-bridge.js?v=45"></script>
+<script src="app.js?v=45"></script>
 </body>
 </html>

@@ -36,6 +36,7 @@ const api = {
   dbUndedupe: () => ipcRenderer.invoke('db:undedupe'),
   dbExport: (ids) => ipcRenderer.invoke('db:export', ids),
   dbImport: () => ipcRenderer.invoke('db:import'),
+  sourceImportSingle: () => ipcRenderer.invoke('source:importSingle'),
   sourceValidate: (id) => ipcRenderer.invoke('source:validate', id),
   importUrl: (url, name) => ipcRenderer.invoke('import:url', url, name),
   serviceToggle: (id, enabled, owner) => ipcRenderer.invoke('service:toggle', id, enabled, owner),

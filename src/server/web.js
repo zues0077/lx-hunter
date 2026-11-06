@@ -19,11 +19,46 @@ const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
 const { DEFAULT_REPOS } = require('../core/crawler')
+const { Auth, SESSION_TTL_MS } = require('../core/auth')
 
 const PORT = Number(process.env.PORT || 7970)
 const DATA_DIR = process.env.DATA_DIR || '/data'
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer')
 const MAX_BODY = 192 * 1024 * 1024 // 导入音源库 JSON 可能几十 MB，放宽上限
+
+// ---------------- 访问账号登录（v1.10.0） ----------------
+// 需求：Web/Docker 版不再「局域网裸奔」——用户名+密码多账号登录，未登录一律 401。
+// 除 /api/health 与 /api/auth/* 外的全部 API 都要求有效会话（HttpOnly Cookie 携带 token，
+// SSE/静态页面同源自动带 Cookie，前端无需逐请求塞 header）。
+// 桌面版（Electron）不经 HTTP，不受影响。
+const auth = new Auth(DATA_DIR)
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie || ''
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=')
+    if (i < 0) continue
+    if (part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim())
+  }
+  return null
+}
+
+function setSessionCookie(res, token) {
+  res.setHeader('Set-Cookie',
+    `lxh_token=${encodeURIComponent(token)}; Path=/; HttpOnly; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}; SameSite=Lax`)
+}
+
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', 'lxh_token=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax')
+}
+
+function clientIp(req) {
+  return (req.socket && req.socket.remoteAddress) || ''
+}
+
+function currentUser(req) {
+  return auth.checkSession(readCookie(req, 'lxh_token'))
+}
 
 // ---------------- 基础状态（与桌面版主进程保持一致） ----------------
 let store = null
@@ -518,15 +553,119 @@ route('POST', '/api/service/remove/public', guard(async (req, res, ctx) => {
   })
 }))
 
+// ---------------- 登录（v1.10.0） ----------------
+// 当前会话状态：{ loggedIn, user, hasUsers } —— 前端据此显示登录页/注册首个管理员/正常界面
+route('GET', '/api/auth/state', guard((req) => {
+  const me = currentUser(req)
+  return { loggedIn: !!me, user: me || null, hasUsers: auth.hasUsers() }
+}))
+
+// 首次使用：注册管理员（仅当用户表为空）
+route('POST', '/api/auth/register', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  const user = auth.registerFirst(b.name, b.password)
+  setSessionCookie(res, auth.createSession(user.name))
+  pushLog({ msg: `已创建管理员账号「${user.name}」（首次使用注册）`, module: '登录', level: 'info', at: Date.now() })
+  return { ok: true, user: { name: user.name, admin: true } }
+}))
+
+route('POST', '/api/auth/login', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  if (!auth.hasUsers()) throw new Error('还没有任何账号，请先注册管理员')
+  const user = auth.verify(b.name, b.password, clientIp(req))
+  setSessionCookie(res, auth.createSession(user.name))
+  pushLog({ msg: `账号「${user.name}」已登录`, module: '登录', level: 'info', at: Date.now() })
+  return { ok: true, user }
+}))
+
+route('POST', '/api/auth/logout', guard((req, res) => {
+  auth.destroySession(readCookie(req, 'lxh_token'))
+  clearSessionCookie(res)
+  return { ok: true }
+}))
+
+// 账号管理（仅管理员）
+route('GET', '/api/auth/users', guard((req) => {
+  const me = currentUser(req)
+  if (!me || !me.admin) throw new Error('仅管理员可查看账号列表')
+  return { users: auth.listUsers() }
+}))
+
+route('POST', '/api/auth/users', guard(async (req, res, ctx) => {
+  const me = currentUser(req)
+  if (!me || !me.admin) throw new Error('仅管理员可添加账号')
+  const b = ctx.body || {}
+  const u = auth.addUser(b.name, b.password, b.admin === true)
+  pushLog({ msg: `管理员「${me.name}」已添加账号「${u.name}」${u.admin ? '（管理员）' : ''}`, module: '登录', level: 'info', at: Date.now() })
+  return { ok: true, users: auth.listUsers() }
+}))
+
+route('POST', '/api/auth/users/delete', guard(async (req, res, ctx) => {
+  const me = currentUser(req)
+  if (!me || !me.admin) throw new Error('仅管理员可删除账号')
+  auth.deleteUser((ctx.body || {}).name, me.name)
+  pushLog({ msg: `管理员「${me.name}」已删除账号「${String((ctx.body || {}).name || '')}」`, module: '登录', level: 'info', at: Date.now() })
+  return { ok: true, users: auth.listUsers() }
+}))
+
+// 管理员重置他人密码
+route('POST', '/api/auth/users/reset', guard(async (req, res, ctx) => {
+  const me = currentUser(req)
+  if (!me || !me.admin) throw new Error('仅管理员可重置密码')
+  const b = ctx.body || {}
+  auth.adminReset(b.name, b.password)
+  pushLog({ msg: `管理员「${me.name}」已重置账号「${String(b.name || '')}」的密码`, module: '登录', level: 'info', at: Date.now() })
+  return { ok: true }
+}))
+
+// 自己改密码（需验原密码）
+route('POST', '/api/auth/password', guard(async (req, res, ctx) => {
+  const me = currentUser(req)
+  if (!me) throw new Error('未登录')
+  const b = ctx.body || {}
+  auth.changePassword(me.name, b.oldPassword, b.newPassword)
+  pushLog({ msg: `账号「${me.name}」已修改自己的密码`, module: '登录', level: 'info', at: Date.now() })
+  return { ok: true }
+}))
+
+// ---------------- 单个音源导入（v1.10.0，标记私人） ----------------
+// 需求：音源库支持导入单个 .js 音源文件，导入即标「私人音源」——
+// 不参与去重废弃、不被巡检自动删除（保护规则见 hunter.js / store.addPrivateSource）。
+route('POST', '/api/source/import-single', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  const r = store.addPrivateSource(b.name, b.code)
+  pushLog({
+    msg: `${r.added ? '已导入私人音源' : '已更新私人音源（重新导入）'}「${r.entry.name}」（不参与去重与自动删除）`,
+    module: '音源库', level: 'info', at: Date.now()
+  })
+  return { imported: true, added: r.added, updated: r.updated, entry: Object.assign({}, r.entry, { code: undefined }) }
+}))
+
 // 打开数据目录：Web 版无「资源管理器」概念，返回路径供展示/复制
 route('POST', '/api/datadir', guard(() => ({ path: DATA_DIR })))
 
 // ---------------- HTTP 服务 ----------------
+// 登录门禁（v1.10.0）：/api/health 与 /api/auth/* 公开，其余 /api/*（含 SSE）一律要求会话；
+// 静态页面公开（登录界面就在 index.html 里，登录后才有数据可见）。
+function isPublicApi(pathname) {
+  if (pathname === '/api/health') return true
+  if (pathname.startsWith('/api/auth/')) return true
+  return false
+}
+
 const server = http.createServer(async (req, res) => {
   let pathname = '/'
   try { pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname) } catch (e) {}
   try {
-    if (req.method === 'GET' && pathname === '/api/events') return sseHandler(req, res)
+    if (req.method === 'GET' && pathname === '/api/events') {
+      if (!currentUser(req)) return sendJson(res, 401, { ok: false, error: '未登录或登录已过期', authRequired: true })
+      return sseHandler(req, res)
+    }
+    if (pathname.startsWith('/api/')) {
+      if (!isPublicApi(pathname) && !currentUser(req)) {
+        return sendJson(res, 401, { ok: false, error: '未登录或登录已过期', authRequired: true })
+      }
+    }
     for (const r of routes) {
       if (r.method !== req.method || r.pattern !== pathname) continue
       let raw = null

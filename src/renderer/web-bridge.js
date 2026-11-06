@@ -9,6 +9,9 @@
  * 因此 index.html 可以无条件引用，桌面版行为不受影响。
  */
 (function () {
+  // Web/Docker 版标记：桌面版（window.api 已由 preload 注入）走不到这里。
+  // app.js 据此决定要不要跑登录流程（桌面版本地使用，无需登录）。
+  window.LXH_WEB = true
   if (window.api) return // Electron 桌面版：preload 已注入，保持原样
 
   async function call(url, body) {
@@ -18,7 +21,14 @@
     const r = await fetch(url, opt)
     const ct = r.headers.get('content-type') || ''
     if (!ct.includes('application/json')) return { ok: false, error: '服务端返回了非 JSON 响应（HTTP ' + r.status + '）' }
-    return await r.json()
+    const j = await r.json()
+    // 会话过期广播（v1.10.0）：任意接口 401 时通知 app.js 重新弹出登录层，
+    // 并断开 SSE（重连后的 EventSource 才会带上重新登录的 Cookie）
+    if (r.status === 401 && j && j.authRequired) {
+      window.dispatchEvent(new CustomEvent('lxh-auth-expired'))
+      if (es) { es.close(); es = null }
+    }
+    return j
   }
 
   // SSE 单例：log 与 event 两个通道复用同一条连接
@@ -122,7 +132,39 @@
     })
   }
 
+  // 单个音源导入（v1.10.0）：浏览器选 .js 文件读原文 POST，服务端入库并标「私人音源」
+  function sourceImportSingle() {
+    return new Promise(resolve => {
+      const inp = document.createElement('input')
+      inp.type = 'file'
+      inp.accept = '.js,application/javascript,text/javascript'
+      inp.onchange = async () => {
+        const f = inp.files && inp.files[0]
+        if (!f) return resolve({ ok: true, data: { imported: false } })
+        try {
+          const code = await f.text()
+          const r = await fetch('/api/source/import-single', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: f.name, code })
+          })
+          resolve(await r.json())
+        } catch (e) { resolve({ ok: false, error: String((e && e.message) || e) }) }
+      }
+      inp.click()
+    })
+  }
+
   window.api = {
+    // 登录（v1.10.0）：会话经 HttpOnly Cookie 携带，前端不需要存 token
+    authState: () => call('/api/auth/state'),
+    authRegister: (name, password) => call('/api/auth/register', { name, password }),
+    authLogin: (name, password) => call('/api/auth/login', { name, password }),
+    authLogout: () => call('/api/auth/logout', {}),
+    authUsers: () => call('/api/auth/users'),
+    authUserAdd: (name, password, admin) => call('/api/auth/users', { name, password, admin }),
+    authUserDelete: name => call('/api/auth/users/delete', { name }),
+    authUserReset: (name, password) => call('/api/auth/users/reset', { name, password }),
+    authPasswordChange: (oldPassword, newPassword) => call('/api/auth/password', { oldPassword, newPassword }),
     configGet: () => call('/api/config'),
     configSet: patch => call('/api/config', patch),
     netTest: opts => call('/api/net/test', opts || {}),
@@ -157,6 +199,7 @@
     dbUndedupe: () => call('/api/db/undedupe', {}),
     dbExport,
     dbImport,
+    sourceImportSingle,
     sourceValidate: id => call('/api/source/validate', { id }),
     importUrl: (url, name) => call('/api/import/url', { url, name }),
     serviceToggle: (id, enabled, owner) => call('/api/service/toggle', { id, enabled, owner }),

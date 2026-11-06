@@ -86,6 +86,9 @@ const DEFAULT_CONFIG = {
   crawlScheduleEnabled: false,
   crawlIntervalHours: 24,
   crawlSinceDays: 0,
+  // v1.10.0「只收最新版」：爬取时按归一化音源名分组，同一音源只收版本号最高的一个
+  // 候选（旧版本不下载不入库）。组内无可比较版本号/弱名时全部保留，交给内容去重裁决。
+  crawlLatestOnly: true,
   // v1.9.0：定时爬取跑完后自动接上「检测 → 灌入」（全链路无人值守）。
   // 从属于 crawlScheduleEnabled：定时爬取本身没开，也就无所谓「爬完自动灌」。
   crawlAutoImport: false,
@@ -300,6 +303,51 @@ class Store {
   getSources() { return Object.values(this.db.sources) }
 
   clearSources() { this.db.sources = {}; this.saveDb() }
+
+  /**
+   * 导入单个音源并标记「私人」（v1.10.0）：
+   *  - id 固定为 private::<文件名>，repo 标「私人音源」，条目带 private:true；
+   *  - 私人源受保护：不参与去重废弃、不被巡检自动删除（见 hunter.js）；
+   *  - 同名（同文件名）重复导入 = 更新：换 code/hash、重置检测结果，保留原 addedAt。
+   * @param {string} name 文件名（如 xxx.js，可不带扩展名）
+   * @param {string} code 脚本全文
+   * @returns {{entry:object, added:boolean, updated:boolean}}
+   */
+  addPrivateSource(name, code) {
+    const { scoreEntry, sha256Str } = require('./checker')
+    const clean = String(name || '').replace(/\.js$/i, '').replace(/[\\/:*?"<>|\s]+/g, '_').trim() || 'private-source'
+    const text = String(code || '')
+    if (!text.trim()) throw new Error('脚本文本为空')
+    if (text.length > 2 * 1024 * 1024) throw new Error('脚本过大（超过 2MB）')
+    const id = 'private::' + clean
+    const prev = this.db.sources[id]
+    const score = scoreEntry(clean + '.js', text)
+    const entry = {
+      id,
+      repo: '私人音源',
+      path: clean + '.js',
+      url: '',
+      name: clean,
+      code: text,
+      contentHash: sha256Str(text),
+      suspectScore: score,
+      status: 'unknown',
+      suspected: score >= 4,
+      usable: false,
+      size: text.length,
+      addedAt: prev && prev.addedAt ? prev.addedAt : Date.now(),
+      lastCheck: 0,
+      deep: null,
+      private: true
+    }
+    if (prev) {
+      // 重复导入视为更新：旧内容换新，检测与可用性重置，废弃标记撤销（内容已是新的）
+      if (prev.deprecated) { entry.dupOf = null; entry.dupReason = null }
+    }
+    this.db.sources[id] = entry
+    this.saveDb()
+    return { entry, added: !prev, updated: !!prev }
+  }
 
   /**
    * 从导出文件合并数据（检测结果导入，换机迁移不用重跑）：

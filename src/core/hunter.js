@@ -1,6 +1,7 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
 const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch } = require('./crawler')
+const { crawlWebSite, isWebRepo } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
 const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict } = require('./checker')
@@ -232,6 +233,10 @@ class Hunter {
     const incremental = !!(opts && opts.incremental)
     // 爬取前顺手刷新镜像池（低频，失败不影响爬取）
     try { await this.refreshMirrorPool(false) } catch (e) {}
+    // 合并计数提前声明（v1.10.0 修复）：下面的采集站阶段会引用 merge/total，
+    // 原先声明在 try 块前一行，TDZ 引用直接 ReferenceError —— 有采集站配置时爬取必炸。
+    const merge = { added: 0, updated: 0, skipped: 0 }
+    let total = 0
     // reposOverride 非空时只爬这些仓库（省 GitHub 配额，也便于定向补源）
     let repos
     if (Array.isArray(cfg.reposOverride) && cfg.reposOverride.length) {
@@ -346,30 +351,56 @@ class Hunter {
     this.job = { running: true, type: 'crawl', cancel: false, progress: { reposDone: 0, repoTotal: repos.length, added: 0, linksFound: 0 }, step: '' }
     this.emit('job', { running: true, type: 'crawl' })
     this.log((incremental ? '定时增量爬取' : '开始爬取') + ` ${repos.length} 个仓库（文件树 + Releases）…`, '爬取')
-    let total = 0
-    const merge = { added: 0, updated: 0, skipped: 0 }
     try {
       const known = this._knownMaps()   // 手动/定时爬取都用判重地图：压缩包 sha 未变不解压、release 资产已抓不重下
       // crawlSinceDays（v1.7.2）：只爬 N 天内有更新的仓库（0=不限）。静默仓库整仓跳过，
       // 新发布的 release 资产也按发布时间过滤——树内文件不受影响（sha 判重已覆盖）。
       const sinceDays = Math.max(0, Number(cfg.crawlSinceDays) || 0)
-      await crawl({ repos, token: cfg.ghToken, maxCandidatesPerRepo: cfg.maxCandidatesPerRepo, timeoutMs: cfg.timeoutMs, mirror: cfg.mirror, known, sinceDays },
-        (type, payload) => {
-          if (type === 'repo') {
-            // 统一走增量合并（v1.7.0）：手动爬取与定时爬取行为一致——
-            // 已抓取的不重抓（blob sha/资产 key/内容哈希判重），内容变了标 updated/stale 待重下。
-            const m = this.store.mergeSources(payload.items, { incremental: true })
-            merge.added += m.added; merge.updated += m.updated; merge.skipped += m.skipped
-            total = merge.added
-            this.progress({ reposDone: payload.repo, added: total, linksFound: (this.job.progress.linksFound || 0) + payload.candidates })
-          } else if (type === 'log') {
-            this.log(payload.msg, payload.module, payload.level)
-          } else if (type === 'progress') {
-            this.step(payload.step)
-            this.progress({ reposDone: payload.reposDone, repoTotal: payload.repoTotal })
+      // v1.10.0：仓库清单里可能有「网页音源站」（http(s) 网址，非 owner/repo）。
+      // 两类分流：GitHub 仓库走 crawl()（API 配额），网页站走 crawlWebSite()（纯 HTTP，零配额）。
+      const ghRepos = repos.filter(r => !isWebRepo(r))
+      const webRepos = repos.filter(r => isWebRepo(r))
+      if (webRepos.length) {
+        this.log(`其中 ${webRepos.length} 个为网页音源站（非 GitHub），走通用网页解析采集`, '爬取')
+      }
+      const latestOnly = cfg.crawlLatestOnly !== false
+      // 爬取事件的统一处理（GitHub 爬取与网页站采集共用一套合并逻辑）
+      const onCrawlEvent = (type, payload) => {
+        if (type === 'repo') {
+          // 统一走增量合并（v1.7.0）：手动爬取与定时爬取行为一致——
+          // 已抓取的不重抓（blob sha/资产 key/内容哈希判重），内容变了标 updated/stale 待重下。
+          const m = this.store.mergeSources(payload.items, { incremental: true })
+          merge.added += m.added; merge.updated += m.updated; merge.skipped += m.skipped
+          total = merge.added
+          this.progress({ added: total, linksFound: (this.job.progress.linksFound || 0) + payload.candidates })
+        } else if (type === 'log') {
+          this.log(payload.msg, payload.module, payload.level)
+        } else if (type === 'progress') {
+          this.step(payload.step)
+          this.progress({ reposDone: payload.reposDone, repoTotal: payload.repoTotal })
+        }
+      }
+      if (ghRepos.length) {
+        await crawl({ repos: ghRepos, token: cfg.ghToken, maxCandidatesPerRepo: cfg.maxCandidatesPerRepo, timeoutMs: cfg.timeoutMs, mirror: cfg.mirror, known, sinceDays, latestOnly },
+          onCrawlEvent,
+          () => this.cancelRequested)
+      } else if (webRepos.length) {
+        this.log('仓库清单中没有 GitHub 仓库，跳过 GitHub 爬取（不消耗 API 配额）', '爬取')
+      }
+      // 网页音源站采集（v1.10.0）：与 GitHub 爬取并列的一类仓库来源
+      if (webRepos.length) {
+        for (let wi = 0; wi < webRepos.length; wi++) {
+          if (this.cancelRequested) break
+          const site = webRepos[wi]
+          this.step(`采集网页音源站 ${wi + 1}/${webRepos.length} ${site}`)
+          this.progress({ reposDone: ghRepos.length + wi + 1, repoTotal: repos.length })
+          try {
+            await crawlWebSite(site, { timeoutMs: cfg.timeoutMs, latestOnly }, onCrawlEvent, () => this.cancelRequested)
+          } catch (e) {
+            this.log(`网页音源站 ${site} 采集异常：` + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
           }
-        },
-        () => this.cancelRequested)
+        }
+      }
       this.store.db.lastCrawl = Date.now()
       this.store.saveDb()
       this.log(`${incremental ? '定时爬取' : '爬取'}完成：新增 ${merge.added} 条、内容更新 ${merge.updated} 条、跳过已抓取 ${merge.skipped} 条。库内共 ${Object.keys(this.store.db.sources).length} 条`, '爬取')
@@ -487,14 +518,14 @@ class Hunter {
     }
     if (this.cancelRequested) { out.skipped = 'cancelled'; return out }
 
-    // ③ 灌入 = 可用 ∧ 有脚本地址 ∧ 灌入目标账号里还有没灌过的。
+    // ③ 灌入 = 可用 ∧ 有脚本地址（或正文已随条目保存，如私人音源） ∧ 灌入目标账号里还有没灌过的。
     //    粗筛用本地账本挡掉「每个目标都灌过了」的，避免每轮定时任务都拿整库走一遍裁决；
     //    服务端上那条到底还在不在，交给 runImport 内部的服务端列表 + 账本对账去发现。
     const targets = getBatchImportAccounts(cfg)
     const tids = targets.map(a => a && a.id).filter(Boolean)
     const activeId = cfg.activePlatformId || null
     const ids = this.store.getSources()
-      .filter(e => !e.deprecated && e.usable && e.url)
+      .filter(e => !e.deprecated && e.usable && (e.url || typeof e.code === 'string'))
       .filter(e => !this._importedEverywhere(e.id, tids, activeId))
       .map(e => e.id)
     if (!ids.length) {
@@ -574,8 +605,9 @@ class Hunter {
       }
       d.usable = false
     }
-    // ① 同内容（已下载过的才有哈希，最可靠）
-    const checked = all.filter(e => !e.deprecated && !e.fromServer && e.status === 'ok' && e.contentHash)
+    // ① 同内容（已下载过的才有哈希，最可靠）。私人音源（v1.10.0）不参与：用户手动导入的
+    //    个人源不因内容与爬取库撞车而被废弃。
+    const checked = all.filter(e => !e.deprecated && !e.fromServer && !e.private && e.status === 'ok' && e.contentHash)
     const byHash = {}
     for (const e of checked) {
       const k = e.contentHash
@@ -592,7 +624,7 @@ class Hunter {
     //    否则「内容更新」永远排在旧版后面，用户要求的更新添加不生效。
     const byName = {}
     for (const e of all) {
-      if (e.deprecated || e.fromServer || !e.contentHash) continue
+      if (e.deprecated || e.fromServer || e.private || !e.contentHash) continue
       const nm = normName(e.lxName || e.scriptName || e.name)
       if (!nm) continue
       if (isWeakBaseName(nm)) { weakSkipped++; continue }
@@ -608,9 +640,9 @@ class Hunter {
     //    （检测只跑非 deprecated 条目，所以旧版是否真能用要看它既有 deep；
     //      没有实测就先恢复成候选，下轮检测再定。）
     for (const e of all) {
-      if (!e.deprecated || e.fromServer || e.dupReason !== '同名旧版本（已有更新版本）') continue
+      if (!e.deprecated || e.fromServer || e.private || e.dupReason !== '同名旧版本（已有更新版本）') continue
       const keeper = e.dupOf ? all.find(x => x.id === e.dupOf) : null
-      if (!keeper || keeper.deprecated || !keeper.contentHash || keeper.contentHash === e.contentHash) continue
+      if (!keeper || keeper.deprecated || keeper.private || !keeper.contentHash || keeper.contentHash === e.contentHash) continue
       // 只有保留方实测确认失效（深检 0 平台）才翻案；没深检过或还可用则维持原裁决
       if (!(keeper.deep && keeper.deep.checkedAt && usableCount(keeper) === 0)) continue
       e.deprecated = false; e.dupOf = null; e.dupReason = null
@@ -626,7 +658,7 @@ class Hunter {
     //    注意：跨目录判重对「弱文件名」不可靠，跳过，留给内容指纹确认）
     const byFile = {}
     for (const e of all) {
-      if (e.deprecated || e.fromServer || e.contentHash || e.status === 'dead') continue
+      if (e.deprecated || e.fromServer || e.private || e.contentHash || e.status === 'dead') continue
       const base = String(e.path || (e.name + '.js')).split('/').pop().replace(/\.js$/i, '')
       const nm = normName(base)
       if (!nm) continue
@@ -1819,8 +1851,9 @@ class Hunter {
     for (const [srcId, rec] of Object.entries(this.store.imported || {})) {
       if (!rec || !rec.lxId || !aliveLxIds.has(rec.lxId)) continue   // 服务端已不在（被手动删除）
       const e = this.store.db.sources[srcId]
-      // 无脚本地址的跳过：手动灌入无本地记录，或服务端原生音源未留存 sourceUrl（无法下载重测）
-      if (!e || !e.url) continue
+      // 无脚本地址的跳过：手动灌入无本地记录，或服务端原生音源未留存 sourceUrl（无法下载重测）。
+      // 例外：私人音源（v1.10.0）正文随条目保存（url 为空），可直接复用 code 重测，不跳过。
+      if (!e || (!e.url && typeof e.code !== 'string')) continue
       items.push({ srcId, e, rec })
     }
     if (!items.length) {
@@ -1927,9 +1960,10 @@ class Hunter {
         } else if (verdict === 'dead') {
           // 自动删除优先于自动禁用：开启 patrolAutoDelete 且连续失效达阈值时，从服务端+本地一并移除。
           // 本地未灌入服务端（无 lxId / 服务端已不存在）的源不删，只禁用。
-          // delete 会触发服务端全量重载，必须走串行队列 + serverDeleteIntervalMs 间隔（防 v1.6.8 式假死）。
+          // 私人音源（v1.10.0）绝不自动删除：用户手动导入的个人源，失效了也只禁用，本体留在库里。
+          // （服务端侧删除同样跳过——私人源常由用户直接在平台上维护，自动删容易误伤。）
           const streak = Number(rec.patrolFailStreak) || 0
-          const wantDelete = patrolAutoDeleteWanted(cfg, streak)
+          const wantDelete = patrolAutoDeleteWanted(cfg, streak) && !e.private
           if (wantDelete) {
             try {
               const r = await this._patrolEnqueueServerWrite('delete', async () => {

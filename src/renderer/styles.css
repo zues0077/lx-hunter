@@ -354,3 +354,35 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
   display: inline-block; margin-top: 4px; padding: 1px 7px; font-size: 11px;
   background: var(--card-2); border: 1px solid var(--line); color: var(--text-2); border-radius: 6px;
 }
+
+/* ---------------- 登录层（v1.10.0，Web/Docker 版） ---------------- */
+.auth-layer {
+  position: fixed; inset: 0; z-index: 999;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+}
+.auth-box {
+  width: 340px; max-width: 92vw;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 26px 24px 20px;
+}
+.auth-logo {
+  width: 52px; height: 52px; margin: 0 auto 10px; border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff; font-size: 26px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.auth-title { margin: 0 0 16px; text-align: center; font-size: 17px; color: var(--text); }
+.auth-box .field { display: block; margin-bottom: 12px; }
+.auth-box .field > span { display: block; color: var(--text-2); font-size: 12px; margin-bottom: 4px; }
+.auth-err { color: var(--dead); font-size: 13px; margin: 10px 0 0; text-align: center; }
+
+/* 私人音源徽章（v1.10.0） */
+.badge.private {
+  background: color-mix(in srgb, var(--accent-2) 18%, transparent);
+  border: 1px solid var(--accent-2); color: var(--accent-2);
+}
+.repo-origin.origin-web {
+  background: color-mix(in srgb, var(--ok) 15%, transparent);
+  color: var(--ok); border-color: var(--ok);
+}

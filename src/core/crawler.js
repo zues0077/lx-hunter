@@ -82,17 +82,84 @@ function ghHeaders(token) {
  *   https://github.com/a/b.git        -> a/b
  *   git@github.com:a/b.git            -> a/b
  *   a/b                               -> a/b
+ * v1.10.0：非 GitHub 的 http(s) 网址原样放行（网页音源站采集，见 websource.js），
+ * 调用方用 websource.isWebRepo() 区分两类。
  * 无法识别返回 null
  */
 function normalizeRepo(input) {
   let s = String(input || '').trim()
   if (!s) return null
   s = s.replace(/\.git$/i, '').replace(/\/+$/, '')
-  let m = s.match(/github\.com[/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/i)
-  if (m) return m[1] + '/' + m[2]
-  m = s.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/)
+  if (/^https?:\/\//i.test(s)) {
+    // GitHub 网址仍归一化为 owner/repo；其他网址原样保留（网页音源站）
+    const m = s.match(/github\.com[\/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/i)
+    return m ? (m[1] + '/' + m[2]) : s
+  }
+  let m = s.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/)
   if (m && !/^https?:$/i.test(m[1])) return m[1] + '/' + m[2]
+  m = s.match(/^(?:git@)github\.com[/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/)
+  if (m) return m[1] + '/' + m[2]
   return null
+}
+
+// ---------------- 只收最新版（v1.10.0 设定） ----------------
+// 需求：采集仓库时只收「时间最新」的音源脚本——同一音源的多版本直链
+// （xinghai-music-sourcev2.3.1.js … v2.3.17.js、xxx-v1.8.js、HYWmusic_.V1.2.0.js）
+// 只保留版本号最高的一个，旧版本不下载不入库，省下载也省库位。
+// 归一化组名：小写、去扩展名、循环剥掉结尾的版本号与分隔符。
+// 版本号比较与 hunter.js 的 versionNum 同算法（重大版本*1e9 级编码，最多 4 段）。
+function versionNumOf(s) {
+  const m = String(s || '').match(/[vV]?(\d+(?:\.\d+)+)/)
+  if (!m) return 0
+  const parts = m[1].split('.')
+  let v = 0
+  for (let i = 0; i < Math.min(parts.length, 4); i++) v = v * 1000 + (parseInt(parts[i], 10) || 0)
+  return v
+}
+
+function latestBaseName(name) {
+  let t = String(name || '').replace(/\.js$/i, '').toLowerCase()
+  // 循环剥结尾版本号：xxx-v2.3.17 / xxx_v1.8 / xxxv2.3.17 / xxx 2.3.17
+  while (true) {
+    const t2 = t.replace(/[\s._\-]*(?:v|ver)?\d+(?:\.\d+)+$/i, '')
+    if (t2 === t) break
+    t = t2
+  }
+  return t.replace(/[\s._\-]+$/, '')
+}
+
+/**
+ * 「只收最新版」过滤（纯函数，便于测试）：
+ *  同组（归一化组名相同且组内确有可比较的版本号）只保留版本号最高的条目。
+ *  - 组名剥完版本号后为空/过短（≤2 字符）→ 不分组，全部保留（弱名不误杀）
+ *  - 组内全部条目都没有版本号（versionNumOf 全为 0）→ 全部保留（交给内容去重裁决）
+ * @returns {{kept:Array, dropped:Array, groups:number}}
+ */
+function filterLatestOnly(items) {
+  const groups = {}
+  for (const it of items || []) {
+    const name = String((it && (it.name || it.scriptName)) || '')
+    const base = latestBaseName(name)
+    if (!base || base.length <= 2) continue   // 弱名：不入组，保留
+    ;(groups[base] = groups[base] || []).push(it)
+  }
+  const kept = []
+  const dropped = []
+  let groupCount = 0
+  for (const [base, list] of Object.entries(groups)) {
+    if (list.length < 2) { kept.push(list[0]); continue }
+    const withV = list.map(it => ({ it, v: versionNumOf(String(it.name || it.scriptName || '')) }))
+    if (!withV.some(x => x.v > 0)) { for (const x of withV) kept.push(x.it); continue }
+    groupCount++
+    withV.sort((a, b) => b.v - a.v || String(a.it.name || '').localeCompare(String(b.it.name || '')))
+    kept.push(withV[0].it)
+    for (let i = 1; i < withV.length; i++) dropped.push(withV[i].it)
+  }
+  // 未入组的条目全部保留
+  const grouped = new Set()
+  for (const list of Object.values(groups)) for (const it of list) grouped.add(it)
+  for (const it of items || []) if (!grouped.has(it)) kept.push(it)
+  return { kept, dropped, groups: groupCount }
 }
 
 /** 树里的 .js 候选（带 blob sha —— 增量判重靠它，零额外请求） */
@@ -627,6 +694,17 @@ async function crawl(opts, onEvent, shouldStop) {
         if (/rate limit exceeded/i.test(msg)) throw e   // 配额耗尽：向上抛，由外层统一中止
         onEvent('log', { level: 'warn', module: '爬取', msg: `${repo}：读取 Releases 失败: ${msg.slice(0, 100)}` })
       }
+      // 「只收最新版」（v1.10.0 设定，cfg.crawlLatestOnly）：同组只留版本号最高的候选，
+      // 旧版本不进入合并（不下载不入库）。组内无人有版本号 / 弱名 → 全保留，交给内容去重。
+      let latestDropped = 0
+      if (opts.latestOnly && newOnes.length > 1) {
+        const f = filterLatestOnly(newOnes)
+        latestDropped = f.dropped.length
+        if (latestDropped) {
+          for (const d of f.dropped) { const i = newOnes.indexOf(d); if (i >= 0) newOnes.splice(i, 1) }
+          onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：按「只收最新版」跳过 ${latestDropped} 个旧版本候选` })
+        }
+      }
       stats.linksFound += cands.length + archiveHit + relHit
       onEvent('repo', { repo, candidates: cands.length + archiveHit + relHit, items: newOnes })
       onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：候选 ${cands.length} 个` +
@@ -634,6 +712,7 @@ async function crawl(opts, onEvent, shouldStop) {
         (archiveSkipped ? `（${archiveSkipped} 个压缩包内容未变，跳过）` : '') +
         (relHit ? `，release 资产脚本 ${relHit} 个` : '') +
         (relSkipped ? `（${relSkipped} 个 release 资产已抓过，跳过）` : '') +
+        (latestDropped ? `，旧版本候选跳过 ${latestDropped} 个` : '') +
         (sinceTs ? `（时间窗：只收 ${sinceDays} 天内发布的 release 资产）` : '') })
     } catch (e) {
       const msg = String((e && e.message) || e)
@@ -652,5 +731,6 @@ module.exports = {
   DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness,
   discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, isSourceAsset,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
+  filterLatestOnly, latestBaseName, versionNumOf,
   RELEASES_PER_REPO, MAX_ASSET_BYTES, MAX_RELEASE_DL_PER_REPO
 }
