@@ -394,9 +394,24 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
 }
 .auth-box {
   width: 360px; max-width: 92vw;
-  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  box-shadow: var(--shadow); padding: 30px 28px 24px;
+  /* v1.10.3：毛玻璃卡片（半透明 + 背景模糊），贴合用户给的参考样式；
+     登录层配色已固定为深色（--text 浅色），玻璃卡在深浅主题下都可读。 */
+  background: rgba(22, 26, 38, .55);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+  backdrop-filter: blur(16px) saturate(1.25);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .38);
+  padding: 30px 28px 24px;
   position: relative; z-index: 1;
+}
+/* 「纯净」背景回到实底卡片，不用毛玻璃（浅色主题下仍是白卡可读） */
+html[data-auth-bg="plain"] .auth-box {
+  background: var(--card);
+  border: 1px solid var(--line);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 .auth-logo {
   width: 52px; height: 52px; margin: 0 auto 10px; border-radius: 12px;
@@ -404,11 +419,32 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
   color: #fff; font-size: 26px; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
 }
-.auth-title { margin: 0 0 20px; text-align: center; font-size: 17px; color: var(--text); }
+.auth-title {
+  margin: 0 0 4px; text-align: center; font-size: 18px; font-weight: 700;
+  /* 青蓝渐变标题（参考样式：飞牛桌面工具同款观感） */
+  background: linear-gradient(90deg, #37c8ff, #4f8bff);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+/* 「纯净」浅色背景：白卡上渐变字改实色强调色，保证可读 */
+html[data-auth-bg="plain"] .auth-title {
+  background: none; -webkit-text-fill-color: var(--accent); color: var(--accent);
+}
+.auth-ver { margin: 0 0 18px; text-align: center; color: var(--text-2); font-size: 12px; letter-spacing: .04em; }
 /* 输入框原来沿用浏览器默认宽度（约 190px），按钮却是 width:100%，
    看起来像整块表单没居中。统一 100% 宽 + 等高后，标签/输入框/按钮左右边缘齐平。 */
 .auth-box .field { display: block; margin-bottom: 14px; }
-.auth-box .field > span { display: block; color: var(--text-2); font-size: 12px; margin-bottom: 6px; }
+.auth-box .field > span:not(.pwd-wrap) { display: block; color: var(--text-2); font-size: 12px; margin-bottom: 6px; }
+/* 密码框小眼睛：显示/隐藏密码 */
+.pwd-wrap { position: relative; display: block; }
+.pwd-wrap .input { width: 100%; padding-right: 42px; }
+.pwd-eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  height: 30px; width: 32px; border: 0; background: transparent; cursor: pointer;
+  border-radius: 8px; color: var(--text-2); font-size: 15px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center; opacity: .85;
+}
+.pwd-eye:hover { background: rgba(255, 255, 255, .08); color: var(--text); opacity: 1; }
 .auth-box .input { width: 100%; height: 40px; background: var(--card-2); }
 .auth-box .btn.primary { width: 100%; height: 40px; margin-top: 2px; }
 .auth-err { color: var(--dead); font-size: 13px; margin: 10px 0 0; text-align: center; }

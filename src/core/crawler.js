@@ -271,7 +271,7 @@ async function fetchRepoFreshness(repo, sinceIso, token, timeoutMs) {
   try {
     const url = `https://api.github.com/repos/${repo}/commits?per_page=1&since=${encodeURIComponent(sinceIso)}`
     const res = await fetchWithTimeout(url, { headers: ghHeaders(token) }, timeoutMs)
-    if (!res.ok) return { fresh: true, empty: true }   // 异常不拦路
+    if (!res.ok) return { fresh: true, empty: true, notFound: res.status === 404 }   // 异常不拦路；404 额外标记失效
     const commits = JSON.parse(await readText(res, timeoutMs))
     if (!Array.isArray(commits)) return { fresh: true, empty: true }
     if (commits.length > 0) {
@@ -598,7 +598,7 @@ async function crawl(opts, onEvent, shouldStop) {
   // 冷仓库多的库净省配额。
   const sinceDays = Number(opts.sinceDays) > 0 ? Number(opts.sinceDays) : 0
   const sinceTs = sinceDays ? Date.now() - sinceDays * 86400 * 1000 : 0
-  const stats = { added: 0, reposDone: 0, repoTotal: repos.length, linksFound: 0, staleSkipped: 0 }
+  const stats = { added: 0, reposDone: 0, repoTotal: repos.length, linksFound: 0, staleSkipped: 0, deadRepos: [] }
   // 下载镜像学习：本次运行里第一个成功的镜像优先复用，避免每条资产都把失败的直连重试一遍
   let mirrorPref = null
 
@@ -621,6 +621,11 @@ async function crawl(opts, onEvent, shouldStop) {
       let freshProbe = null
       if (sinceTs) {
         freshProbe = await fetchRepoFreshness(repo, new Date(sinceTs).toISOString(), opts.token, timeoutMs)
+        if (freshProbe.notFound) {
+          stats.deadRepos.push(repo)
+          onEvent('log', { level: 'warn', module: '爬取', msg: `${repo}：仓库不存在（404），标记失效` })
+          continue
+        }
         if (!freshProbe.fresh) {
           stats.staleSkipped++
           onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：${sinceDays} 天内无提交且无新发布，整仓跳过` })
@@ -629,6 +634,11 @@ async function crawl(opts, onEvent, shouldStop) {
       }
       // ① 仓库文件树
       const res = await fetchWithTimeout(`https://api.github.com/repos/${repo}/git/trees/HEAD?recursive=1`, { headers: ghHeaders(opts.token) }, timeoutMs)
+      if (res.status === 404) {
+        stats.deadRepos.push(repo)
+        onEvent('log', { level: 'warn', module: '爬取', msg: `${repo}：仓库不存在（404），标记失效` })
+        continue
+      }
       const text = await readText(res, timeoutMs)
       const tree = JSON.parse(text)
       if (tree.message) throw new Error('GitHub API: ' + String(tree.message).slice(0, 80))

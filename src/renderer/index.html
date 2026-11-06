@@ -451,6 +451,10 @@
           <label class="chk"><input type="checkbox" id="cfgCrawlLatestOnly"><span><strong>同组音源只保留最新版</strong>：文件名相同、只差结尾版本号的脚本归为一组（如 <code>xinghai-music-sourcev2.3.1.js … v2.3.17.js</code>），每组只收一个，旧版本不下载也不入库。判定时<strong>以页面表格标注的版本号与更新时间为准</strong>，其次看文件名里的版本号，最后用文件更新时间兜底；页面版本与文件名不一致时以页面为准（真站出现过文件名写 v2.3.17、实际是 v3.2.17）。一组内既分不出版本也分不出时间的，全部保留，交给内容指纹去重裁决。</span></label>
         </div>
         <p class="hint" style="margin-top:2px">这是<strong>全局采集偏好</strong>：手动「爬取仓库」、定时爬取、自动流水线、网页音源站采集都读这个开关，并非只对定时任务生效；取消勾选后，任何来源的多版本候选都会完整保留。</p>
+        <div class="field-row" style="margin:6px 0">
+          <input class="input" id="repoSearch" type="text" placeholder="搜索仓库：按仓库名 / owner / 网址 过滤…">
+          <span class="hint" id="repoSearchCount" style="margin-left:8px"></span>
+        </div>
         <div id="repoList" class="repo-list"></div>
         <div class="repo-add">
           <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo 或网页音源站网址（https://…），可多行 / 逗号批量">
@@ -553,10 +557,11 @@
   <div class="auth-box">
     <div class="auth-logo">猎</div>
     <h2 class="auth-title">音源猎手 · Web 版</h2>
+    <p class="auth-ver" id="authVer"></p>
     <!-- 登录 -->
     <div id="authLoginBox">
       <label class="field"><span>账号</span><input class="input" id="authName" autocomplete="username"></label>
-      <label class="field"><span>密码</span><input class="input" id="authPwd" type="password" autocomplete="current-password"></label>
+      <div class="field"><span>密码</span><span class="pwd-wrap"><input class="input" id="authPwd" type="password" autocomplete="current-password"><button type="button" class="pwd-eye" id="authPwdEye" title="显示密码">👁</button></span></div>
       <button class="btn primary" id="btnAuthLogin" style="width:100%">登录</button>
     </div>
     <!-- 首次使用：注册管理员 -->

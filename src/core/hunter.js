@@ -326,6 +326,13 @@ class Hunter {
       // v1.9.9 搜索发现：用关键词在 GitHub 搜索新仓库，作为种子的增量补充（不替换种子）。
       // 仅在非定向爬取（reposOverride 为空）且用户开启 searchEnabled 时触发。
       if (cfg.searchEnabled && Array.isArray(cfg.searchKeywords) && cfg.searchKeywords.length) {
+        // v1.10.3：搜索发现节流——距上次满 searchDiscoverHours 小时才跑，避免每轮都白烧搜索/验真配额
+        const dHours = Math.max(0, Number(cfg.searchDiscoverHours) || 0)
+        const dLast = Number(cfg.searchDiscoverAt) || 0
+        const dDue = !dHours || (Date.now() - dLast >= dHours * 3600000)
+        if (!dDue) {
+          this.log(`搜索发现：距上次不足 ${dHours} 小时，本轮跳过以省配额（可在设置调整节流时长或填 0 关闭）`, '爬取')
+        } else {
         try {
           const d = await discoverReposViaSearch({
             keywords: cfg.searchKeywords, token: cfg.ghToken,
@@ -364,6 +371,10 @@ class Hunter {
           }
         } catch (e) {
           this.log('搜索发现失败：' + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
+        }
+        // 记录本次发现时间（无论是否命中都算跑过一轮），用于节流
+        this.store.config.searchDiscoverAt = Date.now()
+        this.store.saveConfig()
         }
       }
       // v1.9.18 社区精选订阅（借鉴 lx-hub 的 community.json market）：
@@ -452,8 +463,9 @@ class Hunter {
           this.progress({ reposDone: payload.reposDone, repoTotal: payload.repoTotal })
         }
       }
+      let crawlStats = null
       if (ghRepos.length) {
-        await crawl({ repos: ghRepos, token: cfg.ghToken, maxCandidatesPerRepo: cfg.maxCandidatesPerRepo, timeoutMs: cfg.timeoutMs, mirror: cfg.mirror, known, sinceDays, latestOnly },
+        crawlStats = await crawl({ repos: ghRepos, token: cfg.ghToken, maxCandidatesPerRepo: cfg.maxCandidatesPerRepo, timeoutMs: cfg.timeoutMs, mirror: cfg.mirror, known, sinceDays, latestOnly },
           onCrawlEvent,
           () => this.cancelRequested)
       } else if (webRepos.length) {
@@ -470,6 +482,24 @@ class Hunter {
             await crawlWebSite(site, { timeoutMs: cfg.timeoutMs, latestOnly }, onCrawlEvent, () => this.cancelRequested)
           } catch (e) {
             this.log(`网页音源站 ${site} 采集异常：` + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
+          }
+        }
+      }
+      // v1.10.3：失效仓库自动清理（仅非内置；只删确定性 404，不误删临时失败/限流）
+      if (crawlStats && Array.isArray(crawlStats.deadRepos) && crawlStats.deadRepos.length && cfg.autoCleanDeadRepos !== false) {
+        const deadSet = new Set(crawlStats.deadRepos.map(r => normalizeRepo(r) || r))
+        const rl = Array.isArray(this.store.config.repos) ? this.store.config.repos : null
+        if (rl) {
+          const removed = []
+          this.store.config.repos = rl.filter(x => {
+            if (x && x.origin === 'builtin') return true   // 内置不自动删（可用「恢复默认」找回）
+            const n = normalizeRepo(x && x.repo) || (x && x.repo)
+            if (deadSet.has(n)) { removed.push(x.repo); return false }
+            return true
+          })
+          if (removed.length) {
+            this.store.saveConfig()
+            this.log(`失效仓库自动清理：移除 ${removed.length} 个 404 仓库（${removed.slice(0, 8).join('、')}${removed.length > 8 ? '…' : ''}）`, '爬取', 'warn')
           }
         }
       }

@@ -253,6 +253,20 @@ ck('crawl 接受 sinceDays 选项', crSrcT.includes('opts.sinceDays'))
 ck('hunter 透传 crawlSinceDays 配置', fs.readFileSync(path.join(__dirname, '../src/core/hunter.js'), 'utf8').includes('cfg.crawlSinceDays'))
 ck('设置页有时间窗输入', fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8').includes('cfgCrawlSinceDays'))
 
+// ---------- ⑧ v1.10.3 新增：失效仓库自动清理 / 搜索发现节流 / 清单搜索 ----------
+console.log('\n== v1.10.3 新增能力 ==')
+ck('crawl 统计含 deadRepos', crSrcT.includes('deadRepos: []') && crSrcT.includes('stats.deadRepos.push'))
+ck('fetchRepoFreshness 标记 404 失效', crSrcT.includes('notFound: res.status === 404'))
+const hSrc = fs.readFileSync(path.join(__dirname, '../src/core/hunter.js'), 'utf8')
+ck('hunter 自动清理失效仓库（非内置、可关闭）', hSrc.includes('autoCleanDeadRepos') && hSrc.includes('失效仓库自动清理'))
+ck('hunter 搜索发现节流（满 N 小时才跑）', hSrc.includes('searchDiscoverHours') && hSrc.includes('searchDiscoverAt'))
+const stSrc = fs.readFileSync(path.join(__dirname, '../src/core/store.js'), 'utf8')
+ck('store 默认配置含新键', stSrc.includes('autoCleanDeadRepos: true') && stSrc.includes('searchDiscoverHours'))
+const htmlSrc = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8')
+ck('仓库清单有搜索框', htmlSrc.includes('id="repoSearch"'))
+const appSrc = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8')
+ck('app renderRepoList 支持关键字过滤', appSrc.includes('state.repoFilter') && appSrc.includes('repoSearchCount'))
+
 // ---------- 汇总 ----------
 console.log(`\n${bad ? 'FAIL' : 'ALL PASS'}（失败 ${bad} 项）`)
 process.exit(bad ? 1 : 0)

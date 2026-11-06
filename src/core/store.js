@@ -55,6 +55,14 @@ const DEFAULT_CONFIG = {
   // 实测 60 个命中里只有 32 个真含音源，其余是客户端/播放器/API。开启后逐个看文件树
   // 抽检 .js、并放行「压缩包分发」与「Release 资产分发」两类仓库。默认开。
   searchVerify: true,
+  // v1.10.3：搜索发现节流。每轮爬取都跑关键词搜索会白烧配额（新音源仓库不会那么快冒出来），
+  // 改为距上次 searchDiscoverAt 满 searchDiscoverHours 小时才跑一次；0=不节流（每轮都搜）。
+  searchDiscoverHours: 24,
+  searchDiscoverAt: 0,
+  // v1.10.3：失效仓库自动清理。爬取时对确定性 404（仓库不存在/已删）的条目，爬完自动从
+  // 仓库清单移除（仅非内置条目；内置条目可用「恢复默认」找回，不自动删）。
+  // 只认 404，网络抖动/5xx/限流一律不删，避免误删暂时不可达的仓库。默认开。
+  autoCleanDeadRepos: true,
   // ---------------- 社区精选订阅（v1.9.18，借鉴 lx-hub 的 community.json market） ----------------
   // communityEnabled：爬取时拉取 zlyon/lx-hunter-market 维护的社区精选清单
   // （人工提交、维护者审核，带 submitter/approvedAt），把其中 type=repo 的条目并入种子

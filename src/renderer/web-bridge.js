@@ -222,11 +222,13 @@
   // 用户根本分不出自己跑的是哪版（2026-10-15 实测踩中）。写死字符串每版都要记得改，
   // 动态取版一劳永逸，且 dist-selfcheck 有回归断言禁止再写死。
   const brand = document.querySelector('.brand-sub')
-  if (brand) {
-    brand.textContent = 'Web/Docker 版'
+  const authVer = document.getElementById('authVer')
+  if (brand || authVer) {
+    if (brand) brand.textContent = 'Web/Docker 版'
     call('/api/health').then(d => {
       const v = d && d.data && d.data.version
-      if (v) brand.textContent = 'Web/Docker 版 v' + v
+      if (v && brand) brand.textContent = 'Web/Docker 版 v' + v
+      if (v && authVer) authVer.textContent = 'Ver. ' + v   // 登录框版本行（/api/health 公开，未登录也可取）
     }).catch(() => { /* 取不到就保留「Web/Docker 版」，不编造版本号 */ })
   }
 })()

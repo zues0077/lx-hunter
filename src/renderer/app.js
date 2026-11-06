@@ -372,9 +372,15 @@ const ORIGIN_LABEL = { builtin: '内置', custom: '附加', discovered: '发现'
 function renderRepoList(repos, defaultRepos) {
   if (Array.isArray(repos)) state.config.repos = repos
   if (Array.isArray(defaultRepos)) state.defaultRepos = defaultRepos
-  const list = (state.config.repos || [])
+  const all = (state.config.repos || [])
   const box = $('repoList')
-  if (!list.length) { box.innerHTML = '<p class="hint" style="margin:0">清单为空 —— 点「恢复默认仓库」恢复内置 38 个，或在上方输入框添加。</p>'; return }
+  const cntEl = $('repoSearchCount')
+  if (!all.length) { box.innerHTML = '<p class="hint" style="margin:0">清单为空 —— 点「恢复默认仓库」恢复内置 38 个，或在上方输入框添加。</p>'; if (cntEl) cntEl.textContent = ''; return }
+  // v1.10.3：仓库清单关键字过滤（按仓库名 / owner / 网址 子串匹配，不区分大小写）
+  const kw = String(state.repoFilter || '').trim().toLowerCase()
+  const list = kw ? all.filter(r => String(r.repo || '').toLowerCase().includes(kw)) : all
+  if (cntEl) cntEl.textContent = kw ? `匹配 ${list.length} / 共 ${all.length}` : `共 ${all.length} 个`
+  if (!list.length) { box.innerHTML = '<p class="hint" style="margin:0">没有匹配「' + esc(kw) + '」的仓库</p>'; return }
   // 排序：内置在前，其次附加，最后发现；同类按名称
   const order = { builtin: 0, custom: 1, discovered: 2 }
   const sorted = list.slice().sort((a, b) => (order[a.origin] || 3) - (order[b.origin] || 3) || String(a.repo).localeCompare(b.repo))
@@ -424,6 +430,27 @@ $('repoList').addEventListener('click', async (ev) => {
   state.config.repos = (state.config.repos || []).filter(x => x.repo !== name)
   await persistRepos()
 })
+
+// 仓库清单关键字搜索（v1.10.3）
+{
+  const el = $('repoSearch')
+  if (el) el.addEventListener('input', () => {
+    state.repoFilter = el.value || ''
+    renderRepoList()
+  })
+}
+
+// 登录密码显示/隐藏切换（v1.10.3 小眼睛）
+{
+  const pwd = $('authPwd'), eye = $('authPwdEye')
+  if (pwd && eye) eye.addEventListener('click', (ev) => {
+    ev.preventDefault()
+    const show = pwd.type === 'password'
+    pwd.type = show ? 'text' : 'password'
+    eye.textContent = show ? '🙈' : '👁'
+    eye.title = show ? '隐藏密码' : '显示密码'
+  })
+}
 
 // 添加（支持多行/逗号批量）
 $('btnAddRepo').addEventListener('click', async () => {
