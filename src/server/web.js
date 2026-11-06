@@ -431,6 +431,11 @@ route('POST', '/api/hubs/remove', guard(async (req, res, ctx) => {
 route('POST', '/api/hubs/sync', guard(async () => await hunter.runHubSync()))
 
 route('POST', '/api/crawl', guard(async () => await hunter.runCrawl()))
+// v1.10.3 非音源仓库清理：验真非内置仓库 → 移除确定性失败的（播放器/管理器/网关）→
+// 连带删除它贡献的脚本并拉黑，避免下次发现又混进来。limit 控制本轮最多验真几个（省配额）。
+route('POST', '/api/repos/prune', guard(async (req, res, ctx) => await hunter.pruneNonSourceRepos({
+  limit: Number((ctx.body || {}).limit) || 40
+})))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
 route('POST', '/api/hash', guard(async (req, res, ctx) => await hunter.runHash(ctx.body.ids)))
 // v1.8.0：body.platformIds 可显式指定灌入目标（不给则用设置里标记「参与批量灌入」的账号）

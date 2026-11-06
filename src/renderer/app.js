@@ -582,6 +582,39 @@ $('btnClearDiscovered').addEventListener('click', async () => {
   if (ok) toast('已清除 ' + removed + ' 个搜索发现的仓库', 'ok')
 })
 
+// 清理非音源仓库脚本（v1.10.3）：自动发现难免把「播放器 / 客户端 / 管理器 / 网关」混进清单，
+// 它们夹带的 App 内置脚本（app/src/main/assets/**）、user-api-preload.js、docs 教程压缩包
+// 都会被当成音源收进库（2026-11-07 实测 16 个仓库带来 695 条垃圾脚本）。此前没有清理手段。
+// 这里一键：验真 → 移出仓库 → 连带删除它贡献的脚本（记入删除名单）→ 拉黑，避免下次又被发现加回。
+$('btnPruneNonSource').addEventListener('click', async () => {
+  const cand = (state.config.repos || []).filter(x => x.origin !== 'builtin').length
+  if (!cand) return toast('清单里没有可验真的非内置仓库', 'warn')
+  if (!confirm(`将逐个验真 ${cand} 个非内置仓库（消耗 GitHub 配额，可能需要一两分钟）：\n\n` +
+    '· 把「播放器 / 客户端 / 管理器 / 网关」等非音源仓库移出清单\n' +
+    '· 连带删除这些仓库贡献的脚本（删掉后不会再自动采回来）\n' +
+    '· 内置仓库不动；限流 / 临时失败会跳过，不误删\n\n继续？')) return
+  const btn = $('btnPruneNonSource')
+  const old = btn.textContent
+  btn.disabled = true
+  btn.textContent = '验真中…'
+  try {
+    const r = await api.reposPrune({ limit: 60 })
+    if (!r || r.ok === false) throw new Error((r && r.error) || '未知错误')
+    const d = r.data || r
+    // 后端已改过清单与音源库，重新拉一遍，避免前端旧 state 覆盖回去
+    await loadConfig()
+    if (typeof refreshInstalled === 'function') refreshInstalled()
+    toast(`清理完成：移除仓库 ${(d.removedRepos || []).length} 个、删除脚本 ${d.removedSources || 0} 条` +
+      (d.skipped ? `（临时失败跳过 ${d.skipped} 个，可再点一次）` : '') +
+      (d.unchecked ? `，还有 ${d.unchecked} 个未验真，可再点一次继续` : ''), 'ok')
+  } catch (e) {
+    toast('清理失败：' + String((e && e.message) || e), 'err')
+  } finally {
+    btn.disabled = false
+    btn.textContent = old
+  }
+})
+
 // 恢复默认仓库：把内置清单里缺失的重新加回并启用（已有的保留用户设置）
 $('btnRestoreRepos').addEventListener('click', async () => {
   const defs = state.defaultRepos || []

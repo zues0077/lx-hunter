@@ -267,6 +267,27 @@ ck('仓库清单有搜索框', htmlSrc.includes('id="repoSearch"'))
 const appSrc = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8')
 ck('app renderRepoList 支持关键字过滤', appSrc.includes('state.repoFilter') && appSrc.includes('repoSearchCount'))
 
+// ---------- ⑨ v1.10.3 非音源仓库：验真收紧 + 一键清理机制 ----------
+// 实锤（2026-11-07 246 实测）：自动发现把播放器客户端混进清单——
+//   OuterTune/AnhePlayer/PixelPlayerOLX：app/src/main/assets/**/user-api-preload.js（score 8）
+//   CeruMusic/Zhou1019-1/AnniePlayer：docs/public/plugins/tutorial/*.zip、macos wrapper-pkg.zip(49MB)
+//   MusicBox-1：src/utils/lx-sandbox.js（score 11）
+// 16 个仓库共带来 695 条垃圾脚本（占全库 27%）。
+console.log('\n== v1.10.3 非音源仓库清理 ==')
+ck('验真把应用工程/文档站点目录列为弱路径', crSrcT.includes('/^(app|android|ios|macos|windows|linux|electron)\\//i') && crSrcT.includes('src\\/android)\\/assets\\/'))
+ck('验真把 App 内置脚本垫片列为弱路径', crSrcT.includes('sandbox|preload|bridge|userscript|sdk'))
+ck('压缩包按文件名匹配音源语义（不再看目录名）', crSrcT.includes("String(p.path).split('/').pop()"))
+ck('压缩包体积按 MAX_ASSET_BYTES 封顶', /\(t\.size \|\| 0\) <= MAX_ASSET_BYTES/.test(crSrcT))
+ck('hunter 提供 pruneNonSourceRepos 一键清理', hSrc.includes('async pruneNonSourceRepos'))
+ck('清理只处理确定性失败（限流/临时失败跳过）', hSrc.includes('const isTransient') && hSrc.includes('ECONN'))
+ck('清理连带删除这些仓库贡献的脚本', hSrc.includes('deadSet') && hSrc.includes('removeSources(srcIds)'))
+ck('清理后写入 blockedRepos 黑名单', hSrc.includes('blockedRepos'))
+ck('发现器丢弃黑名单仓库（不再回填）', hSrc.includes('blockedRepos.has'))
+ck('store 默认含 blockedRepos', stSrc.includes('blockedRepos: []'))
+ck('Web 暴露 /api/repos/prune', fs.readFileSync(path.join(__dirname, '../src/server/web.js'), 'utf8').includes("'/api/repos/prune'"))
+ck('桌面端有对应 IPC', fs.readFileSync(path.join(__dirname, '../src/main/index.js'), 'utf8').includes("'repos:prune'"))
+ck('清单页有清理按钮与确认文案', htmlSrc.includes('id="btnPruneNonSource"') && appSrc.includes('btnPruneNonSource'))
+
 // ---------- 汇总 ----------
 console.log(`\n${bad ? 'FAIL' : 'ALL PASS'}（失败 ${bad} 项）`)
 process.exit(bad ? 1 : 0)

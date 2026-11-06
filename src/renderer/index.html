@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=14">
+<link rel="stylesheet" href="styles.css?v=15">
 <script src="auth-bg.js?v=2"></script>
 </head>
 <body>
@@ -460,6 +460,7 @@
           <input class="input" id="repoAddInput" type="text" placeholder="添加仓库：owner/repo 或网页音源站网址（https://…），可多行 / 逗号批量">
           <button class="btn btn-sm" id="btnAddRepo">添加</button>
           <button class="btn btn-sm ghost" id="btnRestoreRepos">恢复默认仓库</button>
+          <button class="btn btn-sm ghost" id="btnPruneNonSource" title="逐个验真清单里的非内置仓库，把播放器/客户端/管理器等非音源仓库移出清单，并删除它们贡献的脚本">清理非音源仓库脚本</button>
           <button class="btn btn-sm danger-ghost" id="btnClearDiscovered">清除搜索发现的仓库</button>
         </div>
         <p class="hint" style="margin-top:4px">除 GitHub 仓库外，也支持粘贴<strong>任意挂音源脚本的网页地址</strong>（如 <code>https://zrcdy.dpdns.org/lx/vers.php</code> 这类「插件下载中心」页面）：爬取时抓取页面里的 .js 直链，逐个甄别后入库。网页站不消耗 GitHub API 配额。列表里显示「网页」标记。</p>
@@ -614,7 +615,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=47"></script>
-<script src="app.js?v=51"></script>
+<script src="web-bridge.js?v=48"></script>
+<script src="app.js?v=52"></script>
 </body>
 </html>

@@ -462,9 +462,11 @@ ipcMain.handle('db:clear', guard(() => {
   return { ok: true }
 }))
 
+// 非音源仓库清理（v1.10.3）：与 Web 版 /api/repos/prune 同语义
+ipcMain.handle('repos:prune', guard((e, opts) => hunter.pruneNonSourceRepos(opts || {})))
+
 // 手动删除选中音源（v1.10.2）：与 Web 版 /api/db/delete 同签名、同语义
-ipcMain.handle('db:delete', guard((e, ids) => {
-  if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')
+ipcMain.handle('db:delete', guard((e, ids) => {  if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')
   const r = store.removeSources(ids)
   hunter.log(`手动删除音源 ${r.deleted} 条；累计 ${r.blocked} 条不再自动采集` +
     (r.ledgerDropped ? `；同步清理 ${r.ledgerDropped} 条占位灌入账本` : ''), '音源库', 'info')

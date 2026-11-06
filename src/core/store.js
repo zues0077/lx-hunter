@@ -63,6 +63,9 @@ const DEFAULT_CONFIG = {
   // 仓库清单移除（仅非内置条目；内置条目可用「恢复默认」找回，不自动删）。
   // 只认 404，网络抖动/5xx/限流一律不删，避免误删暂时不可达的仓库。默认开。
   autoCleanDeadRepos: true,
+  // 非音源仓库黑名单（v1.10.3）：被「清理非音源仓库脚本」判定删除的仓库（播放器/管理器/网关等）。
+  // 记在这里后，搜索发现与社区精选都不会再把它们加回清单，避免「清了又回来」。
+  blockedRepos: [],
   // ---------------- 社区精选订阅（v1.9.18，借鉴 lx-hub 的 community.json market） ----------------
   // communityEnabled：爬取时拉取 zlyon/lx-hunter-market 维护的社区精选清单
   // （人工提交、维护者审核，带 submitter/approvedAt），把其中 type=repo 的条目并入种子

@@ -445,11 +445,27 @@ async function verifyRepoHasSource(repo, o) {
   const items = Array.isArray(tj.tree) ? tj.tree : []
   const js = items.filter(t => t.type === 'blob' && /\.js$/i.test(t.path) &&
     (t.size || 0) < 2 * 1024 * 1024 && !/node_modules|\.min\.js/i.test(t.path))
-  const packs = items.filter(t => t.type === 'blob' && /\.(zip|7z|rar)$/i.test(t.path))
   // 测试夹具 / 示例 / 模板里的「音源」不是可分发音源。实测有仓库整个就是「音源管理工具」，
   // 唯一命中来自 tests/fixtures/basic-source.js——把它当音源收进来，爬取阶段也只能捞到个假脚本。
-  const isWeakPath = (p) => /(^|\/)(tests?|__tests__|specs?|fixtures?|examples?|demos?|samples?|docs?|templates?)\//i.test(p) ||
-    /(template|example|sample|demo|fixture|mock)[^/]*\.js$/i.test(p)
+  //
+  // 应用工程目录（v1.10.3）：播放器客户端被验真放行混进清单的实锤——
+  //   OuterTune / AnhePlayer-Mobile / PixelPlayerOLX：app/src/main/assets 里有洛雪
+  //   user-api-preload.js（App 内置的脚本 API 预载，score 8）→ 被当「含音源脚本」；
+  //   CeruMusic：docs/public/plugins/tutorial 下的插件教程 zip 命中松散的「plugin」词
+  //   → 被当「压缩包分发」；AnniePlayer-LXversion：macos/assets/wrapper-pkg.zip(49MB)
+  //   是应用安装包。这些都是 App/文档资产，不是可分发音源，按路径排除。
+  const isWeakPath = (p) => /(^|\/)(tests?|__tests__|specs?|fixtures?|examples?|demos?|samples?|docs?|templates?|tutorials?)\//i.test(p) ||
+    /^(app|android|ios|macos|windows|linux|electron)\//i.test(p) ||
+    /\/(src\/main|src\/android)\/assets\//i.test(p) ||
+    /\/(dist|build|release|unpacked|resources|static|public|out)\//i.test(p) ||
+    /(template|example|sample|demo|fixture|mock|tutorial)[^/]*\.(js|zip|7z|rar)$/i.test(p) ||
+    // App 内置的洛雪脚本运行时垫片：lx-sandbox.js（MusicBox-1 实测 score 11 蒙混）、
+    // user-api-preload.js（OuterTune 系实测 score 8）。这类文件名是「脚本运行环境」，不是音源。
+    /(^|\/)[^/]*(sandbox|preload|bridge|userscript|sdk)[^/]*\.js$/i.test(p)
+  // 压缩包：排除弱路径；且体积按 MAX_ASSET_BYTES 封顶（源脚本打包通常几百 KB~几 MB，
+  // 30MB 以上的基本都是应用安装包/镜像）。词匹配只看文件名，目录名（如 plugins/）不算数。
+  const packs = items.filter(t => t.type === 'blob' && /\.(zip|7z|rar)$/i.test(t.path) &&
+    !isWeakPath(t.path) && (t.size || 0) <= MAX_ASSET_BYTES)
   js.sort((a, b) => {
     const wa = isWeakPath(a.path) ? 1 : 0
     const wb = isWeakPath(b.path) ? 1 : 0
@@ -480,8 +496,9 @@ async function verifyRepoHasSource(repo, o) {
   //   只要树里有压缩包就放行，交给爬取阶段的解压挑脚本。
   //   但「有压缩包」这个条件本身太松——数学题库 Math_Model（master 分支）里的 47 个 .rar 里
   //   有个「MATLAB智能算法…+源代码.7z」，早先只写「源」就被「源代码」蒙过去了。
-  //   因此压缩包名要按词匹配音源语义，或者压缩包很少且仓库身份本身就像音源仓库。
-  const packNamed = packs.some(p => /音源|music[-_\s.]?sources?|song[-_\s.]?sources?|lx[-_\s.]?music|lx[-_\s.]?source|lxmusic|plugin/i.test(p.path))
+  //   因此压缩包名要按词匹配音源语义（只看文件名，目录路径不算——CeruMusic 的
+  //   docs/public/plugins/ 目录名就曾把教程 zip 蒙混过去），或者压缩包很少且仓库身份本身就像音源仓库。
+  const packNamed = packs.some(p => /音源|music[-_\s.]?sources?|song[-_\s.]?sources?|lx[-_\s.]?music|lx[-_\s.]?source|lxmusic|lx[-_\s.]?plugin/i.test(String(p.path).split('/').pop() || ''))
   const packOk = packNamed || (packs.length <= 5 && looksLikeSourceRepo(meta))
   if (packs.length && packOk) return { ok: true, reason: '压缩包分发', score: best, packs: packs.length }
   // ★ 只发 Release 资产的仓库：树里可能空空如也，再看一眼 release 资产名。

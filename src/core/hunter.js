@@ -1,6 +1,6 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
-const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch } = require('./crawler')
+const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource } = require('./crawler')
 const { crawlWebSite, isWebRepo } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
@@ -323,6 +323,10 @@ class Hunter {
       const knownRepos = new Set()
       if (rl) for (const r of rl) { const n = normalizeRepo(r.repo); if (n) knownRepos.add(n) }
       for (const e of this.store.getSources()) if (e && e.repo) knownRepos.add(normalizeRepo(e.repo) || e.repo)
+      // v1.10.3 黑名单：被「非音源仓库清理」判定删除的仓库（播放器/管理器/网关等），
+      // 即使名字/描述仍像音源仓库，也不再由搜索发现或社区精选加回清单。
+      const blockedRepos = new Set((Array.isArray(cfg.blockedRepos) ? cfg.blockedRepos : [])
+        .map(x => String(x || '').toLowerCase()).filter(Boolean))
       // v1.9.9 搜索发现：用关键词在 GitHub 搜索新仓库，作为种子的增量补充（不替换种子）。
       // 仅在非定向爬取（reposOverride 为空）且用户开启 searchEnabled 时触发。
       if (cfg.searchEnabled && Array.isArray(cfg.searchKeywords) && cfg.searchKeywords.length) {
@@ -345,6 +349,10 @@ class Hunter {
             verify: cfg.searchVerify !== false,
             verifyConcurrency: 4
           })
+          // 黑名单里的仓库（曾判定为非音源后被清理）直接丢弃，不再回填清单
+          const dReposNew = d.repos.filter(n => !blockedRepos.has(String(normalizeRepo(n) || n).toLowerCase()))
+          const blockedNow = d.repos.length - dReposNew.length
+          d.repos = dReposNew
           if (d.repos.length) {
             repos = repos.concat(d.repos)
             // v1.9.12：把搜索发现的新仓库持久化进仓库清单，使其可被用户单独禁用/删除、且后续记住。
@@ -367,6 +375,7 @@ class Hunter {
             const noSrc = Number(d.droppedNoSource) || 0
             this.log('搜索发现：本轮未找到可用新仓库（可能都已收录或搜索受限' +
               (dropped ? `；已过滤 ${dropped} 个无关仓库` : '') +
+              (blockedNow ? `；黑名单拦截 ${blockedNow} 个` : '') +
               (noSrc ? `；验真剔除 ${noSrc} 个无音源内容` : '') + '）', '爬取')
           }
         } catch (e) {
@@ -387,7 +396,7 @@ class Hunter {
           if (cf.ok) {
             // 仓库大小写不敏感，与已知清单/清单内已有条目都按小写比对，避免同仓不同写法重复入库
             const knownLower = new Set(Array.from(knownRepos).map(x => String(x).toLowerCase()))
-            const fresh = cf.repos.filter(n => !knownLower.has(n.toLowerCase()))
+            const fresh = cf.repos.filter(n => !knownLower.has(n.toLowerCase()) && !blockedRepos.has(n.toLowerCase()))
             if (fresh.length) {
               for (const n of fresh) { knownRepos.add(n); knownLower.add(n.toLowerCase()) }
               repos = repos.concat(fresh)
@@ -830,6 +839,93 @@ class Hunter {
     const vb = versionNum(b.scriptVersion || b.scriptName || b.name)
     if (va !== vb) return va > vb
     return String(a.id) < String(b.id)
+  }
+
+  // ---------------- 非音源仓库清理（v1.10.3） ----------------
+  /**
+   * 自动发现难免把「播放器 / 管理器 / 网关」这类仓库混进清单：它们夹带的
+   * app/src/main/assets 下脚本副本、user-api-preload.js、docs 教程 zip 都会被当成音源收进库
+   * （2026-11-07 实测：16 个仓库带来 695 条垃圾脚本，占全库 27%）。此前平台没有任何清理手段，
+   * 只能逐条手删，而且删了下次发现还会加回来。
+   *
+   * 这里做成可重复执行的一键清理：验真非内置仓库 → 移除确定性失败的仓库 →
+   * 连带删掉它贡献的脚本（记入 deletedIds，不会被重新采集）→ 写入 cfg.blockedRepos 黑名单
+   * （发现器与社区精选都不再加回）。
+   * 只处理确定性失败；HTTP 403/429/5xx、网络异常一律跳过，留待下次再验，避免误删。
+   */
+  async pruneNonSourceRepos(opts) {
+    if (this.job.running) throw new Error('已有任务在运行')
+    const o = opts || {}
+    const cfg = this.store.config
+    const rl = Array.isArray(cfg.repos) ? cfg.repos : null
+    if (!rl || !rl.length) return { checked: 0, removedRepos: [], removedSources: 0, skipped: 0 }
+    // 内置仓库是人工维护的种子，不动；只查附加/发现/社区三类
+    const cands = []
+    const seen = new Set()
+    for (const x of rl) {
+      if (!x || x.origin === 'builtin') continue
+      const n = normalizeRepo(x.repo)
+      if (!n || seen.has(n)) continue
+      seen.add(n); cands.push(n)
+    }
+    const limit = Math.max(1, Number(o.limit) || 40)
+    const batch = cands.slice(0, limit)
+    if (!batch.length) return { checked: 0, removedRepos: [], removedSources: 0, skipped: 0 }
+    this.log(`非音源仓库清理：开始验真 ${batch.length} 个仓库（清单共 ${rl.length} 个，内置跳过）`, '音源库')
+
+    const results = new Array(batch.length)
+    let i = 0
+    await Promise.all(Array.from({ length: Math.min(4, batch.length) }, async () => {
+      while (true) {
+        const k = i++
+        if (k >= batch.length) return
+        const repo = batch[k]
+        try {
+          results[k] = { repo, v: await verifyRepoHasSource(repo, { token: cfg.ghToken, timeoutMs: cfg.timeoutMs }) }
+        } catch (e) {
+          results[k] = { repo, v: { ok: false, reason: 'ERR ' + String((e && e.message) || e) } }
+        }
+      }
+    }))
+    // 临时失败（限流/权限/网络）不算判定结果，绝不据此删东西
+    const isTransient = (r) => /HTTP (403|429|5\d\d)|ERR |ECONN|timeout|abort/i.test(String(r || ''))
+    const dead = results.filter(x => !x.v.ok && !isTransient(x.v.reason))
+    const skipped = results.filter(x => !x.v.ok && isTransient(x.v.reason)).length
+    if (!dead.length) {
+      this.log(`非音源仓库清理：${batch.length} 个仓库全部通过验真（临时失败跳过 ${skipped} 个）`, '音源库')
+      return { checked: batch.length, removedRepos: [], removedSources: 0, skipped }
+    }
+    const deadSet = new Set(dead.map(x => String(x.repo).toLowerCase()))
+    // ① 移出仓库清单
+    const removedRepos = []
+    this.store.config.repos = rl.filter(x => {
+      const n = normalizeRepo(x && x.repo)
+      if (n && deadSet.has(n.toLowerCase())) { removedRepos.push(n); return false }
+      return true
+    })
+    // ② 删掉这些仓库贡献的脚本（removeSources 会记入 deletedIds，后续不会自动加回）
+    const srcIds = []
+    for (const e of this.store.getSources()) {
+      if (!e || e.deprecated) continue
+      const r = normalizeRepo(e.repo)
+      if (r && deadSet.has(r.toLowerCase())) srcIds.push(e.id)
+    }
+    let removedSources = 0
+    if (srcIds.length) {
+      const r = this.store.removeSources(srcIds)
+      removedSources = (r && r.deleted) || srcIds.length
+    }
+    // ③ 黑名单：发现器/社区精选不再回填
+    const blk = new Set((Array.isArray(this.store.config.blockedRepos) ? this.store.config.blockedRepos : [])
+      .map(x => String(x || '').toLowerCase()).filter(Boolean))
+    for (const r of removedRepos) blk.add(r.toLowerCase())
+    this.store.config.blockedRepos = Array.from(blk)
+    this.store.saveConfig()
+    this.store.saveDb()
+    this.log(`非音源仓库清理完成：移除仓库 ${removedRepos.length} 个、连带删除脚本 ${removedSources} 条` +
+      (skipped ? `（临时失败跳过 ${skipped} 个，可再点一次继续）` : '') +
+      `；${removedRepos.slice(0, 6).join('、')}${removedRepos.length > 6 ? '…' : ''}`, '音源库', 'warn')
+    return { checked: batch.length, removedRepos, removedSources, skipped, unchecked: Math.max(0, cands.length - batch.length) }
   }
 
   // ---------------- 检测 ----------------

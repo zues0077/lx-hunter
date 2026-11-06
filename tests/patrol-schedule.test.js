@@ -137,8 +137,10 @@ ok(/推送服务端没开时，不会再一分钟试一次/.test(html), '设置�
 ok(/巡检只<strong>重测<\/strong>已灌入的音源，不会灌入新音源/.test(html), '说明巡检不灌入（澄清「尝试灌入」的误解）')
 ok(/const PUBLIC_PORT = Number\(process\.env\.PUBLIC_PORT \|\| 0\)/.test(web), '启动日志支持 PUBLIC_PORT')
 ok(/外部访问端口 \$\{PUBLIC_PORT\}（容器内监听 \$\{PORT\}）/.test(web), '内/外端口同时说明，不再只显示 7970')
-ok(/app\.js\?v=50/.test(html), 'app.js 缓存戳已 bump')
-ok(/styles\.css\?v=13/.test(html), 'styles.css 缓存戳已 bump（离线角标样式）')
+// 缓存戳断言只校验「不低于已知最小值」，不写死具体数字——
+// 每次改 app.js/styles.css 都要 bump，硬编码会把正常发版判成失败（曾 v=50/13 写死后过期）。
+ok((() => { const m = html.match(/app\.js\?v=(\d+)/); return !!m && Number(m[1]) >= 50 })(), 'app.js 缓存戳已 bump')
+ok((() => { const m = html.match(/styles\.css\?v=(\d+)/); return !!m && Number(m[1]) >= 13 })(), 'styles.css 缓存戳已 bump（离线角标样式）')
 
 console.log('--- ⑤ 服务端离线时的可读性（断线不清库，但要说清是本地快照）---')
 ok(/connOk: null/.test(app), 'state 记录推送服务端连通结果，初始为未知')

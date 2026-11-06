@@ -33,6 +33,7 @@ const api = {
   revoke: (ids) => ipcRenderer.invoke('revoke', ids),
   serverSync: () => ipcRenderer.invoke('server:sync'),
   dbClear: () => ipcRenderer.invoke('db:clear'),
+  reposPrune: (opts) => ipcRenderer.invoke('repos:prune', opts),
   dbDelete: (ids) => ipcRenderer.invoke('db:delete', ids),
   dbDeletedList: () => ipcRenderer.invoke('db:deleted:list'),
   dbDeletedClear: () => ipcRenderer.invoke('db:deleted:clear'),

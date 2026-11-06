@@ -197,6 +197,7 @@
     revoke: ids => call('/api/revoke', { ids }),
     serverSync: () => call('/api/server/sync', {}),
     dbClear: () => call('/api/db/clear', {}),
+    reposPrune: opts => call('/api/repos/prune', opts || {}),
     dbDelete: ids => call('/api/db/delete', { ids }),
     dbDeletedList: () => call('/api/db/deleted/list', {}),
     dbDeletedClear: () => call('/api/db/deleted/clear', {}),
