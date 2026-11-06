@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=10">
+<link rel="stylesheet" href="styles.css?v=11">
+<script src="auth-bg.js?v=1"></script>
 </head>
 <body>
 <div class="app">
@@ -554,6 +555,41 @@
       <button class="btn primary" id="btnAuthReg" style="width:100%">创建并进入</button>
     </div>
     <p class="auth-err" id="authErr" hidden></p>
+  </div>
+
+  <!-- 登录背景：预设配色 + 自定义图片（偏好只存在本浏览器，见 auth-bg.js） -->
+  <button class="auth-bg-toggle" id="btnAuthBg" type="button" title="更换登录背景" aria-expanded="false">
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+      <circle cx="8.5" cy="9.5" r="1.7" fill="currentColor"/>
+      <path d="M4 17.5 9 13l3.5 3 3-2.5 4.5 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    </svg>
+    <span>更换背景</span>
+  </button>
+  <div class="auth-bg-panel" id="authBgPanel" hidden>
+    <div class="auth-bg-head">
+      <strong>登录背景</strong>
+      <button class="auth-bg-x" id="btnAuthBgClose" type="button" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <p class="auth-bg-tip">挑一套配色，或用自己的图片。设置只保存在当前浏览器，不影响其他人。</p>
+    <div class="auth-bg-swatches">
+      <button type="button" class="auth-bg-swatch sw-aurora" data-bg="aurora" aria-pressed="true"><i></i><span>极光</span></button>
+      <button type="button" class="auth-bg-swatch sw-dawn" data-bg="dawn" aria-pressed="false"><i></i><span>暖阳</span></button>
+      <button type="button" class="auth-bg-swatch sw-mint" data-bg="mint" aria-pressed="false"><i></i><span>青碧</span></button>
+      <button type="button" class="auth-bg-swatch sw-night" data-bg="night" aria-pressed="false"><i></i><span>星夜</span></button>
+      <button type="button" class="auth-bg-swatch sw-plain" data-bg="plain" aria-pressed="false"><i></i><span>纯净</span></button>
+    </div>
+    <div class="auth-bg-custom">
+      <label class="auth-bg-label" for="authBgFile">本地图片（自动压缩，不会上传）</label>
+      <input class="auth-bg-file" type="file" id="authBgFile" accept="image/*">
+      <label class="auth-bg-label" for="authBgUrl">或填写图片地址</label>
+      <input class="input" id="authBgUrl" type="url" placeholder="https://example.com/bg.jpg" autocomplete="off" spellcheck="false">
+      <div class="auth-bg-ops">
+        <button class="btn sm" type="button" id="btnAuthBgApply">应用地址</button>
+        <button class="btn sm ghost" type="button" id="btnAuthBgReset">恢复默认</button>
+      </div>
+      <p class="auth-bg-msg" id="authBgMsg"></p>
+    </div>
   </div>
 </div>
 

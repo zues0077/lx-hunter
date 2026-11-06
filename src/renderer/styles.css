@@ -364,13 +364,30 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
 /* ---------------- 登录层（v1.10.0，Web/Docker 版） ---------------- */
 .auth-layer {
   position: fixed; inset: 0; z-index: 999;
-  background: var(--bg);
   display: flex; align-items: center; justify-content: center;
+  padding: 24px; overflow: hidden;
+  /* 预设只改色相 --auth-h1/--auth-h2；明度固定深色，登录页在任何主题下都是同一套观感。 */
+  --auth-h1: 222; --auth-h2: 268; --auth-l: 13%; --auth-s: 48%;
+  --auth-grid: rgba(255,255,255,.055);
+  /* 登录层是独立全屏门面：默认背景（含卡片）固定为深色，不随主界面浅色主题变白。
+     用户 2026-11-06 指定以「极光深色渐变」为默认；只有「纯净」预设会回到主题原色。 */
+  --card: #1c1f27; --card-2: #22262f; --line: #2c313c;
+  --text: #e6e9ef; --text-2: #a2abbb; --muted: #6f7889;
+  --accent: #6ea8fe; --accent-2: #a78bfa; --dead: #f87171;
+  --bg: #14161c; --bg-2: #191c24;
+  background:
+    radial-gradient(820px 560px at 14% 10%, hsl(var(--auth-h1) 92% 62% / .26), transparent 62%),
+    radial-gradient(760px 540px at 86% 88%, hsl(var(--auth-h2) 92% 66% / .24), transparent 60%),
+    linear-gradient(135deg,
+      hsl(var(--auth-h1) var(--auth-s) var(--auth-l)) 0%,
+      hsl(var(--auth-h2) var(--auth-s) calc(var(--auth-l) + 5%)) 52%,
+      hsl(var(--auth-h1) calc(var(--auth-s) - 12%) calc(var(--auth-l) - 5%)) 100%);
 }
 .auth-box {
-  width: 340px; max-width: 92vw;
+  width: 360px; max-width: 92vw;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  box-shadow: var(--shadow); padding: 26px 24px 20px;
+  box-shadow: var(--shadow); padding: 30px 28px 24px;
+  position: relative; z-index: 1;
 }
 .auth-logo {
   width: 52px; height: 52px; margin: 0 auto 10px; border-radius: 12px;
@@ -378,10 +395,100 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
   color: #fff; font-size: 26px; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
 }
-.auth-title { margin: 0 0 16px; text-align: center; font-size: 17px; color: var(--text); }
-.auth-box .field { display: block; margin-bottom: 12px; }
-.auth-box .field > span { display: block; color: var(--text-2); font-size: 12px; margin-bottom: 4px; }
+.auth-title { margin: 0 0 20px; text-align: center; font-size: 17px; color: var(--text); }
+/* 输入框原来沿用浏览器默认宽度（约 190px），按钮却是 width:100%，
+   看起来像整块表单没居中。统一 100% 宽 + 等高后，标签/输入框/按钮左右边缘齐平。 */
+.auth-box .field { display: block; margin-bottom: 14px; }
+.auth-box .field > span { display: block; color: var(--text-2); font-size: 12px; margin-bottom: 6px; }
+.auth-box .input { width: 100%; height: 40px; background: var(--card-2); }
+.auth-box .btn.primary { width: 100%; height: 40px; margin-top: 2px; }
 .auth-err { color: var(--dead); font-size: 13px; margin: 10px 0 0; text-align: center; }
+
+/* ---------------- 可选登录背景（见 auth-bg.js） ---------------- */
+.auth-layer::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(var(--auth-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--auth-grid) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 42%, #000 8%, transparent 78%);
+  mask-image: radial-gradient(ellipse at 50% 42%, #000 8%, transparent 78%);
+}
+html[data-auth-bg="aurora"] .auth-layer { --auth-h1: 222; --auth-h2: 268; --auth-s: 48%; }
+html[data-auth-bg="dawn"] .auth-layer { --auth-h1: 20; --auth-h2: 334; --auth-s: 52%; }
+html[data-auth-bg="mint"] .auth-layer { --auth-h1: 168; --auth-h2: 202; --auth-s: 38%; }
+html[data-auth-bg="night"] .auth-layer { --auth-h1: 236; --auth-h2: 260; --auth-s: 34%; --auth-l: 9%; }
+/* 不再按主界面主题调登录层明度：默认与四套渐变配色一律深色，浅色主题登录时也是同一张图 */
+/* 「纯净」= 回到主界面主题原色（浅色主题下即原来的白底白卡） */
+html[data-theme="light"][data-auth-bg="plain"] .auth-layer {
+  --card: #ffffff; --card-2: #f6f8fc; --line: #e2e6ee;
+  --text: #1a1e26; --text-2: #4d5666; --muted: #8a93a5;
+  --accent: #2563eb; --accent-2: #7c3aed; --dead: #dc2626;
+  --bg: #f4f6fa; --bg-2: #eceff5;
+}
+html[data-auth-bg="plain"] .auth-layer { background: var(--bg); }
+html[data-auth-bg="plain"] .auth-layer::before { display: none; }
+/* 自定义图片：--auth-custom 由 auth-bg.js 写成 url("...")，加一层暗罩保证卡片可读 */
+html[data-auth-bg="custom"] .auth-layer { background: var(--bg) var(--auth-custom, none) center / cover no-repeat; }
+html[data-auth-bg="custom"] .auth-layer::before { display: none; }
+html[data-auth-bg="custom"] .auth-layer::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(155deg, rgba(9,13,28,.24), rgba(9,13,28,.5));
+}
+html[data-theme="light"][data-auth-bg="custom"] .auth-layer::after {
+  background: linear-gradient(155deg, rgba(9,13,28,.16), rgba(9,13,28,.34));
+}
+
+.auth-bg-toggle {
+  position: absolute; right: 20px; bottom: 20px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  padding: 8px 13px; border-radius: 999px; font-size: 12.5px; font-family: inherit;
+  color: #fff; background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.22); backdrop-filter: blur(10px);
+}
+.auth-bg-toggle:hover { background: rgba(255,255,255,.2); }
+html[data-theme="light"] .auth-bg-toggle {
+  color: var(--text); background: rgba(255,255,255,.7); border-color: rgba(30,50,90,.16);
+}
+html[data-theme="light"] .auth-bg-toggle:hover { background: #fff; }
+.auth-bg-panel {
+  position: absolute; right: 20px; bottom: 64px; z-index: 3;
+  width: 300px; max-width: calc(100vw - 40px); padding: 16px;
+  border-radius: 14px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text);
+  box-shadow: 0 14px 40px rgba(0,0,0,.28); font-size: 12.5px;
+}
+.auth-bg-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+.auth-bg-x { border: 0; background: transparent; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.auth-bg-tip { margin: 6px 0 12px; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
+.auth-bg-swatches { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.auth-bg-swatch {
+  border: 1px solid transparent; background: transparent; padding: 4px 2px; border-radius: 9px;
+  cursor: pointer; color: var(--text-2); font-size: 11px; font-family: inherit;
+}
+.auth-bg-swatch:hover { color: var(--text); }
+.auth-bg-swatch i { display: block; height: 34px; border-radius: 8px; margin-bottom: 5px; }
+.auth-bg-swatch.active { border-color: var(--accent); color: var(--text); font-weight: 600; }
+.sw-aurora i { background: linear-gradient(135deg, #3b62d9, #7b46c9); }
+.sw-dawn i { background: linear-gradient(135deg, #e0803c, #c94f86); }
+.sw-mint i { background: linear-gradient(135deg, #2fa38c, #3b7fc4); }
+.sw-night i { background: linear-gradient(135deg, #1b2350, #42306e); }
+.sw-plain i { background: linear-gradient(135deg, #f3f5fa, #d9deea); border: 1px solid var(--line); }
+.auth-bg-custom { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.auth-bg-label { display: block; margin: 8px 0 5px; color: var(--text-2); font-size: 11.5px; }
+.auth-bg-file { width: 100%; font-size: 11px; color: var(--text-2); }
+.auth-bg-file::file-selector-button {
+  margin-right: 8px; padding: 4px 8px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--card-2); color: var(--text);
+  font-family: inherit; font-size: 11px; cursor: pointer;
+}
+.auth-bg-custom .input { width: 100%; background: var(--card-2); }
+.auth-bg-ops { display: flex; gap: 8px; margin-top: 10px; }
+.auth-bg-msg { margin: 8px 0 0; min-height: 15px; color: var(--accent); font-size: 11px; }
+@media (max-width: 520px) {
+  .auth-bg-toggle { right: 12px; bottom: 12px; }
+  .auth-bg-panel { right: 12px; left: 12px; bottom: 56px; width: auto; max-width: none; }
+}
 
 /* 私人音源徽章（v1.10.0） */
 .badge.private {
