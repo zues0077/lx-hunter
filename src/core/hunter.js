@@ -868,9 +868,29 @@ class Hunter {
       if (!n || seen.has(n)) continue
       seen.add(n); cands.push(n)
     }
+    // ⓪ 先清黑名单仓库的残留脚本：上一次清理只删了 active 条目，版本废弃（deprecated）的旧副本
+    //    会留下来（246 实测：首轮删 297 条、残留 398 条 deprecated）。再点一次即可清干净，幂等。
+    const blkSet = new Set((Array.isArray(cfg.blockedRepos) ? cfg.blockedRepos : [])
+      .map(x => String(x || '').toLowerCase()).filter(Boolean))
+    let removedSources = 0
+    if (blkSet.size) {
+      const resIds = []
+      for (const e of this.store.getSources()) {
+        if (!e) continue
+        const r = normalizeRepo(e.repo)
+        if (r && blkSet.has(r.toLowerCase())) resIds.push(e.id)
+      }
+      if (resIds.length) {
+        const rr = this.store.removeSources(resIds)
+        removedSources += (rr && rr.deleted) || 0
+      }
+    }
     const limit = Math.max(1, Number(o.limit) || 40)
     const batch = cands.slice(0, limit)
-    if (!batch.length) return { checked: 0, removedRepos: [], removedSources: 0, skipped: 0 }
+    if (!batch.length) {
+      if (removedSources) this.log(`非音源仓库清理：清理黑名单仓库残留脚本 ${removedSources} 条`, '音源库', 'warn')
+      return { checked: 0, removedRepos: [], removedSources, skipped: 0, unchecked: 0 }
+    }
     this.log(`非音源仓库清理：开始验真 ${batch.length} 个仓库（清单共 ${rl.length} 个，内置跳过）`, '音源库')
 
     const results = new Array(batch.length)
@@ -892,8 +912,9 @@ class Hunter {
     const dead = results.filter(x => !x.v.ok && !isTransient(x.v.reason))
     const skipped = results.filter(x => !x.v.ok && isTransient(x.v.reason)).length
     if (!dead.length) {
-      this.log(`非音源仓库清理：${batch.length} 个仓库全部通过验真（临时失败跳过 ${skipped} 个）`, '音源库')
-      return { checked: batch.length, removedRepos: [], removedSources: 0, skipped }
+      this.log(`非音源仓库清理：${batch.length} 个仓库全部通过验真（临时失败跳过 ${skipped} 个）` +
+        (removedSources ? `；另清理黑名单残留脚本 ${removedSources} 条` : ''), '音源库')
+      return { checked: batch.length, removedRepos: [], removedSources, skipped, unchecked: Math.max(0, cands.length - batch.length) }
     }
     const deadSet = new Set(dead.map(x => String(x.repo).toLowerCase()))
     // ① 移出仓库清单
@@ -903,17 +924,17 @@ class Hunter {
       if (n && deadSet.has(n.toLowerCase())) { removedRepos.push(n); return false }
       return true
     })
-    // ② 删掉这些仓库贡献的脚本（removeSources 会记入 deletedIds，后续不会自动加回）
+    // ② 删掉这些仓库贡献的脚本：不限 deprecated —— 旧版本副本同样是垃圾，统一删干净
+    //    （removeSources 会记入 deletedIds，后续不会自动加回）
     const srcIds = []
     for (const e of this.store.getSources()) {
-      if (!e || e.deprecated) continue
+      if (!e) continue
       const r = normalizeRepo(e.repo)
       if (r && deadSet.has(r.toLowerCase())) srcIds.push(e.id)
     }
-    let removedSources = 0
     if (srcIds.length) {
       const r = this.store.removeSources(srcIds)
-      removedSources = (r && r.deleted) || srcIds.length
+      removedSources += (r && r.deleted) || 0
     }
     // ③ 黑名单：发现器/社区精选不再回填
     const blk = new Set((Array.isArray(this.store.config.blockedRepos) ? this.store.config.blockedRepos : [])
