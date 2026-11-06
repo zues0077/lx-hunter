@@ -235,21 +235,59 @@ function pickScriptsFromZip(entries, archivePath, repo, rawUrl, maxPerArchive) {
 }
 
 /**
- * 仓库新鲜度探测（v1.7.2 时间过滤）：commits?since= 只花 1 次配额就能判断
- * 仓库在时间窗内有没有动静——静默仓库直接整仓跳过（省掉 tree+releases 的 2 次配额）。
- * 返回 { fresh, lastCommitAt, empty }：empty=API 异常（保守起见按 fresh 处理，不漏爬）。
+ * 纯函数：判定仓库在时间窗内是否「新鲜」（无网络，便于单测）。
+ * 规则：时间窗内【有新提交】或【有新发布的 Release】任一成立即新鲜；
+ * 两者都静默（无新提交且无新发布）才不新鲜。返回最新发布时间 lastReleaseAt。
+ * 这是 v1.10.3 修复点：原实现只看 commits，导致「靠发 Release 推音源更新」的仓库
+ * （如 guoyue2010/lxmusic，commit 长期停更但持续发 Release）被整仓跳过、更新采集不到。
+ * @param {Array} commitsArr  commits?since 返回的数组（空=时间窗内无提交）
+ * @param {Array} releasesArr releases 列表
+ * @param {number} sinceTs   时间窗起点（ms）；<=0 表示不限（永远新鲜）
+ */
+function judgeFreshness(commitsArr, releasesArr, sinceTs) {
+  if (!(sinceTs > 0)) return { fresh: true, lastReleaseAt: 0 }   // 不设窗口：永远新鲜
+  const hasCommit = Array.isArray(commitsArr) && commitsArr.length > 0
+  let lastReleaseAt = 0
+  if (Array.isArray(releasesArr)) {
+    for (const r of releasesArr) {
+      const p = r && r.published_at ? Date.parse(r.published_at) || 0 : 0
+      if (p > lastReleaseAt) lastReleaseAt = p
+    }
+  }
+  const hasRelease = lastReleaseAt >= sinceTs
+  return { fresh: hasCommit || hasRelease, lastReleaseAt }
+}
+
+/**
+ * 仓库新鲜度探测（v1.7.2 时间过滤，v1.10.3 修正）：
+ *  ① 先 commits?since= 1 次配额判断有无新提交——命中即新鲜（无需再查 release）。
+ *  ② 若无新提交，再补查 Releases 发布时间（1 次配额）：时间窗内有新发布也算新鲜，
+ *     并把 releases 数组带回，供主流程复用（省掉主流程再取 release 的 1 次配额）。
+ * 只有「无新提交 且 无新发布」的仓库才整仓跳过（省 tree 配额）。
+ * 返回 { fresh, lastCommitAt, lastReleaseAt, releases?, empty }：empty=API 异常（保守放行，不漏爬）。
  */
 async function fetchRepoFreshness(repo, sinceIso, token, timeoutMs) {
+  const sinceTs = Date.parse(sinceIso)
   try {
     const url = `https://api.github.com/repos/${repo}/commits?per_page=1&since=${encodeURIComponent(sinceIso)}`
     const res = await fetchWithTimeout(url, { headers: ghHeaders(token) }, timeoutMs)
     if (!res.ok) return { fresh: true, empty: true }   // 异常不拦路
-    const j = JSON.parse(await readText(res, timeoutMs))
-    if (!Array.isArray(j)) return { fresh: true, empty: true }
-    const last = j[0] && j[0].commit && j[0].commit.committer ? j[0].commit.committer.date : null
-    return { fresh: j.length > 0, lastCommitAt: last ? Date.parse(last) || 0 : 0 }
+    const commits = JSON.parse(await readText(res, timeoutMs))
+    if (!Array.isArray(commits)) return { fresh: true, empty: true }
+    if (commits.length > 0) {
+      const last = commits[0] && commits[0].commit && commits[0].commit.committer ? commits[0].commit.committer.date : null
+      return { fresh: true, lastCommitAt: last ? Date.parse(last) || 0 : 0 }
+    }
   } catch (e) {
     return { fresh: true, empty: true }   // 网络抖动不拦路
+  }
+  // commit 陈旧：补查 Releases（v1.10.3 修复点，避免漏掉只靠 Release 推更新的仓库）
+  try {
+    const releases = await fetchReleases(repo, token, timeoutMs)
+    const j = judgeFreshness([], releases, sinceTs)
+    return { fresh: j.fresh, lastCommitAt: 0, lastReleaseAt: j.lastReleaseAt, releases }
+  } catch (e) {
+    return { fresh: true, empty: true }   // release 探测失败：保守放行，主流程会自行再取
   }
 }
 
@@ -554,15 +592,19 @@ async function crawl(opts, onEvent, shouldStop) {
   const repos = opts.repos || []
   const timeoutMs = opts.timeoutMs || 15000
   const known = opts.known || { archiveSha: {}, assetKeys: new Set() }
-  // 时间窗（v1.7.2）：sinceDays 天内有更新才爬（0=不限）。开销：每仓库 1 次配额探测，
-  // 换来静默仓库整仓跳过（tree+releases 两次配额 + 全部下载），冷仓库多的库净省配额。
+  // 时间窗（v1.7.2，v1.10.3 修正）：sinceDays 天内有「新提交或新发布」才爬（0=不限）。
+  // 开销：每仓库先 1 次 commit 探测；commit 陈旧的仓库再多 1 次 release 探测（若判新鲜则带回
+  // releases 复用、省主流程 1 次配额）。既无提交又无新发布的静默仓库整仓跳过（省 tree 配额），
+  // 冷仓库多的库净省配额。
   const sinceDays = Number(opts.sinceDays) > 0 ? Number(opts.sinceDays) : 0
   const sinceTs = sinceDays ? Date.now() - sinceDays * 86400 * 1000 : 0
   const stats = { added: 0, reposDone: 0, repoTotal: repos.length, linksFound: 0, staleSkipped: 0 }
   // 下载镜像学习：本次运行里第一个成功的镜像优先复用，避免每条资产都把失败的直连重试一遍
   let mirrorPref = null
 
-  // 每个仓库：时间窗开启时多 1 次新鲜度探测，加 tree + releases 两次核心调用
+  // 每个仓库配额预算：commit 探测(1) + [commit 陈旧时 release 探测(1)] + tree(1) +
+  // 主流程 release(1，仅 commit 新鲜时；release 新鲜时已复用探针数据不重复计) ≈ 最坏 3 次/仓库，
+  // 故 sinceDays 开启时按 3 计，下方乘数已覆盖。
   const q = await checkQuota(repos.length * (sinceDays ? 3 : 2) + 2, opts.token)
   if (!q.ok) { onEvent('log', { level: 'error', module: '爬取', msg: q.msg }); return stats }
   if (q.remaining != null) {
@@ -575,12 +617,13 @@ async function crawl(opts, onEvent, shouldStop) {
     stats.reposDone = i + 1
     onEvent('progress', { reposDone: i + 1, repoTotal: repos.length, step: `爬取仓库 ${i + 1}/${repos.length} ${repo}` })
     try {
-      // ⓪ 仓库新鲜度探测（时间窗开启时）：静默仓库整仓跳过
+      // ⓪ 仓库新鲜度探测（时间窗开启时）：无新提交且无新发布的静默仓库整仓跳过
+      let freshProbe = null
       if (sinceTs) {
-        const fresh = await fetchRepoFreshness(repo, new Date(sinceTs).toISOString(), opts.token, timeoutMs)
-        if (!fresh.fresh) {
+        freshProbe = await fetchRepoFreshness(repo, new Date(sinceTs).toISOString(), opts.token, timeoutMs)
+        if (!freshProbe.fresh) {
           stats.staleSkipped++
-          onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：${sinceDays} 天内无提交，整仓跳过` })
+          onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：${sinceDays} 天内无提交且无新发布，整仓跳过` })
           continue
         }
       }
@@ -650,7 +693,8 @@ async function crawl(opts, onEvent, shouldStop) {
       // ② Releases 资产（很多仓库只把音源发在 release 里，不读就漏抓 —— v1.7.0）
       let relHit = 0, relSkipped = 0, relBytes = 0
       try {
-        const releases = await fetchReleases(repo, opts.token, timeoutMs)
+        // 新鲜度探测阶段若已拉过 releases（commit 陈旧的仓库），直接复用，省 1 次配额
+        const releases = (sinceTs && freshProbe && freshProbe.releases) ? freshProbe.releases : await fetchReleases(repo, opts.token, timeoutMs)
         const assets = parseReleaseAssets(releases, { skipKeys: known.assetKeys, sinceTs })
         relSkipped = (releases || []).reduce((n, r) => n + ((r.assets || []).filter(a => known.assetKeys.has(String(r.tag_name || '') + '/' + String(a.name || ''))).length), 0)
         for (const a of assets) {
@@ -738,7 +782,7 @@ async function crawl(opts, onEvent, shouldStop) {
 }
 
 module.exports = {
-  DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness,
+  DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness, judgeFreshness,
   discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, isSourceAsset,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
   filterLatestOnly, latestBaseName, versionNumOf,
