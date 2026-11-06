@@ -1,21 +1,33 @@
-name: docker
+name: Publish Docker image to GHCR
+
+# 发版策略（2026-11-07 起，对齐 lx-music/lxserver 操作手册 P-0818 / P-0801 / P-0812）：
+#   1. 推 main **不再构建镜像**，也不再消耗 Actions 分钟，只做代码托管（静默）。
+#   2. 只有打 vX.Y.Z tag 才出正式镜像；且 tag 必须与 package.json 版本完全一致，
+#      否则构建直接失败（Verify 步骤护栏），杜绝「镜像 tag 与 /health 返回版本错位」。
+#   3. 想在 246 实机试跑而不发版：Actions 页手动 Run workflow_dispatch，
+#      产物 tag 为 test-<短SHA>，不覆盖 latest、不动版本号。
+# 根因教训：v1.10.2 初版漏改 package.json（仍是 1.10.1），且旧流程推 main 就构建并改 latest，
+# 导致界面/health 显示 1.10.1。本文件已加版本一致性校验 + main 静默，堵死此坑。
+# 注：lx-hunter 版本来源只有 package.json（无 config.js），故 bump package.json 即同步 /health 与界面。
+# 平台保持 linux/amd64,linux/arm64（246 为 x86_64；未加 armv7，如需兼容老 ARM 设备再补）。
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
-      retag_version:
-        description: '把版本号 tag（取 package.json 的 version，如 1.7.5 / 1.7）重新指向本次构建；用于修复悬空索引后重新打 tag'
-        type: boolean
-        default: false
+      test_tag:
+        description: '测试镜像后缀（留空则用 commit 短 SHA，产物形如 test-abc1234）'
+        required: false
+        default: ''
 
-# 同一 ref 上的运行串行化：避免两次构建的清理 job 并发互删对方刚推的子清单
+permissions:
+  contents: read
+  packages: write
+
 concurrency:
-  group: docker-${{ github.ref }}
+  group: ghcr-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -23,56 +35,73 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
+  docker:
+    name: Build and publish image
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Read version and short SHA
+        id: v
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "short=$SHORT" >> $GITHUB_OUTPUT
+          echo "版本号: $VERSION  commit: $SHORT"
+
+      # 打 tag 时强制 tag 与 package.json 一致，避免镜像 tag 与代码版本错位
+      # （这是 v1.10.2 错位事故的根因护栏）
+      - name: Verify tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if [ "v${{ steps.v.outputs.version }}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 版本 v${{ steps.v.outputs.version }} 不一致"
+            exit 1
+          fi
+          echo "tag 校验通过：${GITHUB_REF_NAME}"
+
+      # 多架构只在发版时构建；手动测试构建只出 amd64，省一半时间
       - name: Set up QEMU
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from package.json
-        id: ver
-        run: |
-          V=$(node -p "require('./package.json').version")
-          if [ -z "$V" ]; then echo "::error::无法从 package.json 读取 version"; exit 1; fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "mm=$(echo "$V" | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
-
-      - name: Extract image metadata
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ inputs.retag_version == true }}
-            type=raw,value=${{ steps.ver.outputs.mm }},enable=${{ inputs.retag_version == true }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=v${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=tag
+            type=raw,value=test-${{ inputs.test_tag != '' && inputs.test_tag || steps.v.outputs.short }},enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=LX Music 音源猎手 / 音源采集与同步服务
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
 
-      - name: Build and push
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          file: ./Dockerfile
+          # 发版：amd64 + arm64；手动测试：只出 amd64，省一半时间
+          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -94,7 +123,7 @@ jobs:
   cleanup:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: build
+    needs: docker
     permissions:
       packages: write
       contents: read
