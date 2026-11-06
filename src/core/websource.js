@@ -29,6 +29,50 @@ function isWebRepo(repo) {
 }
 
 /**
+ * 从 HTML 表格行里解析每个 .js 链接的「版本号 / 更新时间」（v1.10.1 关键修正）：
+ * 站点文件名里的版本号不可信（实测 zrcdy.dpdns.org/lx/vers.php：文件名
+ * xinghai-music-sourcev2.3.17.js 对应的真实版本是 v3.2.17，页面表格另有版本号列）。
+ * 只认「不含链接文件名的单元格」里的版本号，更新时间取 yyyy-mm-dd。
+ * 返回 Map(小写绝对URL -> {version, updatedAt})
+ */
+function extractLinkMeta(html, baseUrl) {
+  const meta = new Map()
+  const rowRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi
+  let m
+  while ((m = rowRe.exec(String(html || ''))) !== null) {
+    const row = m[1]
+    const hrefM = row.match(/(?:href|src)\s*=\s*["']([^"']+\.js)(\?[^"']*)?["']/i)
+    if (!hrefM) continue
+    let abs = null
+    try { abs = new URL(hrefM[1] + (hrefM[2] || ''), baseUrl).toString() } catch (e) { continue }
+    const tds = []
+    const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi
+    let tm
+    while ((tm = tdRe.exec(row)) !== null) {
+      tds.push(tm[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+    }
+    let fname = ''
+    try { fname = decodeURIComponent(new URL(abs).pathname.split('/').pop() || '') } catch (e) { fname = abs }
+    let version = null
+    let updatedAt = 0
+    for (const t of tds) {
+      if (t && fname && t.includes(fname)) continue   // 文件名单元格自带的版本号不可信
+      if (version == null) {
+        const vm = t.match(/[vV]?\d+(?:\.\d+)+/)
+        if (vm) version = vm[0].replace(/^v/i, '')
+      }
+      const dm = t.match(/(\d{4})-(\d{1,2})-(\d{1,2})/)
+      if (dm) {
+        const ts = Date.parse(dm[0].replace(/-(\d{1,2})-(\d{1,2})$/, (s, a, b) => '-' + a.padStart(2, '0') + '-' + b.padStart(2, '0')))
+        if (!Number.isNaN(ts)) updatedAt = ts
+      }
+    }
+    meta.set(abs.toLowerCase(), { version, updatedAt })
+  }
+  return meta
+}
+
+/**
  * 从 HTML 里提取 .js 直链：
  *  - href / src 属性里的 *.js（不带 query 的按原样；带 query 的也放行）
  *  - 相对路径按页面地址解析为绝对 URL
@@ -78,19 +122,28 @@ async function crawlWebSite(siteUrl, opts, onEvent, shouldStop) {
     return stats
   }
   let links = []
+  let meta = new Map()
   try { links = extractJsLinks(html, siteUrl) } catch (e) { links = [] }
+  // 页面表格里的「版本号 / 更新时间」（文件名版本不可信，见 extractLinkMeta 注释）
+  try { meta = extractLinkMeta(html, siteUrl) } catch (e) { meta = new Map() }
   stats.links = links.length
   if (!links.length) { log('info', `${siteUrl}：页面里没有发现 .js 直链`); return stats }
   log('info', `${siteUrl}：发现 ${links.length} 个 .js 直链，开始下载甄别…`)
 
   // 「只收最新版」（v1.10.0 设定）：下载前先按文件名分组，跳过同组旧版本，省下载也省库位
   if (o.latestOnly) {
-    const f = filterLatestOnly(links.map((l, i) => ({ _i: i, name: l.name, url: l.url })))
+    const enriched = links.map(l => {
+      const mt = meta.get(l.url.toLowerCase()) || {}
+      return Object.assign({}, l, { version: mt.version || null, updatedAt: mt.updatedAt || 0 })
+    })
+    const f = filterLatestOnly(enriched)
     stats.droppedOld = f.dropped.length
     if (f.dropped.length) {
       log('info', `${siteUrl}：按「只收最新版」跳过 ${f.dropped.length} 个旧版本直链`)
       const keepSet = new Set(f.kept.map(x => x.url))
-      links = links.filter(l => keepSet.has(l.url))
+      links = enriched.filter(l => keepSet.has(l.url))
+    } else {
+      links = enriched
     }
   }
 
@@ -146,4 +199,4 @@ async function crawlWebSite(siteUrl, opts, onEvent, shouldStop) {
   return stats
 }
 
-module.exports = { isWebRepo, extractJsLinks, crawlWebSite, MAX_CANDIDATES_PER_SITE }
+module.exports = { isWebRepo, extractJsLinks, extractLinkMeta, crawlWebSite, MAX_CANDIDATES_PER_SITE }

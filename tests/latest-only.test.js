@@ -52,4 +52,20 @@ assert.strictEqual(normalizeRepo('git@github.com:a/b.git'), 'a/b')
 assert.strictEqual(normalizeRepo('a/b'), 'a/b')
 assert.strictEqual(normalizeRepo(''), null)
 
+// v1.10.1 关键修正：文件名版本不可信（v2.3.17.js 实际是 v3.2.17），显式版本号优先
+const f6 = filterLatestOnly([
+  { name: 'xinghai-music-sourcev3.2.6', version: '3.2.6' },
+  { name: 'xinghai-music-sourcev2.3.17', version: '3.2.17' },   // 站点表格标注的真实版本
+  { name: 'xinghai-music-sourcev2.3.16', version: '3.2.16' }
+])
+assert.strictEqual(f6.kept.length, 1)
+assert.strictEqual(f6.kept[0].name, 'xinghai-music-sourcev2.3.17', '显式版本 3.2.17 > 3.2.6，文件名不是判断依据')
+
+// 都无版本号但有时间 → 更新时间新的赢
+const f7 = filterLatestOnly([
+  { name: 'foo', updatedAt: 1700000000000 },
+  { name: 'foo', updatedAt: 1800000000000 }
+])
+assert.strictEqual(f7.kept[0].updatedAt, 1800000000000)
+
 console.log('latest-only.test.js：全部通过')

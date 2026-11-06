@@ -143,15 +143,25 @@ function filterLatestOnly(items) {
     if (!base || base.length <= 2) continue   // 弱名：不入组，保留
     ;(groups[base] = groups[base] || []).push(it)
   }
+  // 版本取值优先级：条目自带的显式版本号（网页站表格解析）> 文件名里的版本号。
+  // 文件名版本不可信的实例：xinghai-music-sourcev2.3.17.js 的真实版本是 v3.2.17（站点表格标注）。
+  const vOf = (it) => {
+    if (it && it.version) return versionNumOf(String(it.version))
+    return versionNumOf(String((it && (it.name || it.scriptName)) || ''))
+  }
   const kept = []
   const dropped = []
   let groupCount = 0
   for (const [base, list] of Object.entries(groups)) {
     if (list.length < 2) { kept.push(list[0]); continue }
-    const withV = list.map(it => ({ it, v: versionNumOf(String(it.name || it.scriptName || '')) }))
-    if (!withV.some(x => x.v > 0)) { for (const x of withV) kept.push(x.it); continue }
+    const withV = list.map(it => ({ it, v: vOf(it), at: Number(it && it.updatedAt) || 0 }))
+    const hasVersion = withV.some(x => x.v > 0)
+    const hasTime = withV.some(x => x.at > 0)
+    if (!hasVersion && !hasTime) { for (const x of withV) kept.push(x.it); continue }
     groupCount++
-    withV.sort((a, b) => b.v - a.v || String(a.it.name || '').localeCompare(String(b.it.name || '')))
+    // 版本号高的赢；都无版本号时比更新时间（网页站表格列）；再同按名字稳定序
+    withV.sort((a, b) => b.v - a.v || b.at - a.at ||
+      String(a.it.name || '').localeCompare(String(b.it.name || '')))
     kept.push(withV[0].it)
     for (let i = 1; i < withV.length; i++) dropped.push(withV[i].it)
   }
