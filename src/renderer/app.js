@@ -394,7 +394,7 @@ function renderRepoList(repos, defaultRepos) {
       <label class="repo-toggle"><input type="checkbox" class="repo-enabled" ${on ? 'checked' : ''}><span>${on ? '启用' : '已禁用'}</span></label>
       <span class="repo-name">${esc(r.repo)}</span>
       ${kindTag}<span class="repo-origin origin-${esc(r.origin)}">${o}</span>
-      <button class="btn btn-sm repo-crawl" title="主动采集：只爬这一个${isWeb ? '网页音源站' : '仓库'}（绕过 30 天新鲜度过滤）">采集</button>
+      <button class="btn btn-sm repo-crawl" title="主动采集：只爬这一个${isWeb ? '网页音源站' : '仓库'}（采集策略按设置：时间窗 + 只收最新版）">采集</button>
       <button class="btn btn-sm danger-ghost repo-del" title="从清单移除（内置仓库可「恢复默认」找回）">删除</button>
     </div>`
   }).join('')
@@ -425,7 +425,8 @@ $('repoList').addEventListener('change', async (ev) => {
 $('repoList').addEventListener('click', async (ev) => {
   const crawlBtn = ev.target.closest('.repo-crawl')
   if (crawlBtn) {
-    // v1.10.6 主动采集：只爬这一行（GitHub 仓库或网页音源站），不吃新鲜度过滤
+    // v1.10.6 主动采集：只爬这一行（GitHub 仓库或网页音源站）。
+    // v1.10.7：行级按钮只改变「采哪些仓库」，采集策略仍按设置走（时间窗 / 只收最新版）。
     const row = crawlBtn.closest('.repo-row')
     const name = row && row.getAttribute('data-repo')
     if (!name) return
@@ -436,7 +437,14 @@ $('repoList').addEventListener('click', async (ev) => {
     try {
       const r = await api.crawlStart({ only: [name] })
       if (r.ok) {
-        toast(`「${name}」采集完成：新增 ${r.data.added} 条、更新 ${r.data.updated} 条、跳过 ${r.data.skipped} 条`, 'ok')
+        const d = r.data || {}
+        if (!d.added && !d.updated && d.staleSkipped) {
+          // 被设置的时间窗挡下：说清原因和改法，别让用户以为按钮失效
+          toast(`「${name}」在 ${d.sinceDays} 天内无提交也无新发布，按设置跳过；如需强制采集，把「只爬近期更新的仓库」改为 0`, 'err')
+        } else {
+          const extra = d.staleSkipped ? `（另有 ${d.staleSkipped} 个仓库在 ${d.sinceDays} 天内无更新被跳过）` : ''
+          toast(`「${name}」采集完成：新增 ${d.added} 条、更新 ${d.updated} 条、跳过 ${d.skipped} 条${extra}`, 'ok')
+        }
         loadSources()
       } else toast('采集失败: ' + r.error, 'err')
     } finally {

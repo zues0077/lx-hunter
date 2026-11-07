@@ -615,7 +615,7 @@ async function crawl(opts, onEvent, shouldStop) {
   // 冷仓库多的库净省配额。
   const sinceDays = Number(opts.sinceDays) > 0 ? Number(opts.sinceDays) : 0
   const sinceTs = sinceDays ? Date.now() - sinceDays * 86400 * 1000 : 0
-  const stats = { added: 0, reposDone: 0, repoTotal: repos.length, linksFound: 0, staleSkipped: 0, deadRepos: [] }
+  const stats = { added: 0, reposDone: 0, repoTotal: repos.length, linksFound: 0, staleSkipped: 0, staleRepos: [], deadRepos: [] }
   // 下载镜像学习：本次运行里第一个成功的镜像优先复用，避免每条资产都把失败的直连重试一遍
   let mirrorPref = null
 
@@ -645,6 +645,8 @@ async function crawl(opts, onEvent, shouldStop) {
         }
         if (!freshProbe.fresh) {
           stats.staleSkipped++
+          // v1.10.7：记下名字，供行级主动采集如实回报「为什么一条都没采到」
+          stats.staleRepos.push(repo)
           onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：${sinceDays} 天内无提交且无新发布，整仓跳过` })
           continue
         }

@@ -304,8 +304,9 @@ class Hunter {
     const cfg = this.store.config
     const incremental = !!(opts && opts.incremental)
     // v1.10.6 主动采集：opts.only 非空时只爬这几个仓库/网页站（清单页每行「采集」按钮）。
-    // 定向模式跳过搜索发现/社区精选/采集站等附加阶段，也**不吃 crawlSinceDays 新鲜度过滤**——
-    // 用户点名要采的，往往正是「30 天内无提交被整仓跳过」的那批，再过滤就永远采不到。
+    // 定向模式只跳过「搜索发现 / 社区精选 / 采集站附加阶段」这些会扩面到别的仓库的环节，
+    // **采集策略一律按设置走**（v1.10.7）：crawlSinceDays 时间窗、crawlLatestOnly 只收最新版
+    // 与全量爬取完全一致——行级按钮只改变「采哪些仓库」，不改变「怎么采」。
     const onlyRepos = Array.isArray(opts && opts.only) ? opts.only.map(x => String(x || '').trim()).filter(Boolean) : []
     // 爬取前顺手刷新镜像池（低频，失败不影响爬取）
     try { await this.refreshMirrorPool(false) } catch (e) {}
@@ -313,6 +314,8 @@ class Hunter {
     // 原先声明在 try 块前一行，TDZ 引用直接 ReferenceError —— 有采集站配置时爬取必炸。
     const merge = { added: 0, updated: 0, skipped: 0 }
     let total = 0
+    // v1.10.7：爬取统计提到 try 外，返回给前端（行级采集要回报「被时间窗跳过」的原因）
+    let crawlStats = null
     // reposOverride 非空时只爬这些仓库（省 GitHub 配额，也便于定向补源）
     let repos
     if (onlyRepos.length) {
@@ -455,8 +458,8 @@ class Hunter {
       const known = this._knownMaps()   // 手动/定时爬取都用判重地图：压缩包 sha 未变不解压、release 资产已抓不重下
       // crawlSinceDays（v1.7.2）：只爬 N 天内有更新的仓库（0=不限）。静默仓库整仓跳过，
       // 新发布的 release 资产也按发布时间过滤——树内文件不受影响（sha 判重已覆盖）。
-      // 主动采集（opts.only）绕过该过滤：用户点名的仓库就是要强制采一遍。
-      const sinceDays = onlyRepos.length ? 0 : Math.max(0, Number(cfg.crawlSinceDays) || 0)
+      // v1.10.7：行级主动采集同样吃这个时间窗（只改变采哪些仓库，不改变怎么采）。
+      const sinceDays = Math.max(0, Number(cfg.crawlSinceDays) || 0)
       // v1.10.0：仓库清单里可能有「网页音源站」（http(s) 网址，非 owner/repo）。
       // 两类分流：GitHub 仓库走 crawl()（API 配额），网页站走 crawlWebSite()（纯 HTTP，零配额）。
       const ghRepos = repos.filter(r => !isWebRepo(r))
@@ -465,6 +468,11 @@ class Hunter {
         this.log(`其中 ${webRepos.length} 个为网页音源站（非 GitHub），走通用网页解析采集`, '爬取')
       }
       const latestOnly = cfg.crawlLatestOnly !== false
+      // v1.10.7：行级主动采集同样按设置走，把生效策略明写进日志，
+      // 避免用户点了「采集」却以为是「无条件整仓全采」。
+      if (onlyRepos.length) {
+        this.log(`主动采集遵循设置：${sinceDays ? `只爬 ${sinceDays} 天内有更新的仓库` : '时间窗不限（0 天）'}；${latestOnly ? '同组只收最新版' : '保留全部版本'}`, '爬取')
+      }
       // 爬取事件的统一处理（GitHub 爬取与网页站采集共用一套合并逻辑）
       const onCrawlEvent = (type, payload) => {
         if (type === 'repo') {
@@ -481,13 +489,18 @@ class Hunter {
           this.progress({ reposDone: payload.reposDone, repoTotal: payload.repoTotal })
         }
       }
-      let crawlStats = null
       if (ghRepos.length) {
         crawlStats = await crawl({ repos: ghRepos, token: cfg.ghToken, maxCandidatesPerRepo: cfg.maxCandidatesPerRepo, timeoutMs: cfg.timeoutMs, mirror: cfg.mirror, known, sinceDays, latestOnly },
           onCrawlEvent,
           () => this.cancelRequested)
       } else if (webRepos.length) {
         this.log('仓库清单中没有 GitHub 仓库，跳过 GitHub 爬取（不消耗 API 配额）', '爬取')
+      }
+      // v1.10.7：行级主动采集被设置的时间窗挡下时，必须如实说明原因——
+      // 否则用户看到「新增 0 条」会以为按钮坏了，而不是「该仓库在设置的时间窗内没有更新」。
+      if (onlyRepos.length && crawlStats && crawlStats.staleSkipped) {
+        const names = (crawlStats.staleRepos || []).slice(0, 5).join('、')
+        this.log(`主动采集：${names}${(crawlStats.staleRepos || []).length > 5 ? ' 等' : ''} 在 ${sinceDays} 天内无提交且无新发布，按设置整仓跳过；如需强制采集，把设置页「只爬近期更新的仓库」改为 0`, '爬取', 'warn')
       }
       // 网页音源站采集（v1.10.0）：与 GitHub 爬取并列的一类仓库来源
       if (webRepos.length) {
@@ -541,7 +554,14 @@ class Hunter {
         summary: Object.assign({ incremental }, merge)
       })
     }
-    return { added: total, updated: merge.updated, skipped: merge.skipped }
+    return {
+      added: total, updated: merge.updated, skipped: merge.skipped,
+      // v1.10.7：把「被设置的时间窗跳过」如实带回前端，行级采集才能解释「为什么 0 条」
+      staleSkipped: (crawlStats && crawlStats.staleSkipped) || 0,
+      staleRepos: (crawlStats && crawlStats.staleRepos) || [],
+      sinceDays: Math.max(0, Number(cfg.crawlSinceDays) || 0),
+      latestOnly: cfg.crawlLatestOnly !== false
+    }
   }
 
   /**

@@ -432,7 +432,7 @@
         <h3 class="card-title">定时爬取（增量发现新音源）</h3>
         <div class="grid-form">
           <label class="field"><span>爬取间隔（小时）</span><input class="input" id="cfgCrawlHours" type="number" min="1" max="720"></label>
-          <label class="field"><span>只爬近期更新的仓库（天，0=不限）</span><input class="input" id="cfgCrawlSinceDays" type="number" min="0" max="365"></label>
+          <label class="field"><span>只爬近期更新的仓库（天，0=不限，单个「采集」同样生效）</span><input class="input" id="cfgCrawlSinceDays" type="number" min="0" max="365"></label>
         </div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgCrawlOn"><span>启用定时爬取（按上面的间隔自动增量爬取）</span></label>
@@ -616,6 +616,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=49"></script>
-<script src="app.js?v=53"></script>
+<script src="app.js?v=54"></script>
 </body>
 </html>

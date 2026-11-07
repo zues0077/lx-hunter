@@ -293,7 +293,8 @@ ck('清单页有清理按钮与确认文案', htmlSrc.includes('id="btnPruneNonS
 console.log('\n== v1.10.6 行级主动采集 ==')
 ck('runCrawl 支持 opts.only 定向采集', hSrc.includes('onlyRepos') && hSrc.includes("opts && opts.only"))
 ck('定向采集优先级高于 reposOverride', /onlyRepos\.length\)[\s\S]{0,220}reposOverride/.test(hSrc))
-ck('定向采集绕过 crawlSinceDays 新鲜度过滤', hSrc.includes('onlyRepos.length ? 0 :'))
+ck('定向采集不再绕过 crawlSinceDays 时间窗（v1.10.7）', !hSrc.includes('onlyRepos.length ? 0 :') && /const sinceDays = Math\.max\(0, Number\(cfg\.crawlSinceDays\) \|\| 0\)/.test(hSrc))
+ck('定向采集仍读 crawlLatestOnly（只收最新版）', /const latestOnly = cfg\.crawlLatestOnly !== false/.test(hSrc))
 ck('定向采集为空时报错而非全量跑', hSrc.includes("没有可识别的仓库"))
 ck('采集站支持单站采集（onlyId）', fs.readFileSync(path.join(__dirname, '../src/core/hubfeed.js'), 'utf8').includes('o.onlyId'))
 ck('runHubSync 支持按 id 采单个站点', hSrc.includes('opts.id') && hSrc.includes("采集站不存在或已禁用"))
@@ -306,6 +307,19 @@ ck('清单每行有「采集」按钮', appSrc.includes('repo-crawl') && appSrc.
 ck('采集站每行有「采集」按钮', appSrc.includes('hub-sync') && appSrc.includes('只采这一个站点'))
 ck('行级采集走定向参数 only', appSrc.includes("crawlStart({ only: [name] })"))
 ck('单站采集走 id 参数', appSrc.includes('hubsSync({ id })'))
+
+// ---------- ⑪ v1.10.7 行级采集遵循设置页策略（时间窗 / 只收最新版） ----------
+// 用户诉求：点单个仓库的「采集」也要按设置走，不能无条件整仓全采。
+console.log('\n== v1.10.7 行级采集遵循设置 ==')
+const cSrc2 = fs.readFileSync(path.join(__dirname, '../src/core/crawler.js'), 'utf8')
+ck('crawler 记录被时间窗跳过的仓库名', cSrc2.includes('staleRepos') && /stats\.staleRepos\.push\(repo\)/.test(cSrc2))
+ck('runCrawl 回传 staleSkipped/staleRepos/sinceDays', hSrc.includes('staleSkipped: (crawlStats && crawlStats.staleSkipped) || 0') && hSrc.includes('staleRepos: (crawlStats && crawlStats.staleRepos) || []'))
+ck('主动采集日志打印生效策略', hSrc.includes('主动采集遵循设置'))
+ck('被时间窗挡下时给出改法提示', hSrc.includes('把设置页「只爬近期更新的仓库」改为 0'))
+ck('前端 0 条且被时间窗跳过时说明原因', appSrc.includes('天内无提交也无新发布，按设置跳过'))
+ck('采集按钮不再宣称绕过过滤', !appSrc.includes('绕过 30 天新鲜度过滤'))
+ck('设置页标注时间窗对单个采集生效', htmlSrc.includes('单个「采集」同样生效'))
+ck('缓存戳提升到 app.js v54', htmlSrc.includes('app.js?v=54'))
 
 // ---------- 汇总 ----------
 console.log(`\n${bad ? 'FAIL' : 'ALL PASS'}（失败 ${bad} 项）`)
