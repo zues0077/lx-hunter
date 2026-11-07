@@ -4,6 +4,7 @@ name: Publish Docker image to GHCR
 #   1. 推 main **不再构建镜像**，也不再消耗 Actions 分钟，只做代码托管（静默）。
 #   2. 只有打 vX.Y.Z tag 才出正式镜像；且 tag 必须与 package.json 版本完全一致，
 #      否则构建直接失败（Verify 步骤护栏），杜绝「镜像 tag 与 /health 返回版本错位」。
+#      预发布 tag（vX.Y.Z-beta.N）只出精确版本标签，**不动 latest**（beta 不能顶掉正式版）。
 #   3. 想在 246 实机试跑而不发版：Actions 页手动 Run workflow_dispatch，
 #      产物 tag 为 test-<短SHA>，不覆盖 latest、不动版本号。
 # 根因教训：v1.10.2 初版漏改 package.json（仍是 1.10.1），且旧流程推 main 就构建并改 latest，
@@ -49,7 +50,13 @@ jobs:
           SHORT=$(echo "${GITHUB_SHA}" | cut -c1-7)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "short=$SHORT" >> $GITHUB_OUTPUT
-          echo "版本号: $VERSION  commit: $SHORT"
+          # 预发布（1.10.6-beta.1 这类）不得移动 latest：测试版一旦顶掉 latest，
+          # 所有匿名拉 :latest 的用户都会被拉到 beta 上（P-0814 / P-1007 红线）。
+          case "$VERSION" in
+            *-*) echo "prerelease=true" >> $GITHUB_OUTPUT ;;
+            *)   echo "prerelease=false" >> $GITHUB_OUTPUT ;;
+          esac
+          echo "版本号: $VERSION  commit: $SHORT  prerelease: $([ "${VERSION#*-}" != "$VERSION" ] && echo yes || echo no)"
 
       # 打 tag 时强制 tag 与 package.json 一致，避免镜像 tag 与代码版本错位
       # （这是 v1.10.2 错位事故的根因护栏）
@@ -83,7 +90,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.v.outputs.prerelease == 'false' }}
             type=raw,value=v${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=ref,event=tag
