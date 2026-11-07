@@ -89,6 +89,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=auto（默认）会自己给 semver tag 补 latest，且**不判断预发布**——
+          # 实测 v1.10.6-beta.1 被自动打了 latest。必须显式关掉，latest 只由下面那条 raw 决定。
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && steps.v.outputs.prerelease == 'false' }}
             type=raw,value=v${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
