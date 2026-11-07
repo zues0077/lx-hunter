@@ -34,6 +34,7 @@ const api = {
   serverSync: () => ipcRenderer.invoke('server:sync'),
   dbClear: () => ipcRenderer.invoke('db:clear'),
   reposPrune: (opts) => ipcRenderer.invoke('repos:prune', opts),
+  sourcesTrustObf: (id, trust) => ipcRenderer.invoke('sources:trustObf', { id, trust }),
   dbDelete: (ids) => ipcRenderer.invoke('db:delete', ids),
   dbDeletedList: () => ipcRenderer.invoke('db:deleted:list'),
   dbDeletedClear: () => ipcRenderer.invoke('db:deleted:clear'),

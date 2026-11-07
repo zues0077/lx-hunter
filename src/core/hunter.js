@@ -299,8 +299,19 @@ class Hunter {
     }
   }
 
+  // 任务入口守卫（v1.10.8）：忙时拒绝必须落日志——过去只把「已有任务在运行」抛给前端 toast，
+  // 日志页毫无痕迹（246 实测：用户点「采集」被拒，日志页只有登录记录，以为功能坏了）。
+  // 请求本身也在这里留痕：哪怕被拒，日志里能看到「谁在什么时候想跑什么」。
+  jobGate(kind, detail) {
+    if (this.job.running) {
+      const cur = `${this.job.type || '未知'}${this.job.step ? '（' + this.job.step + '）' : ''}`
+      this.log(`任务被拒绝：已有任务在运行——${cur}；本次「${kind}${detail ? '：' + detail : ''}」未执行。可等当前任务结束，或在音源库页点停止`, '任务', 'warn')
+      throw new Error(`已有任务在运行：${cur}（本次「${kind}」未执行，详见日志）`)
+    }
+  }
+
   async runCrawl(opts) {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate(opts && Array.isArray(opts.only) && opts.only.length ? '主动采集' : (opts && opts.incremental ? '定时增量爬取' : '全量爬取'), opts && Array.isArray(opts.only) && opts.only.length ? opts.only.join('、') : '')
     const cfg = this.store.config
     const incremental = !!(opts && opts.incremental)
     // v1.10.6 主动采集：opts.only 非空时只爬这几个仓库/网页站（清单页每行「采集」按钮）。
@@ -575,7 +586,7 @@ class Hunter {
    * @returns {{added:number, perHub:Array, hubTotal:number}}
    */
   async runHubSync(opts) {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('采集站同步', opts && opts.id ? String(opts.id) : '')
     const cfg = this.store.config
     // v1.10.6 主动采集：opts.id 非空时只采这一个站点（采集站列表每行「采集」按钮）
     const onlyId = (opts && opts.id) || null
@@ -623,7 +634,7 @@ class Hunter {
    * @returns {{crawl:object|null, detect:object|null, import:object|null, skipped:string|null}}
    */
   async runAutoPipeline() {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('自动流水线')
     const cfg = this.store.config
     const out = { crawl: null, detect: null, import: null, skipped: null }
 
@@ -886,7 +897,7 @@ class Hunter {
    * 只处理确定性失败；HTTP 403/429/5xx、网络异常一律跳过，留待下次再验，避免误删。
    */
   async pruneNonSourceRepos(opts) {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('清理失效仓库')
     const o = opts || {}
     const cfg = this.store.config
     const rl = Array.isArray(cfg.repos) ? cfg.repos : null
@@ -982,8 +993,100 @@ class Hunter {
   }
 
   // ---------------- 检测 ----------------
+  // 混淆隔离闸门（v1.10.7）：high 级混淆不再直接判死，而是移入「混淆隔离」区（status=quarantined），
+  // 条目仍留在音源库中可见。用户在隔离页对「无恶意硬特征」的脚本点「信任」后，按 contentHash
+  // 记入 cfg.trustedObfHashes，检测/灌入两道闸共用本函数放行；内容一变哈希就变，重新被隔离
+  // ——信任不跟随未知的新版本。返回 {rejected, trusted}；codeOf 返回空串/null 表示拿不到脚本正文（放行）。
+  applyObfGate(list, codeOf, phase) {
+    const cfg = this.store.config
+    if (!cfg.excludeHighRiskObfuscated) return { rejected: 0, trusted: 0 }
+    const trustedHashes = Array.isArray(cfg.trustedObfHashes) ? cfg.trustedObfHashes : []
+    const kept = []
+    let rejected = 0
+    let trusted = 0
+    for (const e of list) {
+      const code = codeOf(e)
+      if (code) {
+        const risk = obfuscationRisk(code)
+        if (risk.level === 'high') {
+          e.obfLevel = 'high'
+          e.obfHits = risk.hits
+          if (e.contentHash && trustedHashes.includes(e.contentHash)) {
+            e.obfTrusted = true
+            e.quarantined = false
+            if (e.status === 'quarantined') e.status = 'ok'
+            trusted++
+            kept.push(e)
+            continue
+          }
+          e.status = 'quarantined'
+          e.quarantined = true
+          e.usable = false
+          e.error = '混淆隔离：重度混淆脚本，已移入「混淆隔离」区，可在该页信任后放行'
+          rejected++
+          this.emit('source-updated', e)
+          continue
+        }
+      }
+      kept.push(e)
+    }
+    if (rejected) {
+      list.length = 0
+      list.push(...kept)
+      this.log(`${phase}隔离 ${rejected} 条重度混淆脚本（已移入「混淆隔离」区，可在该页信任后放行）`, '安全', 'warn')
+      this.store.saveDb()
+    }
+    return { rejected, trusted }
+  }
+
+  // 混淆隔离：信任 / 取消信任（v1.10.7）。
+  // 信任 = 把条目的 contentHash 记入设置 trustedObfHashes（按内容豁免，内容更新自动失效），
+  // 并把条目恢复 ok；usable 仍按深度体检结果。仅无恶意硬特征（空转死循环/混淆自调度/
+  // jsjiami 标识/eval）的脚本允许信任——命中硬特征的真恶意脚本没有放行通道。
+  trustObfSource(id, trust) {
+    const e = this.store.db.sources[id]
+    if (!e || e.deprecated) throw new Error('音源不存在或已废弃')
+    const cfg = this.store.config
+    const hashes = Array.isArray(cfg.trustedObfHashes) ? cfg.trustedObfHashes.slice() : []
+    const name = e.lxName || e.scriptName || e.name || id
+    if (trust) {
+      if (!e.contentHash) throw new Error('该条目没有内容指纹（contentHash），无法按内容信任')
+      const hits = e.obfHits || {}
+      const hard = (hits.spinLoops || 0) > 0 || (hits.selfSchedCalls || 0) > 0 ||
+        (hits.jsjiamiMarks || 0) > 0 || (hits.evalCalls || 0) > 0
+      if (hard) throw new Error('命中反调试/混淆器硬特征（空转死循环/自调度定时器/jsjiami/eval），不允许信任')
+      if (!hashes.includes(e.contentHash)) {
+        hashes.push(e.contentHash)
+        this.store.saveConfig({ trustedObfHashes: hashes })
+      }
+      e.obfTrusted = true
+      e.quarantined = false
+      if (e.status === 'quarantined') e.status = 'ok'
+      e.error = ''
+      e.usable = !!(e.deep && e.deep.checkedAt && usableCount(e) > 0)
+      this.log(`已信任混淆脚本「${name}」，从隔离区放行（内容变更会重新隔离；深度体检可用性照常执行）`, '安全', 'info')
+    } else {
+      const i = e.contentHash ? hashes.indexOf(e.contentHash) : -1
+      if (i >= 0) {
+        hashes.splice(i, 1)
+        this.store.saveConfig({ trustedObfHashes: hashes })
+      }
+      e.obfTrusted = false
+      if (e.obfLevel === 'high' && cfg.excludeHighRiskObfuscated) {
+        e.status = 'quarantined'
+        e.quarantined = true
+        e.usable = false
+        e.error = '混淆隔离：重度混淆脚本，已移入「混淆隔离」区，可在该页信任后放行'
+      }
+      this.log(`已取消信任「${name}」${(e.obfLevel === 'high' && cfg.excludeHighRiskObfuscated) ? '，重新移入混淆隔离区' : ''}`, '安全', 'info')
+    }
+    this.emit('source-updated', e)
+    this.store.saveDb()
+    return { id: e.id, trusted: !!trust, status: e.status, usable: e.usable, trustedHashes: hashes.length }
+  }
+
   async runCheck(ids, opts) {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('检测', (ids && ids.length ? ids.length + ' 条' : '全部候选'))
     const opt = opts || {}
     // full=true：全平台完整检测（关掉快速模式并强制重测），用于「补全平台覆盖」
     const cfg = opt.full ? Object.assign({}, this.store.config, { quickCheck: false }) : this.store.config
@@ -1004,34 +1107,12 @@ class Hunter {
     // v1.9.5 起判级还包含反调试硬特征（while(!![]){} 空转死循环 / 混淆自调度定时器 /
     // jsjiami 标识），依据 2026-10-15 NAS 实测：jsjiami.com.v7 混淆的脚本独吞 60%+ CPU。
     // 只剔 high（密度超高阈值或命中硬特征），mid 级标注不剔除，由用户自行判断。
+    // v1.10.7 起 high 不再直接判死（status=dead），而是移入「混淆隔离」区（status=quarantined）：
+    // 用户可在隔离页对无恶意硬特征的脚本点「信任」，按 contentHash 放行。
     // 注意：灌入阶段（runImport）还有一道同样的闸门，兜住「开关前检测的老条目」与「手动直灌」。
-    let obfRejected = 0
-    if (cfg.excludeHighRiskObfuscated) {
-      const kept = []
-      for (const e of list) {
-        const code = typeof e.code === 'string' && e.code ? e.code : null
-        if (code) {
-          const risk = obfuscationRisk(code)
-          if (risk.level === 'high') {
-            e.status = 'dead'
-            e.error = '重度混淆脚本，已按设置剔除'
-            e.obfLevel = 'high'
-            e.obfHits = risk.hits
-            e.usable = false
-            obfRejected++
-            this.emit('source-updated', e)
-            continue
-          }
-        }
-        kept.push(e)
-      }
-      if (obfRejected) {
-        list.length = 0
-        list.push(...kept)
-        excluded += obfRejected
-      }
-    }
-    if (obfRejected) this.log(`已按设置剔除 ${obfRejected} 条重度混淆脚本（高危，建议拒绝使用；可在设置里关闭此剔除）`, '安全', 'warn')
+    const obfGate = this.applyObfGate(list, (e) => (typeof e.code === 'string' && e.code ? e.code : null), '检测')
+    const obfRejected = obfGate.rejected
+    if (obfRejected) excluded += obfRejected
     if (ids && ids.length && !list.length) {
       this.log(`所选 ${picked.length} 条全部无需本地检测（已合并的重复项 / 无原始脚本地址的服务端音源 / 高危混淆剔除），未执行检测`, '检测', 'warn')
       return { usable: 0, total: 0, excluded, notSource: 0, depInline: 0 }
@@ -1272,7 +1353,7 @@ class Hunter {
    * 省掉最贵的沙箱取链耗时。
    */
   async runHash(ids) {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('指纹去重', (ids && ids.length ? ids.length + ' 条' : '全部'))
     const cfg = this.store.config
     const list = (ids && ids.length ? ids.map(i => this.store.db.sources[i]).filter(Boolean) : this.store.getSources())
       .filter(e => !e.deprecated && !e.fromServer)
@@ -1313,7 +1394,16 @@ class Hunter {
         this.emit('source-updated', e)
         this.step(`指纹 ${i + 1}/${list.length} ${e.name}`)
         try {
-          const { code } = await checkBasic(e, cfg, (t, p) => this.emit(t, p), this.mirrorPref)
+          // 单条硬超时（v1.10.8）：镜像候选链（多轮尝试）+ 慢读取可能把单条拖到几分钟，
+          // 而 cancel 只在条目间检查——246 实测一条 agg-source 下载卡住整个指纹阶段，
+          // 期间用户点「采集」全部被「已有任务在运行」拒绝且日志无痕迹。超时按失败跳过，任务绝不卡死。
+          const hardTmo = Math.max(45000, (cfg.timeoutMs || 15000) * 4)
+          const { code } = await new Promise((resolve, reject) => {
+            const tm = setTimeout(() => reject(new Error(`单条处理硬超时（${Math.round(hardTmo / 1000)}s，已跳过）`)), hardTmo)
+            checkBasic(e, cfg, (t, p) => this.emit(t, p), this.mirrorPref).then(
+              (r) => { clearTimeout(tm); resolve(r) },
+              (err) => { clearTimeout(tm); reject(err) })
+          })
           if (e.fetchMirror) this.mirrorPref = e.fetchMirror
           if (e.status === 'ok' && code) {
             hashed++
@@ -1395,7 +1485,7 @@ class Hunter {
    *  3. 「已灌入」记录按平台分类（platformId + importedTo[]），撤回按当前账号过滤。
    */
   async runImport(ids, opts) {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('灌入', (ids && ids.length ? ids.length + ' 条' : '全部待灌'))
     const cfg = this.store.config
     const targets = (ids || []).map(i => this.store.db.sources[i]).filter(Boolean)
     if (!targets.length) throw new Error('没有选中任何音源')
@@ -1486,43 +1576,19 @@ class Hunter {
     }
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => dlWorker()))
 
-    // 混淆剔除闸门（v1.9.5）：灌入前按当前设置再过一遍高危混淆/反调试特征。
-    // 检测阶段（runCheck）已经剔过一轮，但有两条路径会绕开它：
+    // 混淆隔离闸门（v1.9.5 引入，v1.10.7 改为隔离+可信任）：灌入前按当前设置再过一遍高危混淆/反调试特征。
+    // 检测阶段（runCheck）已经过一轮，但有两条路径会绕开它：
     //  ① 库里的老条目 —— 当初检测时这个开关还没开（或从没重新检测过）；
     //  ② 用户手动勾选直接灌入 —— 压根没过检测。
-    // 用户要求「勾选后每次灌入都自动剔除」，所以这里兜底，判级与检测阶段完全同一标准
+    // 用户要求「勾选后每次灌入都自动隔离」，所以这里兜底，判级与检测阶段完全同一标准
     // （obfuscationRisk：密度超高阈值，或命中空转死循环/混淆自调度/jsjiami 标识）。
-    let obfRejected = 0
-    if (cfg.excludeHighRiskObfuscated) {
-      const kept = []
-      for (const e of targets) {
-        const code = codeCache[e.id] || (typeof e.code === 'string' && e.code ? e.code : '') || ''
-        if (code) {
-          const risk = obfuscationRisk(code)
-          if (risk.level === 'high') {
-            e.status = 'dead'
-            e.error = '重度混淆脚本，已按设置剔除'
-            e.obfLevel = 'high'
-            e.obfHits = risk.hits
-            e.usable = false
-            obfRejected++
-            this.emit('source-updated', e)
-            continue
-          }
-        }
-        kept.push(e)
-      }
-      if (obfRejected) {
-        targets.length = 0
-        targets.push(...kept)
-        this.log(`灌入前剔除 ${obfRejected} 条高危混淆脚本（重度混淆/反调试特征，建议拒绝使用；可在设置里关闭此剔除）`, '安全', 'warn')
-        this.store.saveDb()
-      }
-      if (!targets.length) {
-        this.job.running = false
-        this.emit('job', { running: false, type: 'import', done: true, summary: { ok: 0, replaced: 0, synced: 0, skipped: 0, total: 0, obfRejected } })
-        return { results: [], ok: 0, replaced: 0, synced: 0, skipped: 0, total: 0, obfRejected }
-      }
+    // 「混淆隔离」页信任过的条目（trustedObfHashes 按 contentHash）在这里放行。
+    const obfGate = this.applyObfGate(targets, (e) => codeCache[e.id] || (typeof e.code === 'string' && e.code ? e.code : '') || '', '灌入前')
+    const obfRejected = obfGate.rejected
+    if (!targets.length) {
+      this.job.running = false
+      this.emit('job', { running: false, type: 'import', done: true, summary: { ok: 0, replaced: 0, synced: 0, skipped: 0, total: 0, obfRejected } })
+      return { results: [], ok: 0, replaced: 0, synced: 0, skipped: 0, total: 0, obfRejected }
     }
 
     // 去重与同名裁决规划（纯函数 _planImportQueue，便于单测）——每个账号各规划一份：
@@ -2085,7 +2151,7 @@ class Hunter {
    *  - 之前因巡检失效被禁用、现在恢复可用 → 自动重新启用
    */
   async runPatrol() {
-    if (this.job.running) throw new Error('已有任务在运行')
+    this.jobGate('巡检')
     const cfg = this.store.config
     const svc = this._active()
     let serverList = []

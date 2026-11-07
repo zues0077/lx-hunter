@@ -319,7 +319,45 @@ ck('被时间窗挡下时给出改法提示', hSrc.includes('把设置页「只�
 ck('前端 0 条且被时间窗跳过时说明原因', appSrc.includes('天内无提交也无新发布，按设置跳过'))
 ck('采集按钮不再宣称绕过过滤', !appSrc.includes('绕过 30 天新鲜度过滤'))
 ck('设置页标注时间窗对单个采集生效', htmlSrc.includes('单个「采集」同样生效'))
-ck('缓存戳提升到 app.js v54', htmlSrc.includes('app.js?v=54'))
+ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.test(htmlSrc))
+
+// ---------- ⑫ v1.10.8 混淆隔离区 + 单条信任 ----------
+// 用户诉求：混淆源被自动排除后在界面上"看不见"；要求加一个「混淆隔离」页（已灌入与设置之间），
+// 隔离的源可在该页点「信任放行」正常使用；命中反调试硬特征的仍不允许放行。
+{
+  const storeSrc = fs.readFileSync(path.join(__dirname, '../src/core/store.js'), 'utf8')
+  const webSrc = fs.readFileSync(path.join(__dirname, '../src/server/web.js'), 'utf8')
+  const mainSrc = fs.readFileSync(path.join(__dirname, '../src/main/index.js'), 'utf8')
+  const preloadSrc = fs.readFileSync(path.join(__dirname, '../src/main/preload.js'), 'utf8')
+  const bridgeSrc = fs.readFileSync(path.join(__dirname, '../src/renderer/web-bridge.js'), 'utf8')
+  console.log('\n== v1.10.8 混淆隔离区 ==')
+  ck('store 默认 trustedObfHashes 空名单', storeSrc.includes('trustedObfHashes: []'))
+  ck('隔离闸：quarantined 状态取代直接判死', hSrc.includes("e.status = 'quarantined'") && !hSrc.includes("重度混淆脚本，已按设置剔除"))
+  ck('检测/灌入两道闸共用 applyObfGate', (hSrc.match(/this\.applyObfGate\(/g) || []).length >= 2)
+  ck('trustObfSource 按 contentHash 信任', hSrc.includes('trustObfSource(id, trust)') && hSrc.includes('trustedObfHashes'))
+  ck('硬特征条目不允许信任', hSrc.includes('不允许信任') && /spinLoops \|\| 0[\s\S]{0,120}evalCalls \|\| 0/.test(hSrc))
+  ck('信任后 status 恢复 ok 且 usable 按 deep', hSrc.includes("if (e.status === 'quarantined') e.status = 'ok'") && hSrc.includes('usableCount(e) > 0'))
+  ck('隔离 API 路由 /api/sources/trust-obf', webSrc.includes('/api/sources/trust-obf'))
+  ck('桌面 IPC sources:trustObf', mainSrc.includes("'sources:trustObf'") && preloadSrc.includes('sourcesTrustObf'))
+  ck('bridge sourcesTrustObf', bridgeSrc.includes('sourcesTrustObf: (id, trust)'))
+  ck('导航含「混淆隔离」且位于已灌入与设置之间', /data-view="installed"[\s\S]{0,200}data-view="quarantine"[\s\S]{0,200}data-view="settings"/.test(htmlSrc))
+  ck('隔离区视图与渲染函数', htmlSrc.includes('id="view-quarantine"') && htmlSrc.includes('id="qzList"') && appSrc.includes('function renderQuarantine'))
+  ck('硬特征条目按钮禁用', appSrc.includes('不可信任'))
+  ck('音源库徽章显示混淆隔离', appSrc.includes("status === 'quarantined'") && appSrc.includes('混淆隔离</span>'))
+  ck('隔离条目不落入「未检测」筛选', appSrc.includes("e.status !== 'quarantined'"))
+  ck('设置页文案改为隔离表述', htmlSrc.includes('自动隔离') && htmlSrc.includes('「混淆隔离」页'))
+  ck('缓存戳提升到 app.js v55 / web-bridge v50 / styles v16', htmlSrc.includes('app.js?v=55') && htmlSrc.includes('web-bridge.js?v=50') && htmlSrc.includes('styles.css?v=16'))
+
+  // —— v1.10.8 日志全面优化（任务被拒落日志 / 单条硬超时 / 日志筛选+自动刷新+任务chip） ——
+  console.log('\n== v1.10.8 日志优化 ==')
+  ck('忙时拒绝落日志（jobGate）', hSrc.includes('jobGate(kind, detail)') && hSrc.includes('任务被拒绝：已有任务在运行'))
+  ck('8 个任务入口全部走 jobGate', (hSrc.match(/this\.jobGate\(/g) || []).length >= 8)
+  ck('指纹单条硬超时兜底', hSrc.includes('单条处理硬超时') && hSrc.includes('Math.max(45000'))
+  ck('日志页有模块/级别筛选与自动刷新', htmlSrc.includes('id="logFilterModule"') && htmlSrc.includes('id="logFilterLevel"') && htmlSrc.includes('id="logAutoRefresh"'))
+  ck('导航栏任务状态 chip', htmlSrc.includes('id="jobChip"') && appSrc.includes('refreshJobChip'))
+  ck('日志增量轮询 + 行去重', appSrc.includes('pollLogsOnce') && appSrc.includes('logKeyOf'))
+  ck('筛选统计显示条数', appSrc.includes('logShownCount') && appSrc.includes('applyLogFilter'))
+}
 
 // ---------- 汇总 ----------
 console.log(`\n${bad ? 'FAIL' : 'ALL PASS'}（失败 ${bad} 项）`)

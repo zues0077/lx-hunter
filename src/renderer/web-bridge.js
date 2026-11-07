@@ -198,6 +198,7 @@
     serverSync: () => call('/api/server/sync', {}),
     dbClear: () => call('/api/db/clear', {}),
     reposPrune: opts => call('/api/repos/prune', opts || {}),
+    sourcesTrustObf: (id, trust) => call('/api/sources/trust-obf', { id, trust }),
     dbDelete: ids => call('/api/db/delete', { ids }),
     dbDeletedList: () => call('/api/db/deleted/list', {}),
     dbDeletedClear: () => call('/api/db/deleted/clear', {}),

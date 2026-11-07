@@ -437,6 +437,8 @@ route('POST', '/api/repos/prune', guard(async (req, res, ctx) => await hunter.pr
   limit: Number((ctx.body || {}).limit) || 40
 })))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
+// 混淆隔离：信任/取消信任（v1.10.7）——body {id, trust}
+route('POST', '/api/sources/trust-obf', guard(async (req, res, ctx) => await hunter.trustObfSource(String((ctx.body || {}).id || ''), !!(ctx.body || {}).trust)))
 route('POST', '/api/hash', guard(async (req, res, ctx) => await hunter.runHash(ctx.body.ids)))
 // v1.8.0：body.platformIds 可显式指定灌入目标（不给则用设置里标记「参与批量灌入」的账号）
 route('POST', '/api/import', guard(async (req, res, ctx) => await hunter.runImport(ctx.body.ids, { platformIds: ctx.body.platformIds })))

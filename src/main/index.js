@@ -465,6 +465,8 @@ ipcMain.handle('db:clear', guard(() => {
 
 // 非音源仓库清理（v1.10.3）：与 Web 版 /api/repos/prune 同语义
 ipcMain.handle('repos:prune', guard((e, opts) => hunter.pruneNonSourceRepos(opts || {})))
+// 混淆隔离：信任/取消信任（v1.10.7）
+ipcMain.handle('sources:trustObf', guard((e, args) => hunter.trustObfSource(String((args || {}).id || ''), !!(args || {}).trust)))
 
 // 手动删除选中音源（v1.10.2）：与 Web 版 /api/db/delete 同签名、同语义
 ipcMain.handle('db:delete', guard((e, ids) => {  if (!Array.isArray(ids) || !ids.length) throw new Error('没有选中要删除的音源')

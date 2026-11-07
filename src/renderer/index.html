@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 <script src="auth-bg.js?v=2"></script>
 </head>
 <body>
@@ -13,15 +13,17 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-logo">猎</div>
-      <div class="brand-text">
-        <div class="brand-title">音源猎手</div>
-        <div class="brand-sub">PC 版 v1.9.20</div>
-      </div>
+        <div class="brand-text">
+          <div class="brand-title">音源猎手</div>
+          <div class="brand-sub">PC 版 v1.9.20</div>
+        </div>
+        <span class="job-chip" id="jobChip" hidden title="当前有任务在运行；此时再点采集/检测/灌入会被拒绝并记入日志"></span>
     </div>
     <nav class="nav">
       <button class="nav-item active" data-view="library"><span class="ni">◈</span>音源库</button>
       <button class="nav-item" data-view="import"><span class="ni">⇪</span>灌入</button>
       <button class="nav-item" data-view="installed"><span class="ni">☰</span>已灌入</button>
+      <button class="nav-item" data-view="quarantine"><span class="ni">⛨</span>混淆隔离</button>
       <button class="nav-item" data-view="settings"><span class="ni">⚙</span>设置</button>
       <button class="nav-item" data-view="logs"><span class="ni">▤</span>日志</button>
     </nav>
@@ -238,6 +240,24 @@
       </div>
     </section>
 
+    <!-- ===== 混淆隔离（v1.10.7）===== -->
+    <section class="view" id="view-quarantine">
+      <header class="view-head">
+        <div>
+          <h1>混淆隔离区</h1>
+          <p class="hint">重度混淆/反调试脚本不再直接判死，而是隔离在这里。确认可信的脚本点「信任放行」即可正常检测和灌入（按内容指纹豁免，<strong>脚本内容一有更新就自动重新隔离</strong>）。命中反调试硬特征（空转死循环 / 混淆自调度定时器 / jsjiami / eval）的脚本不可信任。</p>
+        </div>
+        <div class="row" style="gap:8px">
+          <span class="badge warn" id="qzCount">0</span>
+          <button class="btn ghost" id="btnQzRefresh" title="重新读取隔离区列表">刷新</button>
+        </div>
+      </header>
+      <div class="card">
+        <div id="qzList"></div>
+        <div class="empty" id="qzEmpty">隔离区是空的 —— 没有被隔离的混淆脚本</div>
+      </div>
+    </section>
+
     <!-- ===== 设置 ===== -->
     <section class="view" id="view-settings">
       <header class="view-head">
@@ -367,7 +387,7 @@
         </div>
         <div class="field-row"><span class="hint" style="width:auto">本开关是后加的，库里大量历史音源身上没有探活结果；而开着「跳过已检测」时这些音源不重新拉代码，探测不会触发，音源库的「后端N在线/失效×N」徽章就一直空着。批量补探在每轮检测收尾后单跑一段，只挑缺结果的音源（可用的优先），探满上限或达到预算即停，剩下的下一轮继续，多跑几轮自然补齐。</span></div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>每次灌入自动剔除<strong>高危混淆/反调试</strong>脚本（安全建议，依据 lx-ikun issue#8 与 NAS CPU 占用实测：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门，<strong>空转死循环 while(!![]){}、混淆自调度定时器等反调试特征会独吞 CPU</strong>；检测与灌入阶段都会剔除，局部混淆只标注不剔除）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgExcludeObf"><span>每次灌入自动隔离<strong>高危混淆/反调试</strong>脚本（安全建议，依据 lx-ikun issue#8 与 NAS CPU 占用实测：音源脚本没有混淆的必要，重度混淆常用于隐藏木马/后门，<strong>空转死循环 while(!![]){}、混淆自调度定时器等反调试特征会独吞 CPU</strong>；检测与灌入阶段都会隔离，局部混淆只标注不隔离。被隔离的脚本集中在<strong>「混淆隔离」页</strong>，确认可信可点「信任放行」）</span></label>
         </div>
       </div>
 
@@ -546,6 +566,23 @@
           <button class="btn ghost" id="btnClearLogs">清空</button>
         </div>
       </header>
+      <div class="card log-toolbar">
+        <label class="lb-item">模块
+          <select class="input" id="logFilterModule">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="lb-item">级别
+          <select class="input" id="logFilterLevel">
+            <option value="">全部</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+        <label class="chk lb-item"><input type="checkbox" id="logAutoRefresh" checked><span>自动刷新（进入本页后每 5 秒拉取新日志）</span></label>
+        <span class="lb-hint" id="logShownCount"></span>
+      </div>
       <div class="card">
         <div class="logs" id="logBox"></div>
       </div>
@@ -615,7 +652,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=49"></script>
-<script src="app.js?v=54"></script>
+<script src="web-bridge.js?v=50"></script>
+<script src="app.js?v=55"></script>
 </body>
 </html>

@@ -207,7 +207,9 @@ document.querySelectorAll('.nav-item').forEach(btn => {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'))
     $('view-' + btn.dataset.view).classList.add('active')
     if (btn.dataset.view === 'installed') refreshInstalled()
-    if (btn.dataset.view === 'logs') flushLogs()
+    if (btn.dataset.view === 'quarantine') renderQuarantine()
+    if (btn.dataset.view === 'logs') { refreshLogModuleOptions(); applyLogFilter(); startLogPolling() }
+    else stopLogPolling()
   })
 })
 
@@ -1294,7 +1296,7 @@ function matchFilter(e) {
     case 'dead': if (!(e.status === 'dead' || isDeepDead(e))) return false; break
     // 「未检测」= 完全没跑过检测的；已检测但不是音源脚本的也算已检测
     // 已合并的重复项不算「未检测」：它不需要检测，是内容/名称与保留项重复
-    case 'unchecked': if (e.deprecated || e.deep || e.status === 'dead' || isCheckedNoSource(e)) return false; break
+    case 'unchecked': if (e.deprecated || e.deep || e.status === 'dead' || e.status === 'quarantined' || isCheckedNoSource(e)) return false; break
     // 「已实测」= 真实探针通过（validTier=confirmed），即脚本已被沙箱实测能取到可播链接
     case 'confirmed': if (e.validTier !== 'confirmed') return false; break
     // 「已灌入」= 本次所有灌入目标账号都已有它（只灌过 A 的源，目标含 B 时不算已灌入）
@@ -1346,6 +1348,61 @@ function obfTip(e) {
     : `含局部混淆${detail}：可能用于防和谐，也可能藏统计上报/后门，建议自行甄别`
 }
 
+// ---------------- 混淆隔离区（v1.10.7） ----------------
+function qzHardHits(e) {
+  const h = e.obfHits || {}
+  return (h.spinLoops || 0) > 0 || (h.selfSchedCalls || 0) > 0 || (h.jsjiamiMarks || 0) > 0 || (h.evalCalls || 0) > 0
+}
+
+function qzDeepSummary(e) {
+  if (!e.deep || !e.deep.checkedAt) return '尚未深度体检（信任放行后可跑「检测」确认实际可用性）'
+  const plats = e.deep.platforms || {}
+  const usableN = Object.values(plats).filter(p => p && p.status === 'usable').length
+  return `深度体检：${e.deep.loadable ? '可加载' : '不可加载'}，实测可用平台 ${usableN} 个`
+}
+
+function renderQuarantine() {
+  const list = (state.sources || []).filter(e => e.status === 'quarantined' || e.quarantined)
+  $('qzCount').textContent = list.length + ' 条被隔离'
+  $('qzEmpty').hidden = list.length > 0
+  $('qzList').innerHTML = list.map(e => {
+    const hard = qzHardHits(e)
+    const size = e.size ? Math.max(1, Math.round(e.size / 1024)) + 'KB' : ''
+    return `<div class="qz-row" data-id="${esc(e.id)}">
+      <div class="qz-main">
+        <span class="qz-name">${esc(e.lxName || e.scriptName || e.name || e.id)}</span>
+        <span class="qz-meta">${esc(e.repo || '')}${size ? ' · ' + size : ''} · ${esc(obfTip(e))}</span>
+        <span class="qz-deep">${esc(qzDeepSummary(e))}</span>
+      </div>
+      ${hard
+        ? `<button class="btn btn-sm ghost" disabled title="命中反调试/混淆器硬特征（空转死循环/混淆自调度定时器/jsjiami/eval），属于真恶意特征，不允许信任">不可信任</button>`
+        : `<button class="btn btn-sm qz-trust" title="信任后按内容指纹放行，正常检测与灌入；脚本内容一有更新就自动重新隔离">信任放行</button>`}
+    </div>`
+  }).join('')
+}
+
+$('qzList').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.qz-trust')
+  if (!btn || btn.disabled) return
+  const row = btn.closest('.qz-row')
+  const id = row && row.getAttribute('data-id')
+  if (!id) return
+  btn.disabled = true; btn.textContent = '处理中…'
+  const r = await api.sourcesTrustObf(id, true)
+  if (r.ok) {
+    toast('已信任放行：可正常检测与灌入（内容更新会重新隔离）', 'ok')
+    await loadSources()
+    renderQuarantine()
+  } else {
+    toast('信任失败: ' + r.error, 'err')
+    btn.disabled = false; btn.textContent = '信任放行'
+  }
+})
+$('btnQzRefresh').addEventListener('click', async () => {
+  await loadSources()
+  renderQuarantine()
+})
+
 function platCells(e) {
   // 去重废弃的重复条目从没单独跑过检测，画五个灰格子会让人以为「检测没生效」。
   // 直接说明它被合并了，别让人对着一片「未检测」猜。
@@ -1383,6 +1440,7 @@ function statusCell(e) {
   // 内容有更新（定时爬取发现上游换了内容，检测结果已重置）—— 不能显示成普通「未检测」
   if (e.updated && !e.deep) return '<span class="badge warn" title="上游内容已变更（定时爬取发现），检测结果已重置：重新检测后生效；灌入时会自动替换服务端上的同名旧版">有更新·待检测</span>'
   if (e.usable) return '<span class="badge ok">可用</span>'
+  if (e.status === 'quarantined') return `<span class="badge warn" title="${esc(obfTip(e))}">混淆隔离</span>`
   if (e.status === 'dead') return '<span class="badge fail">失效</span>'
   // 缺少洛雪音源接口特征的脚本与疑似音源合并显示（都归入「疑似音源」），但 tooltip 区分
   if (e.suspected) return '<span class="badge warn">疑似</span>'
@@ -1838,9 +1896,11 @@ api.onEvent(ev => {
 
 api.onLog(e => appendLog(e))
 
-// ---------------- 日志（缓冲渲染，切页时一次性刷入） ----------------
+// ---------------- 日志（缓冲渲染，切页时一次性刷入；v1.10.8 加筛选/去重/自动刷新） ----------------
 const logBuf = []
 let logFlushTimer = null
+const logKeys = new Set()          // 已渲染行去重（实时推送与轮询可能重叠）
+const logKeyOf = e => (e.at || 0) + '|' + (e.module || '') + '|' + (e.msg || '')
 function appendLog(e) {
   logBuf.push(e)
   if (logBuf.length > 600) logBuf.splice(0, logBuf.length - 600)
@@ -1853,21 +1913,108 @@ function flushLogs() {
   if (!logBuf.length) return
   const box = $('logBox')
   const frag = document.createDocumentFragment()
-  for (const e of logBuf) frag.appendChild(logLine(e))
+  for (const e of logBuf) {
+    const k = logKeyOf(e)
+    if (logKeys.has(k)) continue
+    logKeys.add(k)
+    frag.appendChild(logLine(e))
+  }
   logBuf.length = 0
+  if (!frag.childNodes.length) return
   box.appendChild(frag)
-  while (box.childElementCount > 1500) box.removeChild(box.firstChild)
+  trimLogDom(box)
+  applyLogFilter()
   box.scrollTop = box.scrollHeight
+}
+function trimLogDom(box) {
+  while (box.childElementCount > 1500) {
+    const first = box.firstChild
+    logKeys.delete(first.dataset.key)
+    box.removeChild(first)
+  }
+  if (logKeys.size > 4000) logKeys.clear()
 }
 function logLine(e) {
   const d = new Date(e.at || Date.now())
   const hh = n => String(n).padStart(2, '0')
   const div = document.createElement('div')
   div.className = 'log-line' + (e.level === 'warn' ? ' warn' : e.level === 'error' ? ' error' : '')
+  div.dataset.key = logKeyOf(e)
+  div.dataset.module = e.module || ''
+  div.dataset.level = e.level || 'info'
   div.innerHTML = `<span class="log-time">${hh(d.getHours())}:${hh(d.getMinutes())}:${hh(d.getSeconds())}</span>` +
     `<span class="log-mod">${esc(e.module || '')}</span><span class="log-msg">${esc(e.msg)}</span>`
   return div
 }
+// —— 日志筛选 + 自动刷新（v1.10.8）：模块下拉动态收集、级别过滤、进入本页每 5s 拉增量 ——
+function logFilterState() {
+  return { module: $('logFilterModule').value || '', level: $('logFilterLevel').value || '' }
+}
+function applyLogFilter() {
+  const { module: fm, level: fl } = logFilterState()
+  const box = $('logBox')
+  let shown = 0
+  for (const line of box.children) {
+    const ok = (!fm || line.dataset.module === fm) && (!fl || line.dataset.level === fl)
+    line.hidden = !ok
+    if (ok) shown++
+  }
+  $('logShownCount').textContent = `显示 ${shown} / ${box.childElementCount} 条`
+}
+function refreshLogModuleOptions() {
+  const sel = $('logFilterModule')
+  const cur = sel.value
+  const mods = new Set()
+  for (const line of $('logBox').children) if (line.dataset.module) mods.add(line.dataset.module)
+  sel.innerHTML = '<option value="">全部</option>' + Array.from(mods).sort().map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
+  sel.value = cur && (cur === '' || mods.has(cur)) ? cur : ''
+}
+let logPollTimer = null
+async function pollLogsOnce() {
+  refreshJobChip()
+  if (!$('view-logs').classList.contains('active')) return
+  if (!$('logAutoRefresh').checked) return
+  const r = await api.logsGet()
+  if (!r.ok) return
+  const box = $('logBox')
+  const frag = document.createDocumentFragment()
+  for (const e of (r.data || [])) {
+    const k = logKeyOf(e)
+    if (logKeys.has(k)) continue
+    logKeys.add(k)
+    frag.appendChild(logLine(e))
+  }
+  if (!frag.childNodes.length) { applyLogFilter(); return }
+  box.appendChild(frag)
+  trimLogDom(box)
+  refreshLogModuleOptions()
+  applyLogFilter()
+  box.scrollTop = box.scrollHeight
+}
+async function refreshJobChip() {
+  try {
+    const r = await api.jobState()
+    if (!r.ok) return
+    const d = r.data || {}
+    const chip = $('jobChip')
+    if (d.running) {
+      chip.hidden = false
+      chip.textContent = '⏳ ' + (d.step || (d.type === 'crawl' ? '爬取中' : d.type || '任务运行中'))
+    } else {
+      chip.hidden = true
+    }
+  } catch (e) { /* 掉线不打扰 */ }
+}
+function startLogPolling() {
+  stopLogPolling()
+  pollLogsOnce()
+  logPollTimer = setInterval(pollLogsOnce, 5000)
+}
+function stopLogPolling() {
+  if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null }
+}
+$('logFilterModule').addEventListener('change', applyLogFilter)
+$('logFilterLevel').addEventListener('change', applyLogFilter)
 
 // ---------------- 爬取 / 检测 ----------------
 $('btnCrawl').addEventListener('click', async () => {
@@ -2796,7 +2943,7 @@ $('btnRevokeSelected').addEventListener('click', async () => {
 })
 
 // ---------------- 其他 ----------------
-$('btnClearLogs').addEventListener('click', async () => { await api.logsClear(); $('logBox').innerHTML = '' })
+$('btnClearLogs').addEventListener('click', async () => { await api.logsClear(); $('logBox').innerHTML = ''; logKeys.clear() })
 $('btnOpenData').addEventListener('click', () => api.openDataDir())
 $('btnExport').addEventListener('click', async () => {
   const scope = $('expFilter') ? $('expFilter').value : 'all'
@@ -2819,7 +2966,7 @@ function matchScope(e, k) {
     case 'suspected': return !e.usable && e.status !== 'dead' && (e.suspected || isCheckedNoSource(e))
     case 'dead': return e.status === 'dead' || isDeepDead(e)
     // 已合并的重复项不该出现在「导出未检测」里：它们不是漏检，是重复
-    case 'unchecked': return !e.deprecated && !e.deep && e.status !== 'dead' && !isCheckedNoSource(e)
+    case 'unchecked': return !e.deprecated && !e.deep && e.status !== 'dead' && e.status !== 'quarantined' && !isCheckedNoSource(e)
     // 导出「已灌入」同样按灌入目标口径：只灌过 A 的源在目标含 B 时不算已灌入（还需补灌）
     case 'imported': return importedState(e) === 'all'
     default: return true
@@ -3053,10 +3200,19 @@ async function boot() {
   if (lr.ok) {
     const box = $('logBox')
     const frag = document.createDocumentFragment()
-    for (const e of (lr.data || [])) frag.appendChild(logLine(e))
+    for (const e of (lr.data || [])) {
+      const k = logKeyOf(e)
+      if (logKeys.has(k)) continue
+      logKeys.add(k)
+      frag.appendChild(logLine(e))
+    }
     box.appendChild(frag)
+    refreshLogModuleOptions()
+    applyLogFilter()
     box.scrollTop = box.scrollHeight
   }
+  refreshJobChip()
+  setInterval(refreshJobChip, 10000)   // 全局任务状态 chip（导航栏），10s 轮询
 }
 
 ;(async function start() {
