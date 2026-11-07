@@ -30,8 +30,9 @@ const DEFAULT_REPOS = [
   'pronii/lx-music-qdy-mini',
   'yanghook730-sketch/lx-music-source-yuanli',
   'fengyvle/yyt-music-sources',
-  'peakshuoera/lx-music-source-manager',
-  'wwnbalone/lx-manager',
+  // v1.10.5 移除 3 个「管理器/网关」类仓库（peakshuoera/lx-music-source-manager、
+  // wwnbalone/lx-manager、Scotlight/lx-music-source-gateway）：它们夹带的是
+  // app/src/main/assets 下的脚本副本与网关示例，不是音源仓库，已入 blockedRepos 黑名单。
   'NeoDtime/lxmusic-source3',
   'sphenoid-111/LXmusicyy',
   'lczj1215/lx-music',
@@ -44,7 +45,6 @@ const DEFAULT_REPOS = [
   'haonanren118/jiexiang-Music-Source',
   'hllsg/lx-music-myvip',
   'ZhonX07/lx-music-source-netease',
-  'Scotlight/lx-music-source-gateway',
   'HJinTao/Listening',
   'mlik-git/lx-music',
   '7878gyc/gdstudio-lx-source',
