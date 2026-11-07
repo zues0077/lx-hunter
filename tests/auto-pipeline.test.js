@@ -240,22 +240,31 @@ console.log('\n== 设置页接线 ==')
   assert.ok(/crawlAutoImport: \$\('cfgCrawlAutoImport'\)\.checked/.test(app), '保存时要落盘')
   ok('「爬取结束后自动灌入」开关已接线（读取 / 保存）')
 
-  // 关键：灌入规则必须从「定时爬取」卡片里搬出来，放进独立的「灌入规则」卡片
+  // 关键：灌入规则必须是独立卡片（不在「定时爬取」卡片里）。
+  // 2026-11-08 起「定时爬取」整卡迁到「采集源」页（DOM 在设置页之前），
+  // 全局顺序断言（iReplace < iCrawlCard 等）已不成立，改按卡片边界判断。
   const iRules = html.indexOf('灌入规则（同名音源怎么处理）')
   const iReplace = html.indexOf('id="cfgReplaceSame"')
   const iCrawlCard = html.indexOf('定时爬取（增量发现新音源）')
   const iPatrolCard = html.indexOf('健康巡检（已灌入音源定期重测）')
   assert.ok(iRules >= 0, '要有「灌入规则」卡片')
-  assert.ok(iReplace > iRules, '同名替换开关要在「灌入规则」卡片里')
-  assert.ok(iReplace < iCrawlCard, '同名替换开关不该再留在「定时爬取」卡片里')
-  assert.ok(iRules < iCrawlCard, '「灌入规则」卡片排在定时爬取之前')
-  assert.ok(iRules < iPatrolCard, '「灌入规则」卡片紧跟爬取设置之后、在健康巡检之前')
+  assert.ok(iPatrolCard > iRules, '「灌入规则」卡片在健康巡检之前（同页相邻）')
+  // 灌入规则卡片的范围 = 卡片标题到下一个 card-title 之间
+  const iNextCard = html.indexOf('card-title', iRules + 1)
+  const rulesCard = html.slice(iRules, iNextCard)
+  assert.ok(iReplace > iRules && iReplace < iNextCard, '同名替换开关要在「灌入规则」卡片里')
+  // 「定时爬取」卡片内部不得再含任何灌入规则开关
+  const iCrawlEnd = html.indexOf('card-title', iCrawlCard + 1)
+  const crawlCard = html.slice(iCrawlCard, iCrawlEnd)
+  for (const id of ['cfgReplaceSame', 'cfgEnableAfter', 'cfgSkipUnusable']) {
+    assert.ok(!crawlCard.includes('id="' + id + '"'), id + ' 不该留在「定时爬取」卡片里')
+  }
   ok('「同名自动替换」已从定时爬取卡片搬进独立的「灌入规则」卡片')
 
   // 原来散在爬取卡片里的两个灌入开关也一并收进「灌入规则」
   for (const id of ['cfgEnableAfter', 'cfgSkipUnusable']) {
     const i = html.indexOf('id="' + id + '"')
-    assert.ok(i > iRules && i < iCrawlCard, id + ' 应归入「灌入规则」卡片')
+    assert.ok(i > iRules && i < iNextCard, id + ' 应归入「灌入规则」卡片')
   }
   ok('灌入后自动启用 / 跳过未通过 也归入「灌入规则」，灌入相关的不再散着放')
 
