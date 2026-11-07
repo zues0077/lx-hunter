@@ -394,6 +394,7 @@ function renderRepoList(repos, defaultRepos) {
       <label class="repo-toggle"><input type="checkbox" class="repo-enabled" ${on ? 'checked' : ''}><span>${on ? '启用' : '已禁用'}</span></label>
       <span class="repo-name">${esc(r.repo)}</span>
       ${kindTag}<span class="repo-origin origin-${esc(r.origin)}">${o}</span>
+      <button class="btn btn-sm repo-crawl" title="主动采集：只爬这一个${isWeb ? '网页音源站' : '仓库'}（绕过 30 天新鲜度过滤）">采集</button>
       <button class="btn btn-sm danger-ghost repo-del" title="从清单移除（内置仓库可「恢复默认」找回）">删除</button>
     </div>`
   }).join('')
@@ -420,8 +421,30 @@ $('repoList').addEventListener('change', async (ev) => {
   await persistRepos()
 })
 
-// 删除
+// 删除 / 主动采集
 $('repoList').addEventListener('click', async (ev) => {
+  const crawlBtn = ev.target.closest('.repo-crawl')
+  if (crawlBtn) {
+    // v1.10.6 主动采集：只爬这一行（GitHub 仓库或网页音源站），不吃新鲜度过滤
+    const row = crawlBtn.closest('.repo-row')
+    const name = row && row.getAttribute('data-repo')
+    if (!name) return
+    if (crawlBtn.disabled) return
+    crawlBtn.disabled = true; crawlBtn.textContent = '采集中…'
+    setBusy(true)
+    $('progStep').textContent = '主动采集 ' + name + ' …'
+    try {
+      const r = await api.crawlStart({ only: [name] })
+      if (r.ok) {
+        toast(`「${name}」采集完成：新增 ${r.data.added} 条、更新 ${r.data.updated} 条、跳过 ${r.data.skipped} 条`, 'ok')
+        loadSources()
+      } else toast('采集失败: ' + r.error, 'err')
+    } finally {
+      setBusy(false)
+      crawlBtn.disabled = false; crawlBtn.textContent = '采集'
+    }
+    return
+  }
   const btn = ev.target.closest('.repo-del')
   if (!btn) return
   const row = btn.closest('.repo-row')
@@ -494,6 +517,7 @@ function renderHubList(hubs) {
       <span class="repo-name" title="${esc(h.url)}">${esc(h.name || h.url)}</span>
       <span class="repo-origin origin-custom">${hubKindLabel(h.kind)}</span>
       <span class="hint" style="flex:1;min-width:0">${stat}</span>
+      <button class="btn btn-sm hub-sync" title="主动采集：只采这一个站点的可用音源（判重零下载，不耗 GitHub 配额）">采集</button>
       <button class="btn btn-sm danger-ghost hub-del" title="移除该采集站（已采回的音源保留在库中）">删除</button>
     </div>`
   }).join('')
@@ -511,6 +535,28 @@ $('hubList').addEventListener('change', async (ev) => {
 })
 
 $('hubList').addEventListener('click', async (ev) => {
+  const syncBtn = ev.target.closest('.hub-sync')
+  if (syncBtn) {
+    // v1.10.6 主动采集：只采这一行采集站（判重零下载，毫秒级到秒级）
+    const row = syncBtn.closest('.repo-row')
+    const id = row && row.getAttribute('data-hub')
+    if (!id) return
+    if (syncBtn.disabled) return
+    syncBtn.disabled = true; syncBtn.textContent = '采集中…'
+    setBusy(true)
+    $('progStep').textContent = '主动采集采集站…'
+    try {
+      const r = await api.hubsSync({ id })
+      if (r.ok) {
+        toast(`采集站采集完成：新增 ${r.data.added || 0} 条`, 'ok')
+        loadSources()
+      } else toast('采集失败: ' + r.error, 'err')
+    } finally {
+      setBusy(false)
+      syncBtn.disabled = false; syncBtn.textContent = '采集'
+    }
+    return
+  }
   const btn = ev.target.closest('.hub-del')
   if (!btn) return
   const row = btn.closest('.repo-row')

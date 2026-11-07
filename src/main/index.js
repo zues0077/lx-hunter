@@ -348,7 +348,7 @@ ipcMain.handle('hubs:remove', guard((e, id) => {
   return { ok: true, hubs: list }
 }))
 
-ipcMain.handle('hubs:sync', guard(async () => await hunter.runHubSync()))
+ipcMain.handle('hubs:sync', guard(async (e, opts) => await hunter.runHubSync(opts || {})))
 
 // ---------------- 数据导入/导出（v1.9.20，仓库/采集站/镜像三类配置搬家）----------------
 const dataio = require('../core/dataio')
@@ -421,8 +421,9 @@ ipcMain.handle('logs:get', guard(() => logs.slice(-800)))
 
 ipcMain.handle('logs:clear', guard(() => { logs.length = 0; return true }))
 
-ipcMain.handle('crawl:start', guard(async () => {
-  const r = await hunter.runCrawl()
+ipcMain.handle('crawl:start', guard(async (e, opts) => {
+  // v1.10.6：opts.only 非空时定向主动采集（清单页每行「采集」按钮）
+  const r = await hunter.runCrawl(opts || {})
   return r
 }))
 

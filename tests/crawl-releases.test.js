@@ -288,6 +288,25 @@ ck('Web 暴露 /api/repos/prune', fs.readFileSync(path.join(__dirname, '../src/s
 ck('桌面端有对应 IPC', fs.readFileSync(path.join(__dirname, '../src/main/index.js'), 'utf8').includes("'repos:prune'"))
 ck('清单页有清理按钮与确认文案', htmlSrc.includes('id="btnPruneNonSource"') && appSrc.includes('btnPruneNonSource'))
 
+// ---------- ⑩ v1.10.6 行级主动采集：仓库/网页站/采集站都可单独采 ----------
+// 用户诉求：清单页每行加「采集」按钮，只采这一行，而不是点「爬取仓库」全量跑一遍。
+console.log('\n== v1.10.6 行级主动采集 ==')
+ck('runCrawl 支持 opts.only 定向采集', hSrc.includes('onlyRepos') && hSrc.includes("opts && opts.only"))
+ck('定向采集优先级高于 reposOverride', /onlyRepos\.length\)[\s\S]{0,220}reposOverride/.test(hSrc))
+ck('定向采集绕过 crawlSinceDays 新鲜度过滤', hSrc.includes('onlyRepos.length ? 0 :'))
+ck('定向采集为空时报错而非全量跑', hSrc.includes("没有可识别的仓库"))
+ck('采集站支持单站采集（onlyId）', fs.readFileSync(path.join(__dirname, '../src/core/hubfeed.js'), 'utf8').includes('o.onlyId'))
+ck('runHubSync 支持按 id 采单个站点', hSrc.includes('opts.id') && hSrc.includes("采集站不存在或已禁用"))
+ck('Web /api/crawl 透传 body（only）', fs.readFileSync(path.join(__dirname, '../src/server/web.js'), 'utf8').includes('hunter.runCrawl(ctx.body || {})'))
+ck('Web /api/hubs/sync 透传 body（id）', fs.readFileSync(path.join(__dirname, '../src/server/web.js'), 'utf8').includes('hunter.runHubSync(ctx.body || {})'))
+ck('桌面 IPC crawl:start/hubs:sync 透传 opts', fs.readFileSync(path.join(__dirname, '../src/main/index.js'), 'utf8').includes('hunter.runCrawl(opts || {})') && fs.readFileSync(path.join(__dirname, '../src/main/index.js'), 'utf8').includes('hunter.runHubSync(opts || {})'))
+const wbSrc = fs.readFileSync(path.join(__dirname, '../src/renderer/web-bridge.js'), 'utf8')
+ck('bridge crawlStart/hubsSync 支持传参', wbSrc.includes('crawlStart: (opts)') && wbSrc.includes('hubsSync: (opts)'))
+ck('清单每行有「采集」按钮', appSrc.includes('repo-crawl') && appSrc.includes('主动采集：只爬这一个'))
+ck('采集站每行有「采集」按钮', appSrc.includes('hub-sync') && appSrc.includes('只采这一个站点'))
+ck('行级采集走定向参数 only', appSrc.includes("crawlStart({ only: [name] })"))
+ck('单站采集走 id 参数', appSrc.includes('hubsSync({ id })'))
+
 // ---------- 汇总 ----------
 console.log(`\n${bad ? 'FAIL' : 'ALL PASS'}（失败 ${bad} 项）`)
 process.exit(bad ? 1 : 0)

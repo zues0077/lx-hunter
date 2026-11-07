@@ -428,9 +428,9 @@ route('POST', '/api/hubs/remove', guard(async (req, res, ctx) => {
 }))
 
 // 立即采集一轮（不跑 GitHub 爬取）
-route('POST', '/api/hubs/sync', guard(async () => await hunter.runHubSync()))
+route('POST', '/api/hubs/sync', guard(async (req, res, ctx) => await hunter.runHubSync(ctx.body || {})))
 
-route('POST', '/api/crawl', guard(async () => await hunter.runCrawl()))
+route('POST', '/api/crawl', guard(async (req, res, ctx) => await hunter.runCrawl(ctx.body || {})))
 // v1.10.3 非音源仓库清理：验真非内置仓库 → 移除确定性失败的（播放器/管理器/网关）→
 // 连带删除它贡献的脚本并拉黑，避免下次发现又混进来。limit 控制本轮最多验真几个（省配额）。
 route('POST', '/api/repos/prune', guard(async (req, res, ctx) => await hunter.pruneNonSourceRepos({

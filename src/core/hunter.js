@@ -303,6 +303,10 @@ class Hunter {
     if (this.job.running) throw new Error('已有任务在运行')
     const cfg = this.store.config
     const incremental = !!(opts && opts.incremental)
+    // v1.10.6 主动采集：opts.only 非空时只爬这几个仓库/网页站（清单页每行「采集」按钮）。
+    // 定向模式跳过搜索发现/社区精选/采集站等附加阶段，也**不吃 crawlSinceDays 新鲜度过滤**——
+    // 用户点名要采的，往往正是「30 天内无提交被整仓跳过」的那批，再过滤就永远采不到。
+    const onlyRepos = Array.isArray(opts && opts.only) ? opts.only.map(x => String(x || '').trim()).filter(Boolean) : []
     // 爬取前顺手刷新镜像池（低频，失败不影响爬取）
     try { await this.refreshMirrorPool(false) } catch (e) {}
     // 合并计数提前声明（v1.10.0 修复）：下面的采集站阶段会引用 merge/total，
@@ -311,7 +315,11 @@ class Hunter {
     let total = 0
     // reposOverride 非空时只爬这些仓库（省 GitHub 配额，也便于定向补源）
     let repos
-    if (Array.isArray(cfg.reposOverride) && cfg.reposOverride.length) {
+    if (onlyRepos.length) {
+      // v1.10.6 主动采集：优先级最高，明确覆盖 reposOverride（用户点行级按钮的意图最具体）
+      repos = this._normRepos(onlyRepos, '主动采集')
+      if (!repos.length) throw new Error('主动采集：没有可识别的仓库（应为 owner/repo、GitHub 网址或网页站网址）')
+    } else if (Array.isArray(cfg.reposOverride) && cfg.reposOverride.length) {
       repos = this._normRepos(cfg.reposOverride, '定向仓库')
     } else {
       // v1.9.12：优先用统一仓库清单 cfg.repos（内置/附加/发现三类，可禁用/删除）。
@@ -442,12 +450,13 @@ class Hunter {
     }
     this.job = { running: true, type: 'crawl', cancel: false, progress: { reposDone: 0, repoTotal: repos.length, added: 0, linksFound: 0 }, step: '' }
     this.emit('job', { running: true, type: 'crawl' })
-    this.log((incremental ? '定时增量爬取' : '开始爬取') + ` ${repos.length} 个仓库（文件树 + Releases）…`, '爬取')
+    this.log((onlyRepos.length ? '主动采集' : incremental ? '定时增量爬取' : '开始爬取') + ` ${repos.length} 个仓库（文件树 + Releases）…`, '爬取')
     try {
       const known = this._knownMaps()   // 手动/定时爬取都用判重地图：压缩包 sha 未变不解压、release 资产已抓不重下
       // crawlSinceDays（v1.7.2）：只爬 N 天内有更新的仓库（0=不限）。静默仓库整仓跳过，
       // 新发布的 release 资产也按发布时间过滤——树内文件不受影响（sha 判重已覆盖）。
-      const sinceDays = Math.max(0, Number(cfg.crawlSinceDays) || 0)
+      // 主动采集（opts.only）绕过该过滤：用户点名的仓库就是要强制采一遍。
+      const sinceDays = onlyRepos.length ? 0 : Math.max(0, Number(cfg.crawlSinceDays) || 0)
       // v1.10.0：仓库清单里可能有「网页音源站」（http(s) 网址，非 owner/repo）。
       // 两类分流：GitHub 仓库走 crawl()（API 配额），网页站走 crawlWebSite()（纯 HTTP，零配额）。
       const ghRepos = repos.filter(r => !isWebRepo(r))
@@ -545,18 +554,21 @@ class Hunter {
    *
    * @returns {{added:number, perHub:Array, hubTotal:number}}
    */
-  async runHubSync() {
+  async runHubSync(opts) {
     if (this.job.running) throw new Error('已有任务在运行')
     const cfg = this.store.config
-    const hubs = Array.isArray(cfg.hubs) ? cfg.hubs.filter(h => h && h.enabled !== false && h.url) : []
+    // v1.10.6 主动采集：opts.id 非空时只采这一个站点（采集站列表每行「采集」按钮）
+    const onlyId = (opts && opts.id) || null
+    const hubs = Array.isArray(cfg.hubs) ? cfg.hubs.filter(h => h && h.enabled !== false && h.url && (!onlyId || h.id === onlyId)) : []
+    if (onlyId && !hubs.length) throw new Error('采集站不存在或已禁用')
     if (!hubs.length) return { added: 0, perHub: [], hubTotal: 0 }
     this.job = { running: true, type: 'crawl', cancel: false, progress: { hubsDone: 0, hubTotal: hubs.length, added: 0 }, step: '采集站' }
     this.emit('job', { running: true, type: 'crawl' })
-    this.log(`采集 ${hubs.length} 个音源采集站的可用音源（判重零下载）…`, '采集')
+    this.log((onlyId ? '主动采集' : '采集') + ` ${hubs.length} 个音源采集站的可用音源（判重零下载）…`, '采集')
     let out = { added: 0, perHub: [], hubTotal: hubs.length }
     try {
       out = await collectFromHubs({
-        store: this.store, cfg, timeoutMs: cfg.timeoutMs,
+        store: this.store, cfg, timeoutMs: cfg.timeoutMs, onlyId,
         onLog: (msg, module, level) => this.log(msg, module || '采集', level),
         shouldStop: () => this.cancelRequested
       })

@@ -260,7 +260,9 @@ function hubEntriesToSources(entries, hub, knownHashes, usedIds) {
 async function collectFromHubs(o) {
   const store = o.store
   const cfg = o.cfg || {}
-  const hubs = Array.isArray(cfg.hubs) ? cfg.hubs.filter(h => h && h.enabled !== false && h.url) : []
+  // v1.10.6 主动采集：o.onlyId 非空时只采这一个站点（采集站列表每行「采集」按钮）
+  const onlyId = o.onlyId || null
+  const hubs = Array.isArray(cfg.hubs) ? cfg.hubs.filter(h => h && h.enabled !== false && h.url && (!onlyId || h.id === onlyId)) : []
   const log = o.onLog || function () {}
   const perHub = []
   let added = 0
