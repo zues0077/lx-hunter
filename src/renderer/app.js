@@ -288,7 +288,8 @@ async function loadConfig() {
   testConn()
 }
 
-$('btnSaveCfg').addEventListener('click', async () => {
+// v1.10.8：设置页与「采集源」页共用同一保存逻辑（按 ID 全局收集，两页输入框都在 DOM 里）
+async function saveAllCfg() {
   const patch = {
     platforms: state.platforms,
     activePlatformId: state.activePlatformId,
@@ -349,7 +350,9 @@ $('btnSaveCfg').addEventListener('click', async () => {
   toast('设置已保存（仓库地址已自动规范为 owner/repo 格式）' + warnAuto + warnTarget,
     (warnAuto || warnTarget) ? 'warn' : 'ok')
   testConn()
-})
+}
+$('btnSaveCfg').addEventListener('click', saveAllCfg)
+$('btnSaveCfg2').addEventListener('click', saveAllCfg)
 
 $('btnTestConn').addEventListener('click', () => testConn(true))
 

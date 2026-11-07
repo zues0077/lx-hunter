@@ -24,6 +24,7 @@
       <button class="nav-item" data-view="import"><span class="ni">⇪</span>灌入</button>
       <button class="nav-item" data-view="installed"><span class="ni">☰</span>已灌入</button>
       <button class="nav-item" data-view="quarantine"><span class="ni">⛨</span>混淆隔离</button>
+      <button class="nav-item" data-view="collections"><span class="ni">⇉</span>采集源</button>
       <button class="nav-item" data-view="settings"><span class="ni">⚙</span>设置</button>
       <button class="nav-item" data-view="logs"><span class="ni">▤</span>日志</button>
     </nav>
@@ -258,77 +259,14 @@
       </div>
     </section>
 
-    <!-- ===== 设置 ===== -->
-    <section class="view" id="view-settings">
+    <!-- ===== 采集源 ===== -->
+    <section class="view" id="view-collections">
       <header class="view-head">
-        <div><h1>设置</h1><p class="sub">连接自建 LX MUSIC 服务与 GitHub 爬取参数</p></div>
+        <div><h1>采集源</h1><p class="sub">仓库清单、采集站、搜索发现与定时采集调度</p></div>
         <div class="head-actions">
-          <button class="btn primary" id="btnSaveCfg">保存</button>
-          <button class="btn" id="btnTestConn">测试连接</button>
+          <button class="btn primary" id="btnSaveCfg2">保存</button>
         </div>
       </header>
-
-      <div class="card">
-        <h3 class="card-title">服务平台账号</h3>
-        <p class="hint">可配置多个平台、多个账号（如自建 LX Server、Geelonn LX Server、Songloft 内 lxmusic 插件、MusicSync）。<b>同步 / 巡检 / 撤回 / 公共音源清理 / 已灌入列表只作用于「当前选中账号」；只有灌入可以多选</b>——在账号详情里勾「参与批量灌入」后，灌入会同时打进所有勾了的账号（同名音源会对比哪边可用平台更多，留多的那个）。灌入记录按平台分账号保存。点账号右侧「设为当前」即可切换。</p>
-        <div id="platformList" class="acct-list"></div>
-        <button class="btn" id="btnAddAccount">+ 添加账号</button>
-        <div class="card account-form" id="accountForm" hidden>
-          <h4 class="card-title">账号详情</h4>
-          <div class="grid-form">
-            <label class="field"><span>平台类型</span>
-              <select class="input" id="accType">
-                <option value="lxserver">LX Server（自建服务）</option>
-                <option value="geelonn">Geelonn LX Server（gefl24/lxserver）</option>
-                <option value="songloft">Songloft（lxmusic 插件）</option>
-                <option value="musicsync">MusicSync（多用户同步）</option>
-              </select>
-            </label>
-            <label class="field"><span>账号名称</span><input class="input" id="accName" placeholder="如：家里 NAS / 备用机 / 主账号"></label>
-            <label class="field"><span>服务地址</span><input class="input" id="accUrl" placeholder="http://地址:端口"></label>
-            <label class="field"><span>用户名</span><input class="input" id="accUser" placeholder="灌入落点：留空或 default＝公开源；填账号名＝该账号私有列表"></label>
-            <label class="field"><span>密码</span><input class="input" id="accPwd" type="password" placeholder="LX Server 填 frontend.password；Geelonn/Songloft/MusicSync 填网页登录密码"></label>
-            <label class="field"><span>登录账号</span><input class="input" id="accLogin" placeholder="仅 Geelonn 需要；留空默认 admin"></label>
-            <label class="field"><span>超时 (ms)</span><input class="input" id="accTmo" type="number" placeholder="25000"></label>
-          </div>
-          <p class="hint" id="accHint"></p>
-          <div class="field-row">
-            <label class="chk"><input type="checkbox" id="accBatch"><span><strong>参与批量灌入</strong>（勾了才会被「灌入选中的音源 / 灌入全部可用」以及「定时爬取后自动灌入」同时灌入；一个都不勾时只灌当前选中账号）</span></label>
-          </div>
-          <div class="row-form">
-            <button class="btn primary" id="btnAccSave">保存账号</button>
-            <button class="btn" id="btnAccTest">测试连接</button>
-            <button class="btn ghost" id="btnAccCancel">取消</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h3 class="card-title">访问账号（登录）<span class="data-block-sub" style="margin-left:8px">仅 Web/Docker 版</span></h3>
-        <p class="hint" id="authCardHint">未登录时所有功能不可用。首个注册的账号自动成为管理员；管理员可在下方添加 / 删除账号。桌面版（Electron）本地使用，不需要登录。</p>
-        <div id="userList" class="acct-list"></div>
-        <div class="repo-add" id="userAddRow" hidden>
-          <input class="input" id="userNewName" type="text" placeholder="新账号名（2–32 位字母数字下划线中文）" style="max-width:280px">
-          <input class="input" id="userNewPwd" type="password" placeholder="密码（至少 6 位）" style="max-width:220px">
-          <label class="chk inline" style="white-space:nowrap"><input type="checkbox" id="userNewAdmin"><span>管理员</span></label>
-          <button class="btn btn-sm" id="btnUserAdd">添加账号</button>
-        </div>
-        <div class="row-form" style="margin-top:8px">
-          <button class="btn ghost" id="btnPwdOpen" hidden>修改我的密码</button>
-          <button class="btn ghost" id="btnLogout" hidden>退出登录</button>
-        </div>
-        <div class="card account-form" id="pwdForm" hidden>
-          <h4 class="card-title">修改我的密码</h4>
-          <div class="grid-form">
-            <label class="field"><span>原密码</span><input class="input" id="pwdOld" type="password"></label>
-            <label class="field"><span>新密码（至少 6 位）</span><input class="input" id="pwdNew" type="password"></label>
-          </div>
-          <div class="row-form">
-            <button class="btn primary" id="btnPwdChange">修改密码</button>
-            <button class="btn ghost" id="btnPwdCancel">取消</button>
-          </div>
-        </div>
-      </div>
 
       <div class="card">
         <h3 class="card-title">GitHub 爬取</h3>
@@ -409,46 +347,6 @@
       </div>
 
       <div class="card">
-        <h3 class="card-title">灌入规则（同名音源怎么处理）</h3>
-        <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgReplaceSame"><span>同名且无法判定是否同一音源时，<strong>自动替换服务端旧版</strong>（先删后传；关闭则改名并存上传）</span></label>
-        </div>
-        <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgEnableAfter"><span>灌入后自动启用</span></label>
-          <label class="chk"><input type="checkbox" id="cfgSkipUnusable"><span>跳过本地检测未通过的音源</span></label>
-        </div>
-        <p class="hint">灌入时会拿<strong>本地这一份</strong>和<strong>服务端同名的那个</strong>按顺序比对，前 6 条是<strong>硬规则</strong>（不可配置，全部为了「不越换越差」），只有 6 条都判不出来时才轮到上面那个勾选项兜底：</p>
-        <ol class="rules">
-          <li><strong>同名同内容</strong> → 不重传，直接标记「已灌入」（能拿到脚本正文的平台按内容指纹比，拿不到才退回比字节长度）</li>
-          <li><strong>本地实测 0 个可用平台</strong> → 保留服务端那条，不替换（本地挂掉 ≠ 服务端不能用）</li>
-          <li><strong>服务端那条可用平台更多</strong> → 保留服务端（哪个平台可用多用哪个）</li>
-          <li><strong>两边版本号都能解析</strong> → 版本高的赢：本地更高就删旧装新，否则保留服务端</li>
-          <li><strong>两边平台完全不重叠</strong> → 判定为两个无关脚本撞了名 → 改名并存，不删旧的</li>
-          <li><strong>同名且平台有重叠</strong> → 判定为同一音源的新版本 → 删旧装新</li>
-          <li><strong>信息不足（上面 6 条都判不出来）</strong> → 看<strong>本卡片第一个勾选项</strong>：勾了 = 删旧装新，没勾 = 改名并存</li>
-        </ol>
-        <p class="hint">注意「自动替换服务端同名旧版」<strong>只在第 7 条生效</strong>，它不是「所有同名都替换 —— 前 6 条命中哪条就按哪条走。另外：名字不作为服务端主键的平台（MusicSync）同名本来就能共存，第 5、7 条会直接新增为独立条目，不做无意义的改名。</p>
-      </div>
-
-      <div class="card">
-        <h3 class="card-title">健康巡检（已灌入音源定期重测）</h3>
-        <div class="grid-form">
-          <label class="field"><span>巡检间隔（小时）</span><input class="input" id="cfgPatrolHours" type="number" min="1" max="720"></label>
-          <label class="field"><span>失败后的重试间隔（分钟）</span><input class="input" id="cfgPatrolRetryMinutes" type="number" min="1" max="1440" step="1"></label>
-        </div>
-        <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（按上面的间隔自动重测已灌入音源）</span></label>
-          <label class="chk"><input type="checkbox" id="cfgPatrolDisable"><span>巡检失效的音源自动禁用（脚本被删/五平台全部取链失败才判定，网络抖动不误杀）</span></label>
-          <label class="chk"><input type="checkbox" id="cfgPatrolAutoDelete"><span>巡检连续失效达阈值<strong>自动删除音源</strong>（从服务端+本地一并移除；本地未灌入服务端的源只禁用不删）</span></label>
-          <label class="field inline"><span>自动删除所需连续失效次数</span><input class="input" id="cfgPatrolDeleteAfter" type="number" min="1" max="20" step="1"></label>
-        </div>
-        <p class="hint"><strong>「启用定时巡检」就是定时巡检的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次巡检是否已够间隔」，够了才真正开跑 —— <strong>实际触发比设定间隔最多晚 1 分钟</strong>，且<strong>软件必须保持运行</strong>。</p>
-        <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
-        <p class="hint"><strong>私人音源不参与巡检</strong>：用「导入单个音源」加入的个人脚本不会被自动重测、累计失效次数，也不会被巡检自动禁用或删除；要验证它请到音源库手动点「检测」。</p>
-        <p class="hint"><strong>推送服务端没开时，不会再一分钟试一次</strong>：巡检第一步要读服务端音源列表，连不上就整轮失败；旧版失败后不记录「已经试过」，于是每分钟核对都算「到期」，日志被失败刷满。现在失败后按上面的「失败后的重试间隔」退避（默认 15 分钟，最久不超过巡检间隔），日志会写明下次重试时间。巡检只<strong>重测</strong>已灌入的音源，不会灌入新音源；不需要自动巡检就直接取消勾选「启用定时巡检」。</p>
-      </div>
-
-      <div class="card">
         <h3 class="card-title">定时爬取（增量发现新音源）</h3>
         <div class="grid-form">
           <label class="field"><span>爬取间隔（小时）</span><input class="input" id="cfgCrawlHours" type="number" min="1" max="720"></label>
@@ -497,6 +395,120 @@
           <button class="btn btn-sm" id="btnSyncHubs">立即采集</button>
         </div>
         <p class="hint">添加时会先探测站点（识别类型 + 统计可用条数），失败会给出原因。采集结果按站点分别统计，可在上方列表里看到「上次采集」。<strong>推荐站点</strong>：<code>https://lxhub.lllh.de</code>（原版站）、<code>https://zlyon.github.io/lx-hub</code>（每日实测演示站）。</p>
+      </div>
+
+    </section>
+
+    <!-- ===== 设置 ===== -->
+    <section class="view" id="view-settings">
+      <header class="view-head">
+        <div><h1>设置</h1><p class="sub">连接自建 LX MUSIC 服务、灌入与巡检规则、数据管理</p></div>
+        <div class="head-actions">
+          <button class="btn primary" id="btnSaveCfg">保存</button>
+          <button class="btn" id="btnTestConn">测试连接</button>
+        </div>
+      </header>
+
+      <div class="card">
+        <h3 class="card-title">服务平台账号</h3>
+        <p class="hint">可配置多个平台、多个账号（如自建 LX Server、Geelonn LX Server、Songloft 内 lxmusic 插件、MusicSync）。<b>同步 / 巡检 / 撤回 / 公共音源清理 / 已灌入列表只作用于「当前选中账号」；只有灌入可以多选</b>——在账号详情里勾「参与批量灌入」后，灌入会同时打进所有勾了的账号（同名音源会对比哪边可用平台更多，留多的那个）。灌入记录按平台分账号保存。点账号右侧「设为当前」即可切换。</p>
+        <div id="platformList" class="acct-list"></div>
+        <button class="btn" id="btnAddAccount">+ 添加账号</button>
+        <div class="card account-form" id="accountForm" hidden>
+          <h4 class="card-title">账号详情</h4>
+          <div class="grid-form">
+            <label class="field"><span>平台类型</span>
+              <select class="input" id="accType">
+                <option value="lxserver">LX Server（自建服务）</option>
+                <option value="geelonn">Geelonn LX Server（gefl24/lxserver）</option>
+                <option value="songloft">Songloft（lxmusic 插件）</option>
+                <option value="musicsync">MusicSync（多用户同步）</option>
+              </select>
+            </label>
+            <label class="field"><span>账号名称</span><input class="input" id="accName" placeholder="如：家里 NAS / 备用机 / 主账号"></label>
+            <label class="field"><span>服务地址</span><input class="input" id="accUrl" placeholder="http://地址:端口"></label>
+            <label class="field"><span>用户名</span><input class="input" id="accUser" placeholder="灌入落点：留空或 default＝公开源；填账号名＝该账号私有列表"></label>
+            <label class="field"><span>密码</span><input class="input" id="accPwd" type="password" placeholder="LX Server 填 frontend.password；Geelonn/Songloft/MusicSync 填网页登录密码"></label>
+            <label class="field"><span>登录账号</span><input class="input" id="accLogin" placeholder="仅 Geelonn 需要；留空默认 admin"></label>
+            <label class="field"><span>超时 (ms)</span><input class="input" id="accTmo" type="number" placeholder="25000"></label>
+          </div>
+          <p class="hint" id="accHint"></p>
+          <div class="field-row">
+            <label class="chk"><input type="checkbox" id="accBatch"><span><strong>参与批量灌入</strong>（勾了才会被「灌入选中的音源 / 灌入全部可用」以及「定时爬取后自动灌入」同时灌入；一个都不勾时只灌当前选中账号）</span></label>
+          </div>
+          <div class="row-form">
+            <button class="btn primary" id="btnAccSave">保存账号</button>
+            <button class="btn" id="btnAccTest">测试连接</button>
+            <button class="btn ghost" id="btnAccCancel">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">访问账号（登录）<span class="data-block-sub" style="margin-left:8px">仅 Web/Docker 版</span></h3>
+        <p class="hint" id="authCardHint">未登录时所有功能不可用。首个注册的账号自动成为管理员；管理员可在下方添加 / 删除账号。桌面版（Electron）本地使用，不需要登录。</p>
+        <div id="userList" class="acct-list"></div>
+        <div class="repo-add" id="userAddRow" hidden>
+          <input class="input" id="userNewName" type="text" placeholder="新账号名（2–32 位字母数字下划线中文）" style="max-width:280px">
+          <input class="input" id="userNewPwd" type="password" placeholder="密码（至少 6 位）" style="max-width:220px">
+          <label class="chk inline" style="white-space:nowrap"><input type="checkbox" id="userNewAdmin"><span>管理员</span></label>
+          <button class="btn btn-sm" id="btnUserAdd">添加账号</button>
+        </div>
+        <div class="row-form" style="margin-top:8px">
+          <button class="btn ghost" id="btnPwdOpen" hidden>修改我的密码</button>
+          <button class="btn ghost" id="btnLogout" hidden>退出登录</button>
+        </div>
+        <div class="card account-form" id="pwdForm" hidden>
+          <h4 class="card-title">修改我的密码</h4>
+          <div class="grid-form">
+            <label class="field"><span>原密码</span><input class="input" id="pwdOld" type="password"></label>
+            <label class="field"><span>新密码（至少 6 位）</span><input class="input" id="pwdNew" type="password"></label>
+          </div>
+          <div class="row-form">
+            <button class="btn primary" id="btnPwdChange">修改密码</button>
+            <button class="btn ghost" id="btnPwdCancel">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">灌入规则（同名音源怎么处理）</h3>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgReplaceSame"><span>同名且无法判定是否同一音源时，<strong>自动替换服务端旧版</strong>（先删后传；关闭则改名并存上传）</span></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgEnableAfter"><span>灌入后自动启用</span></label>
+          <label class="chk"><input type="checkbox" id="cfgSkipUnusable"><span>跳过本地检测未通过的音源</span></label>
+        </div>
+        <p class="hint">灌入时会拿<strong>本地这一份</strong>和<strong>服务端同名的那个</strong>按顺序比对，前 6 条是<strong>硬规则</strong>（不可配置，全部为了「不越换越差」），只有 6 条都判不出来时才轮到上面那个勾选项兜底：</p>
+        <ol class="rules">
+          <li><strong>同名同内容</strong> → 不重传，直接标记「已灌入」（能拿到脚本正文的平台按内容指纹比，拿不到才退回比字节长度）</li>
+          <li><strong>本地实测 0 个可用平台</strong> → 保留服务端那条，不替换（本地挂掉 ≠ 服务端不能用）</li>
+          <li><strong>服务端那条可用平台更多</strong> → 保留服务端（哪个平台可用多用哪个）</li>
+          <li><strong>两边版本号都能解析</strong> → 版本高的赢：本地更高就删旧装新，否则保留服务端</li>
+          <li><strong>两边平台完全不重叠</strong> → 判定为两个无关脚本撞了名 → 改名并存，不删旧的</li>
+          <li><strong>同名且平台有重叠</strong> → 判定为同一音源的新版本 → 删旧装新</li>
+          <li><strong>信息不足（上面 6 条都判不出来）</strong> → 看<strong>本卡片第一个勾选项</strong>：勾了 = 删旧装新，没勾 = 改名并存</li>
+        </ol>
+        <p class="hint">注意「自动替换服务端同名旧版」<strong>只在第 7 条生效</strong>，它不是「所有同名都替换 —— 前 6 条命中哪条就按哪条走。另外：名字不作为服务端主键的平台（MusicSync）同名本来就能共存，第 5、7 条会直接新增为独立条目，不做无意义的改名。</p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">健康巡检（已灌入音源定期重测）</h3>
+        <div class="grid-form">
+          <label class="field"><span>巡检间隔（小时）</span><input class="input" id="cfgPatrolHours" type="number" min="1" max="720"></label>
+          <label class="field"><span>失败后的重试间隔（分钟）</span><input class="input" id="cfgPatrolRetryMinutes" type="number" min="1" max="1440" step="1"></label>
+        </div>
+        <div class="field-row">
+          <label class="chk"><input type="checkbox" id="cfgPatrolOn"><span>启用定时巡检（按上面的间隔自动重测已灌入音源）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgPatrolDisable"><span>巡检失效的音源自动禁用（脚本被删/五平台全部取链失败才判定，网络抖动不误杀）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgPatrolAutoDelete"><span>巡检连续失效达阈值<strong>自动删除音源</strong>（从服务端+本地一并移除；本地未灌入服务端的源只禁用不删）</span></label>
+          <label class="field inline"><span>自动删除所需连续失效次数</span><input class="input" id="cfgPatrolDeleteAfter" type="number" min="1" max="20" step="1"></label>
+        </div>
+        <p class="hint"><strong>「启用定时巡检」就是定时巡检的总开关</strong>：勾上后，软件运行期间后台每分钟核对一次「距上次巡检是否已够间隔」，够了才真正开跑 —— <strong>实际触发比设定间隔最多晚 1 分钟</strong>，且<strong>软件必须保持运行</strong>。</p>
+        <p class="hint">巡检覆盖「本工具灌入」及「同步纳入的本地候选」音源（服务端原生音源无本地脚本，自动跳过）；网络抖动不会误杀，恢复可用的会自动重新启用。也可在「已灌入」页随时手动巡检。</p>
+        <p class="hint"><strong>私人音源不参与巡检</strong>：用「导入单个音源」加入的个人脚本不会被自动重测、累计失效次数，也不会被巡检自动禁用或删除；要验证它请到音源库手动点「检测」。</p>
+        <p class="hint"><strong>推送服务端没开时，不会再一分钟试一次</strong>：巡检第一步要读服务端音源列表，连不上就整轮失败；旧版失败后不记录「已经试过」，于是每分钟核对都算「到期」，日志被失败刷满。现在失败后按上面的「失败后的重试间隔」退避（默认 15 分钟，最久不超过巡检间隔），日志会写明下次重试时间。巡检只<strong>重测</strong>已灌入的音源，不会灌入新音源；不需要自动巡检就直接取消勾选「启用定时巡检」。</p>
       </div>
 
       <div class="card">
@@ -653,7 +665,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=53"></script>
-<script src="app.js?v=58"></script>
+<script src="web-bridge.js?v=54"></script>
+<script src="app.js?v=59"></script>
 </body>
 </html>

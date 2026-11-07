@@ -346,7 +346,7 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
   ck('音源库徽章显示混淆隔离', appSrc.includes("status === 'quarantined'") && appSrc.includes('混淆隔离</span>'))
   ck('隔离条目不落入「未检测」筛选', appSrc.includes("e.status !== 'quarantined'"))
   ck('设置页文案改为隔离表述', htmlSrc.includes('自动隔离') && htmlSrc.includes('「混淆隔离」页'))
-  ck('缓存戳提升到 app.js v58 / web-bridge v53 / styles v17', htmlSrc.includes('app.js?v=58') && htmlSrc.includes('web-bridge.js?v=53') && htmlSrc.includes('styles.css?v=17'))
+  ck('缓存戳提升到 app.js v59 / web-bridge v54 / styles v17', htmlSrc.includes('app.js?v=59') && htmlSrc.includes('web-bridge.js?v=54') && htmlSrc.includes('styles.css?v=17'))
 
   // —— v1.10.8 改名检测（prune 301 识别）+ 仓库行快捷拉黑 ——
   {
@@ -373,6 +373,11 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
     ck('Web 路由 /api/repos/unblock + 三端透传', webSrc.includes('/api/repos/unblock') && mainSrc.includes("'repos:unblock'") && preloadSrc.includes('reposUnblock') && bridgeSrc.includes('reposUnblock:'))
     ck('仓库页黑名单卡片（blockedBox + 解除拉黑按钮）', htmlSrc.includes('id="blockedBox"') && appSrc.includes('blk-unblock') && appSrc.includes('renderBlockedRepos'))
     ck('解除拉黑带确认弹窗（说明回清单恢复采集）', appSrc.includes('解除拉黑「') && appSrc.includes('恢复采集'))
+    // v1.10.8 页面重构：黑名单可折叠 + 「采集源」新页（设置页瘦身）
+    ck('黑名单改可折叠 details（默认收起）', appSrc.includes('details class="blocked-details"') && appSrc.includes('wasOpen'))
+    ck('新增「采集源」视图（导航在混淆隔离与设置之间）', /quarantine"[\s\S]{0,200}data-view="collections"[\s\S]{0,200}data-view="settings"/.test(htmlSrc) && htmlSrc.includes('id="view-collections"'))
+    ck('采集源页含 5 卡且设置页已瘦身', /view-collections[\s\S]{0,90000}GitHub 爬取[\s\S]{0,40000}仓库清单[\s\S]{0,20000}音源采集站[\s\S]{0,2000}view-settings/.test(htmlSrc) && !/view-settings[\s\S]{0,90000}card-title">仓库清单/.test(htmlSrc.replace(/view-collections[\s\S]*?view-settings/, 'view-settings')))
+    ck('采集源页有独立保存按钮（与设置共用 saveAllCfg）', htmlSrc.includes('btnSaveCfg2') && appSrc.includes('function saveAllCfg') && appSrc.includes("addEventListener('click', saveAllCfg)") && appSrc.includes("btnSaveCfg2"))
     ck('仓库行有「拉黑」按钮且网页源不显示', appSrc.includes('repo-block') && appSrc.includes("isWeb ? '' :"))
     ck('拉黑确认文案说明与「删除」的区别', appSrc.includes('请用「删除」'))
     ck('prune toast 显示改名清理结果', appSrc.includes('清理改名重复'))
