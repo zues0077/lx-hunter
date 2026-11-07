@@ -312,6 +312,10 @@ class Hunter {
 
   async runCrawl(opts) {
     this.jobGate(opts && Array.isArray(opts.only) && opts.only.length ? '主动采集' : (opts && opts.incremental ? '定时增量爬取' : '全量爬取'), opts && Array.isArray(opts.only) && opts.only.length ? opts.only.join('、') : '')
+    // v1.10.8 jobGate 竞态修复：jobGate 与下方正式 job 初始化之间隔着镜像池刷新/搜索发现等
+    // await（网络调用可达数十秒，246 实测窗口内第二个全量爬取抢入并发），先同步占位，
+    // 正式初始化处再覆盖完整进度；占位到初始化之间全部 await 均有内部 try/catch，无逃逸路径。
+    this.job = { running: true, type: 'crawl', cancel: false, progress: {}, step: '准备中' }
     const cfg = this.store.config
     const incremental = !!(opts && opts.incremental)
     // v1.10.6 主动采集：opts.only 非空时只爬这几个仓库/网页站（清单页每行「采集」按钮）。
@@ -898,6 +902,19 @@ class Hunter {
    */
   async pruneNonSourceRepos(opts) {
     this.jobGate('清理失效仓库')
+    // v1.10.8 修复：清理失效仓库此前完全不占任务位（验真+改名探测可达数分钟），
+    // 期间其他任务入口可并发启动。包一层同步占位 + finally 回滚。
+    this.job = { running: true, type: 'prune', cancel: false, progress: {}, step: '验真非音源仓库' }
+    this.emit('job', { running: true, type: 'prune' })
+    try {
+      return await this._pruneNonSourceRepos(opts)
+    } finally {
+      this.job = { running: false, type: '', cancel: false, progress: {}, step: '' }
+      this.emit('job', { running: false, type: '' })
+    }
+  }
+
+  async _pruneNonSourceRepos(opts) {
     const o = opts || {}
     const cfg = this.store.config
     let rl = Array.isArray(cfg.repos) ? cfg.repos : null
@@ -2241,10 +2258,14 @@ class Hunter {
    */
   async runPatrol() {
     this.jobGate('巡检')
+    // v1.10.8 jobGate 竞态修复：与正式初始化之间隔着服务端列表拉取（网络可达数秒），先同步占位；
+    // 占位后所有提前 return / throw 路径都必须回滚，否则任务卡死（下方两处已覆盖）。
+    this.job = { running: true, type: 'patrol', cancel: false, progress: {}, step: '准备中' }
     const cfg = this.store.config
     const svc = this._active()
     let serverList = []
     try { serverList = await svc.adapter.list(svc.acct) } catch (e) {
+      this.job = { running: false, type: '', cancel: false, progress: {}, step: '' }
       throw new Error('无法读取服务端音源列表：' + String((e && e.message) || e))
     }
     const aliveLxIds = new Set((serverList || []).map(s => s && s.id).filter(Boolean))
@@ -2259,6 +2280,7 @@ class Hunter {
       .filter(srcId => { const e = this.store.db.sources[srcId]; return e && e.private }).length
     if (privateSkipped) this.log(`已跳过 ${privateSkipped} 个私人音源（不参与巡检，可在音源库手动检测）`, '巡检')
     if (!items.length) {
+      this.job = { running: false, type: '', cancel: false, progress: {}, step: '' }  // 占位回滚（提前返回路径）
       this.log('没有可巡检的已灌入音源（仅支持「本工具灌入且本地有对应记录」的音源）', '巡检', 'warn')
       return { ok: 0, disabled: 0, unknown: 0, total: 0 }
     }

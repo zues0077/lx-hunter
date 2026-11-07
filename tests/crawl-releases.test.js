@@ -382,6 +382,14 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
   ck('导航栏任务状态 chip', htmlSrc.includes('id="jobChip"') && appSrc.includes('refreshJobChip'))
   ck('日志增量轮询 + 行去重', appSrc.includes('pollLogsOnce') && appSrc.includes('logKeyOf'))
   ck('筛选统计显示条数', appSrc.includes('logShownCount') && appSrc.includes('applyLogFilter'))
+
+  // —— v1.10.8 jobGate 竞态修复（246 实测双全量爬取并发） ——
+  console.log('\n== v1.10.8 jobGate 竞态修复 ==')
+  ck('runCrawl 在 jobGate 后同步占位（防搜索发现 await 窗口抢入）', /this\.job = \{ running: true, type: 'crawl', cancel: false, progress: \{\}, step: '准备中' \}\s*const cfg = this\.store\.config/.test(hSrc))
+  ck('占位注释说明竞态成因', hSrc.includes('jobGate 竞态修复'))
+  ck('runPatrol 占位 + 服务端列表失败回滚', hSrc.includes("type: 'patrol', cancel: false, progress: {}, step: '准备中'") && /this\.job = \{ running: false, type: '', cancel: false, progress: \{\}, step: '' \}\s*throw new Error\('无法读取服务端音源列表/.test(hSrc))
+  ck('巡检空清单提前返回也回滚占位', hSrc.includes('占位回滚（提前返回路径）'))
+  ck('prune 包装占位 + finally 回滚（此前完全无任务位）', hSrc.includes("_pruneNonSourceRepos(opts)") && /pruneNonSourceRepos\(opts\) \{[\s\S]{0,400}type: 'prune'[\s\S]{0,400}finally[\s\S]{0,200}running: false/.test(hSrc))
 }
 
 // ---------- 汇总 ----------
