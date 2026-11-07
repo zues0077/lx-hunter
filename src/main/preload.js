@@ -35,6 +35,7 @@ const api = {
   dbClear: () => ipcRenderer.invoke('db:clear'),
   reposPrune: (opts) => ipcRenderer.invoke('repos:prune', opts),
   reposBlock: (repo) => ipcRenderer.invoke('repos:block', repo),
+  reposUnblock: (args) => ipcRenderer.invoke('repos:unblock', args),
   sourcesTrustObf: (id, trust) => ipcRenderer.invoke('sources:trustObf', { id, trust }),
   dbDelete: (ids) => ipcRenderer.invoke('db:delete', ids),
   dbDeletedList: () => ipcRenderer.invoke('db:deleted:list'),

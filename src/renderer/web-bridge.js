@@ -199,6 +199,7 @@
     dbClear: () => call('/api/db/clear', {}),
     reposPrune: opts => call('/api/repos/prune', opts || {}),
     reposBlock: repo => call('/api/repos/block', { repo }),
+    reposUnblock: (repo, reAdd) => call('/api/repos/unblock', { repo, reAdd }),
     sourcesTrustObf: (id, trust) => call('/api/sources/trust-obf', { id, trust }),
     dbDelete: ids => call('/api/db/delete', { ids }),
     dbDeletedList: () => call('/api/db/deleted/list', {}),

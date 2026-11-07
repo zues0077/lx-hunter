@@ -346,7 +346,7 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
   ck('音源库徽章显示混淆隔离', appSrc.includes("status === 'quarantined'") && appSrc.includes('混淆隔离</span>'))
   ck('隔离条目不落入「未检测」筛选', appSrc.includes("e.status !== 'quarantined'"))
   ck('设置页文案改为隔离表述', htmlSrc.includes('自动隔离') && htmlSrc.includes('「混淆隔离」页'))
-  ck('缓存戳提升到 app.js v56 / web-bridge v51 / styles v16', htmlSrc.includes('app.js?v=56') && htmlSrc.includes('web-bridge.js?v=51') && htmlSrc.includes('styles.css?v=16'))
+  ck('缓存戳提升到 app.js v57 / web-bridge v52 / styles v16', htmlSrc.includes('app.js?v=57') && htmlSrc.includes('web-bridge.js?v=52') && htmlSrc.includes('styles.css?v=16'))
 
   // —— v1.10.8 改名检测（prune 301 识别）+ 仓库行快捷拉黑 ——
   {
@@ -368,6 +368,11 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
     ck('拉黑拒绝网页形态与非法仓库名', hSrc.includes('请提供 owner/repo 形态的仓库名'))
     ck('Web 暴露 /api/repos/block', webSrc.includes("'/api/repos/block'"))
     ck('桌面 IPC repos:block + preload + bridge', mainSrc.includes("'repos:block'") && preloadSrc.includes('reposBlock') && bridgeSrc.includes('reposBlock: repo'))
+    // v1.10.7 黑名单管理：unblockRepo + /api/repos/unblock + 黑名单卡片/解除按钮
+    ck('hunter 提供 unblockRepo（移出黑名单可回清单）', hSrc.includes('unblockRepo(') && hSrc.includes('不在黑名单中') && hSrc.includes("origin: 'unblocked'"))
+    ck('Web 路由 /api/repos/unblock + 三端透传', webSrc.includes('/api/repos/unblock') && mainSrc.includes("'repos:unblock'") && preloadSrc.includes('reposUnblock') && bridgeSrc.includes('reposUnblock:'))
+    ck('仓库页黑名单卡片（blockedBox + 解除拉黑按钮）', htmlSrc.includes('id="blockedBox"') && appSrc.includes('blk-unblock') && appSrc.includes('renderBlockedRepos'))
+    ck('解除拉黑带确认弹窗（说明回清单恢复采集）', appSrc.includes('解除拉黑「') && appSrc.includes('恢复采集'))
     ck('仓库行有「拉黑」按钮且网页源不显示', appSrc.includes('repo-block') && appSrc.includes("isWeb ? '' :"))
     ck('拉黑确认文案说明与「删除」的区别', appSrc.includes('请用「删除」'))
     ck('prune toast 显示改名清理结果', appSrc.includes('清理改名重复'))

@@ -438,6 +438,7 @@ route('POST', '/api/repos/prune', guard(async (req, res, ctx) => await hunter.pr
 })))
 // v1.10.7 仓库行快捷拉黑：移出清单 + 加入黑名单（搜索发现/社区精选不再回填）+ 清残留脚本
 route('POST', '/api/repos/block', guard(async (req, res, ctx) => await hunter.blockRepo(String((ctx.body || {}).repo || ''))))
+route('POST', '/api/repos/unblock', guard(async (req, res, ctx) => await hunter.unblockRepo(String((ctx.body || {}).repo || ''), (ctx.body || {}).reAdd)))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
 // 混淆隔离：信任/取消信任（v1.10.7）——body {id, trust}
 route('POST', '/api/sources/trust-obf', guard(async (req, res, ctx) => await hunter.trustObfSource(String((ctx.body || {}).id || ''), !!(ctx.body || {}).trust)))

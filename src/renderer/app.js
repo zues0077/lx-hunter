@@ -377,7 +377,7 @@ function renderRepoList(repos, defaultRepos) {
   const all = (state.config.repos || [])
   const box = $('repoList')
   const cntEl = $('repoSearchCount')
-  if (!all.length) { box.innerHTML = '<p class="hint" style="margin:0">清单为空 —— 点「恢复默认仓库」恢复内置 38 个，或在上方输入框添加。</p>'; if (cntEl) cntEl.textContent = ''; return }
+  if (!all.length) { box.innerHTML = '<p class="hint" style="margin:0">清单为空 —— 点「恢复默认仓库」恢复内置 38 个，或在上方输入框添加。</p>'; if (cntEl) cntEl.textContent = ''; renderBlockedRepos(); return }
   // v1.10.3：仓库清单关键字过滤（按仓库名 / owner / 网址 子串匹配，不区分大小写）
   const kw = String(state.repoFilter || '').trim().toLowerCase()
   const list = kw ? all.filter(r => String(r.repo || '').toLowerCase().includes(kw)) : all
@@ -401,6 +401,21 @@ function renderRepoList(repos, defaultRepos) {
       <button class="btn btn-sm danger-ghost repo-del" title="从清单移除（内置仓库可「恢复默认」找回）">删除</button>
     </div>`
   }).join('')
+  renderBlockedRepos()
+}
+
+// 仓库黑名单（v1.10.7）：展示 blockedRepos + 一键解除（解除后自动加回清单）
+function renderBlockedRepos() {
+  const box = $('blockedBox')
+  if (!box) return
+  const bl = Array.isArray(state.config.blockedRepos) ? state.config.blockedRepos : []
+  if (!bl.length) { box.innerHTML = ''; return }
+  box.innerHTML = `<p class="hint" style="margin:0 0 4px"><strong>仓库黑名单（${bl.length}）</strong>：这些仓库已被拉黑——不在上方清单、搜索发现/社区精选不会自动回填。解除后会自动加回仓库清单恢复采集。</p>` +
+    bl.map(b => `<div class="repo-row blocked-row" data-repo="${esc(b)}">
+      <span class="repo-origin" style="background:#3a2a2a;color:#e8b4b4">已拉黑</span>
+      <span class="repo-name">${esc(b)}</span>
+      <button class="btn btn-sm blk-unblock" title="解除拉黑：移出黑名单并自动加回仓库清单，恢复采集">解除拉黑</button>
+    </div>`).join('')
 }
 
 // 持久化当前清单（就地改 state.config.repos 后调用）
@@ -488,6 +503,28 @@ $('repoList').addEventListener('click', async (ev) => {
   } catch (e) {
     toast('拉黑失败: ' + String((e && e.message) || e), 'err')
     blkBtn.disabled = false
+  }
+})
+
+// 黑名单「解除拉黑」（v1.10.7）：黑名单区块在 blockedBox 内，事件独立挂（repoList 的委托盖不到它）
+document.getElementById('blockedBox').addEventListener('click', async (ev) => {
+  const ub = ev.target.closest('.blk-unblock')
+  if (!ub) return
+  const row = ub.closest('.blocked-row')
+  const repo = row && row.getAttribute('data-repo')
+  if (!repo) return
+  if (!confirm('解除拉黑「' + repo + '」？\n\n· 从黑名单移除\n· 自动加回仓库清单，恢复采集')) return
+  ub.disabled = true
+  try {
+    const r = await api.reposUnblock(repo)
+    if (!r || r.ok === false) throw new Error((r && r.error) || '未知错误')
+    const d = r.data || {}
+    await loadConfig()
+    toast(`已解除拉黑「${d.unblocked || repo}」${d.reAdded ? '，已加回仓库清单' : ''}`, 'ok')
+  } catch (e) {
+    toast('解除拉黑失败: ' + String((e && e.message) || e), 'err')
+  } finally {
+    ub.disabled = false
   }
 })
 

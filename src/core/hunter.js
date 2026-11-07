@@ -1098,6 +1098,32 @@ class Hunter {
     return { blocked: name, removedFromList, alreadyBlocked, removedSources }
   }
 
+  // 解除拉黑（v1.10.7）：从 blockedRepos 移除；可选同步回仓库清单（默认回，一键恢复采集）
+  unblockRepo(repo, reAdd) {
+    this.jobGate('解除拉黑', String(repo || ''))
+    const name = normalizeRepo(String(repo || ''))
+    if (!name || /^https?:\/\//i.test(String(repo || ''))) throw new Error('请提供 owner/repo 形态的仓库名')
+    const cfg = this.store.config
+    const blk = new Set((Array.isArray(cfg.blockedRepos) ? cfg.blockedRepos : [])
+      .map(x => String(x || '').toLowerCase()).filter(Boolean))
+    const wasBlocked = blk.has(name.toLowerCase())
+    if (!wasBlocked) throw new Error(`仓库 ${name} 不在黑名单中`)
+    blk.delete(name.toLowerCase())
+    cfg.blockedRepos = Array.from(blk)
+    let reAdded = false
+    const wantReAdd = reAdd === undefined ? true : !!reAdd
+    if (wantReAdd) {
+      const has = (Array.isArray(cfg.repos) ? cfg.repos : []).some(x => {
+        const n = normalizeRepo(x && x.repo)
+        return n && n.toLowerCase() === name.toLowerCase()
+      })
+      if (!has) { cfg.repos = (Array.isArray(cfg.repos) ? cfg.repos : []).concat([{ repo: name, enabled: true, builtin: false, origin: 'unblocked' }]); reAdded = true }
+    }
+    this.store.saveConfig()
+    this.log(`已解除拉黑仓库 ${name}：移出黑名单${reAdded ? '、已加回仓库清单' : ''}（后续可正常采集）`, '音源库', 'info')
+    return { unblocked: name, wasBlocked, reAdded }
+  }
+
   // ---------------- 检测 ----------------
   // 混淆隔离闸门（v1.10.7）：high 级混淆不再直接判死，而是移入「混淆隔离」区（status=quarantined），
   // 条目仍留在音源库中可见。用户在隔离页对「无恶意硬特征」的脚本点「信任」后，按 contentHash

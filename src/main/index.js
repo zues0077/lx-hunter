@@ -467,6 +467,8 @@ ipcMain.handle('db:clear', guard(() => {
 ipcMain.handle('repos:prune', guard((e, opts) => hunter.pruneNonSourceRepos(opts || {})))
 // 仓库行快捷拉黑（v1.10.7）：与 Web 版 /api/repos/block 同语义
 ipcMain.handle('repos:block', guard((e, repo) => hunter.blockRepo(String(repo || ''))))
+// 解除拉黑（v1.10.7）：与 Web 版 /api/repos/unblock 同语义
+ipcMain.handle('repos:unblock', guard((e, args) => hunter.unblockRepo(String((args || {}).repo || ''), (args || {}).reAdd)))
 // 混淆隔离：信任/取消信任（v1.10.7）
 ipcMain.handle('sources:trustObf', guard((e, args) => hunter.trustObfSource(String((args || {}).id || ''), !!(args || {}).trust)))
 
