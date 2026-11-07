@@ -405,17 +405,22 @@ function renderRepoList(repos, defaultRepos) {
 }
 
 // 仓库黑名单（v1.10.7）：展示 blockedRepos + 一键解除（解除后自动加回清单）
+// v1.10.8：<details> 默认收起，标题显示数量，点开才占空间
 function renderBlockedRepos() {
   const box = $('blockedBox')
   if (!box) return
   const bl = Array.isArray(state.config.blockedRepos) ? state.config.blockedRepos : []
   if (!bl.length) { box.innerHTML = ''; return }
-  box.innerHTML = `<p class="hint" style="margin:0 0 4px"><strong>仓库黑名单（${bl.length}）</strong>：这些仓库已被拉黑——不在上方清单、搜索发现/社区精选不会自动回填。解除后会自动加回仓库清单恢复采集。</p>` +
+  const wasOpen = (() => { const d = box.querySelector('details.blocked-details'); return d && d.open })()
+  box.innerHTML = `<details class="blocked-details"${wasOpen ? ' open' : ''}>
+    <summary title="点开/收起黑名单">仓库黑名单（${bl.length}）——这些仓库已被拉黑：不在清单、搜索发现/社区精选不会自动回填；解除后会自动加回清单恢复采集</summary>
+    <div style="margin-top:6px">` +
     bl.map(b => `<div class="repo-row blocked-row" data-repo="${esc(b)}">
       <span class="repo-origin" style="background:#3a2a2a;color:#e8b4b4">已拉黑</span>
       <span class="repo-name">${esc(b)}</span>
       <button class="btn btn-sm blk-unblock" title="解除拉黑：移出黑名单并自动加回仓库清单，恢复采集">解除拉黑</button>
-    </div>`).join('')
+    </div>`).join('') +
+    `</div></details>`
 }
 
 // 持久化当前清单（就地改 state.config.repos 后调用）

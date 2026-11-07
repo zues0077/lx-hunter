@@ -599,3 +599,7 @@ body.conn-offline .snap-tag { display: inline-block; }
 .blocked-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-top: 1px solid var(--line, #e2e2e2); }
 .blocked-row:first-of-type { border-top: none; }
 .blocked-row .repo-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+/* v1.10.8 黑名单可折叠：<details> 默认收起，summary 一行 */
+details.blocked-details { margin-top: 8px; border: 1px solid var(--line, #e2e2e2); border-radius: 8px; padding: 6px 10px; }
+details.blocked-details > summary { cursor: pointer; user-select: none; font-size: 12px; opacity: .8; line-height: 1.6; }
+details.blocked-details[open] > summary { margin-bottom: 4px; }
