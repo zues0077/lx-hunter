@@ -810,9 +810,36 @@ async function crawl(opts, onEvent, shouldStop) {
   return stats
 }
 
+/**
+ * 改名检测（v1.10.7）：GitHub 仓库改名后旧路径 301 重定向，旧名经重定向仍能正常取
+ * tree/raw，验真判不死 → 旧名条目会永远留在清单里重复爬取、白烧配额（246 实测：
+ * luanmuc/lx-music-source 改名 backend-api 后新旧两条并存）。
+ * 实现：Node fetch 的 redirect:'manual' 返回 opaqueredirect（status 0、无 headers，拿不到
+ * 301），所以改为默认跟随重定向，直接比对最终响应的 full_name 与请求名——不一致即改名。
+ * 只做 1 次轻量调用，不取 tree 不下载内容。任何失败/404 一律 moved=false（宁漏不误）。
+ */
+async function resolveRepoRename(repo, o) {
+  const token = (o && o.token) || ''
+  const tmo = Number(o && o.timeoutMs) || 15000
+  try {
+    // 注意：repo 不能 encodeURIComponent——会把 owner/repo 的斜杠编成 %2F，GitHub 直接 404
+    //（实测 2026-11-08）。repo 来自 normalizeRepo（owner/repo 形态），与 verifyRepoHasSource 同样原样插值。
+    const res = await fetchWithTimeout(`https://api.github.com/repos/${repo}`,
+      { headers: ghHeaders(token) }, tmo)
+    if (!res.ok) { res.body && res.body.resume && res.body.resume(); return { moved: false, to: '' } }
+    let j = {}
+    try { j = JSON.parse(await readText(res, tmo)) } catch (e) { return { moved: false, to: '' } }
+    const to = String(j.full_name || '')
+    if (!to || to.toLowerCase() === String(repo).toLowerCase()) return { moved: false, to: '' }
+    return { moved: true, to }
+  } catch (e) {
+    return { moved: false, to: '', error: String((e && e.message) || e) }
+  }
+}
+
 module.exports = {
   DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness, judgeFreshness,
-  discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, isSourceAsset,
+  discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, resolveRepoRename, isSourceAsset,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
   filterLatestOnly, latestBaseName, versionNumOf,
   RELEASES_PER_REPO, MAX_ASSET_BYTES, MAX_RELEASE_DL_PER_REPO

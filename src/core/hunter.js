@@ -1,6 +1,6 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
-const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource } = require('./crawler')
+const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource, resolveRepoRename } = require('./crawler')
 const { crawlWebSite, isWebRepo } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
@@ -900,7 +900,7 @@ class Hunter {
     this.jobGate('清理失效仓库')
     const o = opts || {}
     const cfg = this.store.config
-    const rl = Array.isArray(cfg.repos) ? cfg.repos : null
+    let rl = Array.isArray(cfg.repos) ? cfg.repos : null
     if (!rl || !rl.length) return { checked: 0, removedRepos: [], removedSources: 0, skipped: 0 }
     // 内置仓库是人工维护的种子，不动；只查附加/发现/社区三类
     const cands = []
@@ -954,10 +954,59 @@ class Hunter {
     const isTransient = (r) => /HTTP (403|429|5\d\d)|ERR |ECONN|timeout|abort/i.test(String(r || ''))
     const dead = results.filter(x => !x.v.ok && !isTransient(x.v.reason))
     const skipped = results.filter(x => !x.v.ok && isTransient(x.v.reason)).length
+
+    // ①' 改名检测（v1.10.7）：GitHub 改名返回 301，旧名经重定向仍「能用」，验真判不死
+    //    → 旧名条目会永远留在清单里重复爬取、白烧 API 配额（246 实测：luanmuc/lx-music-source
+//    改名 backend-api 后新旧两条并存）。这里对每个候补做一次轻量探测（1~2 次调用）：
+    //    新名已在清单（重复旧名）→ 自动移出旧名条目，历史音源保留不删脚本、不进黑名单；
+    //    新名不在清单 → 只提示不自动改（避免误判）。任何探测失败都当没改名（宁漏不误）。
+    const renameResults = new Array(batch.length)
+    let ri = 0
+    await Promise.all(Array.from({ length: Math.min(4, batch.length) }, async () => {
+      while (true) {
+        const k = ri++
+        if (k >= batch.length) return
+        try {
+          renameResults[k] = await resolveRepoRename(batch[k], { token: cfg.ghToken, timeoutMs: cfg.timeoutMs })
+        } catch (e) {
+          renameResults[k] = { moved: false, to: '', error: String((e && e.message) || e) }
+        }
+      }
+    }))
+    const renamedRepos = []   // {from,to} 新名已在清单 → 已自动清理旧名条目
+    const renameHints = []    // {from,to} 新名不在清单 → 仅提示
+    for (let k = 0; k < batch.length; k++) {
+      const rr = renameResults[k]
+      if (!rr || !rr.moved || !rr.to) continue
+      const from = batch[k]
+      const to = String(rr.to)
+      if (to.toLowerCase() === String(from).toLowerCase()) continue
+      const haveNew = rl.some(x => {
+        const n = normalizeRepo(x && x.repo)
+        return n && n.toLowerCase() === to.toLowerCase()
+      })
+      ;(haveNew ? renamedRepos : renameHints).push({ from, to })
+    }
+    if (renamedRepos.length) {
+      const dupSet = new Set(renamedRepos.map(x => String(x.from).toLowerCase()))
+      this.store.config.repos = rl.filter(x => {
+        const n = normalizeRepo(x && x.repo)
+        return !(n && dupSet.has(n.toLowerCase()))
+      })
+      rl = this.store.config.repos
+    }
+    for (const h of renameHints) {
+      this.log(`发现仓库改名：${h.from} → ${h.to}（新名不在清单，未自动处理；确认后可在仓库清单手动更新）`, '音源库')
+    }
+
     if (!dead.length) {
+      if (renamedRepos.length) {
+        this.store.saveConfig()
+        this.log(`改名重复清理：${renamedRepos.map(x => `${x.from} → ${x.to}`).join('、')}；旧名条目已移出清单（历史音源保留）`, '音源库', 'warn')
+      }
       this.log(`非音源仓库清理：${batch.length} 个仓库全部通过验真（临时失败跳过 ${skipped} 个）` +
         (removedSources ? `；另清理黑名单残留脚本 ${removedSources} 条` : ''), '音源库')
-      return { checked: batch.length, removedRepos: [], removedSources, skipped, unchecked: Math.max(0, cands.length - batch.length) }
+      return { checked: batch.length, removedRepos: [], removedSources, skipped, unchecked: Math.max(0, cands.length - batch.length), renamedRepos, renameHints }
     }
     const deadSet = new Set(dead.map(x => String(x.repo).toLowerCase()))
     // ① 移出仓库清单
@@ -988,8 +1037,48 @@ class Hunter {
     this.store.saveDb()
     this.log(`非音源仓库清理完成：移除仓库 ${removedRepos.length} 个、连带删除脚本 ${removedSources} 条` +
       (skipped ? `（临时失败跳过 ${skipped} 个，可再点一次继续）` : '') +
+      (renamedRepos.length ? `；另清理改名重复 ${renamedRepos.length} 个` : '') +
       `；${removedRepos.slice(0, 6).join('、')}${removedRepos.length > 6 ? '…' : ''}`, '音源库', 'warn')
-    return { checked: batch.length, removedRepos, removedSources, skipped, unchecked: Math.max(0, cands.length - batch.length) }
+    return { checked: batch.length, removedRepos, removedSources, skipped, unchecked: Math.max(0, cands.length - batch.length), renamedRepos, renameHints }
+  }
+
+  /**
+   * 仓库行快捷拉黑（v1.10.7）：仓库清单每行的「拉黑」一键完成三件事——
+   *  ① 移出仓库清单；② 加入 blockedRepos 黑名单（搜索发现/社区精选不再回填，
+   *     否则只删不加黑，过几天自动回流）；③ 连带清掉该仓库贡献的全部脚本
+   *     （记入 deletedIds，后续不会自动加回，与 prune 同语义）。
+   * 与「删除」按钮的区别：删除只移出清单，会被搜索发现/社区精选重新加回。
+   * 返回 {blocked, removedSources}；内置仓库也允许拉黑（用户明确点名即尊重）。
+   */
+  blockRepo(repo) {
+    this.jobGate('拉黑仓库', String(repo || ''))
+    const name = normalizeRepo(String(repo || ''))
+    if (!name || /^https?:\/\//i.test(String(repo || ''))) throw new Error('请提供 owner/repo 形态的仓库名')
+    const cfg = this.store.config
+    const before = Array.isArray(cfg.repos) ? cfg.repos.length : 0
+    cfg.repos = (Array.isArray(cfg.repos) ? cfg.repos : []).filter(x => {
+      const n = normalizeRepo(x && x.repo)
+      return !(n && n.toLowerCase() === name.toLowerCase())
+    })
+    const removedFromList = cfg.repos.length < before
+    const blk = new Set((Array.isArray(cfg.blockedRepos) ? cfg.blockedRepos : [])
+      .map(x => String(x || '').toLowerCase()).filter(Boolean))
+    const alreadyBlocked = blk.has(name.toLowerCase())
+    blk.add(name.toLowerCase())
+    cfg.blockedRepos = Array.from(blk)
+    // ③ 清残留脚本（含 deprecated 旧副本），与 prune 黑名单清理同语义
+    const ids = []
+    for (const e of this.store.getSources()) {
+      if (!e) continue
+      const r = normalizeRepo(e.repo)
+      if (r && r.toLowerCase() === name.toLowerCase()) ids.push(e.id)
+    }
+    let removedSources = 0
+    if (ids.length) removedSources = (this.store.removeSources(ids) || {}).deleted || 0
+    this.store.saveConfig()
+    this.store.saveDb()
+    this.log(`已拉黑仓库 ${name}：${removedFromList ? '移出清单' : '本就不在清单'}、${alreadyBlocked ? '原本已在黑名单' : '加入黑名单'}、清理脚本 ${removedSources} 条（后续搜索发现/社区精选不再回填）`, '音源库', 'warn')
+    return { blocked: name, removedFromList, alreadyBlocked, removedSources }
   }
 
   // ---------------- 检测 ----------------

@@ -436,6 +436,8 @@ route('POST', '/api/crawl', guard(async (req, res, ctx) => await hunter.runCrawl
 route('POST', '/api/repos/prune', guard(async (req, res, ctx) => await hunter.pruneNonSourceRepos({
   limit: Number((ctx.body || {}).limit) || 40
 })))
+// v1.10.7 仓库行快捷拉黑：移出清单 + 加入黑名单（搜索发现/社区精选不再回填）+ 清残留脚本
+route('POST', '/api/repos/block', guard(async (req, res, ctx) => await hunter.blockRepo(String((ctx.body || {}).repo || ''))))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
 // 混淆隔离：信任/取消信任（v1.10.7）——body {id, trust}
 route('POST', '/api/sources/trust-obf', guard(async (req, res, ctx) => await hunter.trustObfSource(String((ctx.body || {}).id || ''), !!(ctx.body || {}).trust)))

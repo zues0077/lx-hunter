@@ -397,6 +397,7 @@ function renderRepoList(repos, defaultRepos) {
       <span class="repo-name">${esc(r.repo)}</span>
       ${kindTag}<span class="repo-origin origin-${esc(r.origin)}">${o}</span>
       <button class="btn btn-sm repo-crawl" title="主动采集：只爬这一个${isWeb ? '网页音源站' : '仓库'}（采集策略按设置：时间窗 + 只收最新版）">采集</button>
+      ${isWeb ? '' : `<button class="btn btn-sm danger-ghost repo-block" title="拉黑：移出清单 + 加入黑名单（搜索发现/社区精选不再自动回填）+ 清掉该仓库已采的脚本">拉黑</button>`}
       <button class="btn btn-sm danger-ghost repo-del" title="从清单移除（内置仓库可「恢复默认」找回）">删除</button>
     </div>`
   }).join('')
@@ -456,12 +457,38 @@ $('repoList').addEventListener('click', async (ev) => {
     return
   }
   const btn = ev.target.closest('.repo-del')
-  if (!btn) return
-  const row = btn.closest('.repo-row')
-  const name = row && row.getAttribute('data-repo')
-  if (!name) return
-  state.config.repos = (state.config.repos || []).filter(x => x.repo !== name)
-  await persistRepos()
+  if (btn) {
+    const row = btn.closest('.repo-row')
+    const name = row && row.getAttribute('data-repo')
+    if (!name) return
+    state.config.repos = (state.config.repos || []).filter(x => x.repo !== name)
+    await persistRepos()
+    return
+  }
+  // v1.10.7 快捷拉黑：移出清单 + 加入黑名单（防搜索发现/社区精选回填）+ 清残留脚本
+  const blkBtn = ev.target.closest('.repo-block')
+  if (!blkBtn) return
+  const row2 = blkBtn.closest('.repo-row')
+  const repo = row2 && row2.getAttribute('data-repo')
+  if (!repo) return
+  if (!confirm('拉黑「' + repo + '」？\n\n'
+    + '· 从仓库清单移除\n'
+    + '· 加入黑名单（搜索发现/社区精选不会再把它加回来）\n'
+    + '· 连带清掉该仓库已采集的脚本（不会自动采回）\n\n'
+    + '如只想移出清单、保留回填可能，请用「删除」。')) return
+  blkBtn.disabled = true
+  try {
+    const r = await api.reposBlock(repo)
+    if (!r || r.ok === false) throw new Error((r && r.error) || '未知错误')
+    const d = r.data || {}
+    await loadConfig()
+    if (typeof refreshInstalled === 'function') refreshInstalled()
+    loadSources()
+    toast(`已拉黑「${d.blocked || repo}」：黑名单${d.alreadyBlocked ? '原本就有' : '已加入'}、清理脚本 ${d.removedSources || 0} 条`, 'ok')
+  } catch (e) {
+    toast('拉黑失败: ' + String((e && e.message) || e), 'err')
+    blkBtn.disabled = false
+  }
 })
 
 // 仓库清单关键字搜索（v1.10.3）
@@ -660,7 +687,9 @@ $('btnPruneNonSource').addEventListener('click', async () => {
     // 后端已改过清单与音源库，重新拉一遍，避免前端旧 state 覆盖回去
     await loadConfig()
     if (typeof refreshInstalled === 'function') refreshInstalled()
+    const renamed = d.renamedRepos || []
     toast(`清理完成：移除仓库 ${(d.removedRepos || []).length} 个、删除脚本 ${d.removedSources || 0} 条` +
+      (renamed.length ? `；清理改名重复 ${renamed.length} 个（${renamed.slice(0, 3).map(x => `${x.from} → ${x.to}`).join('、')}${renamed.length > 3 ? '…' : ''}）` : '') +
       (d.skipped ? `（临时失败跳过 ${d.skipped} 个，可再点一次）` : '') +
       (d.unchecked ? `，还有 ${d.unchecked} 个未验真，可再点一次继续` : ''), 'ok')
   } catch (e) {

@@ -91,11 +91,12 @@ async function main() {
     assert.strictEqual(FAKE.st.uploads[FAKE.st.uploads.length - 1].name, '云曼酷我')
     assert.strictEqual(r.obfRejected, 1, '应报告剔除 1 条')
     const bad = h.store.db.sources.bad
-    assert.strictEqual(bad.status, 'dead')
-    assert.strictEqual(bad.error, '重度混淆脚本，已按设置剔除')
+    // v1.10.7 起 high 混淆不再判死，改为移入「混淆隔离」区（可在隔离页信任放行）
+    assert.strictEqual(bad.status, 'quarantined')
+    assert.strictEqual(bad.error, '混淆隔离：重度混淆脚本，已移入「混淆隔离」区，可在该页信任后放行')
     assert.strictEqual(bad.obfLevel, 'high')
     assert.ok(bad.obfHits && bad.obfHits.spinLoops === 1 && bad.obfHits.selfSchedCalls === 1, 'hits 应带反调试特征计数')
-    ok('灌入前剔除高危条目：干净音源照常灌，高危条目标 dead + 特征计数落库')
+    ok('灌入前隔离高危条目：干净音源照常灌，高危条目移入隔离区 + 特征计数落库')
   }
 
   // ② 手动关闭：不拦（与旧行为一致，风险自担）

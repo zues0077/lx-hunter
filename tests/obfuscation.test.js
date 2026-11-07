@@ -145,13 +145,13 @@ async function t() {
   ck('tooltip 用 obfTip 人话摘要', appSrc.includes('function obfTip'))
   const htmlSrc = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8')
   ck('设置页有剔除开关', htmlSrc.includes('cfgExcludeObf') && htmlSrc.includes('重度混淆'))
-  ck('开关文案提及每次灌入', htmlSrc.includes('每次灌入自动剔除'))
+  ck('开关文案提及每次灌入（v1.10.7 改隔离表述）', htmlSrc.includes('每次灌入自动隔离'))
   ck('开关文案提及反调试特征', htmlSrc.includes('空转死循环'))
   const hunterSrc = fs.readFileSync(path.join(__dirname, '../src/core/hunter.js'), 'utf8')
-  ck('runCheck 含剔除分支', hunterSrc.includes('excludeHighRiskObfuscated') && hunterSrc.includes('重度混淆脚本，已按设置剔除'))
+  ck('runCheck 含隔离分支（quarantined 取代判死）', hunterSrc.includes('excludeHighRiskObfuscated') && hunterSrc.includes('混淆隔离：重度混淆脚本，已移入「混淆隔离」区'))
   ck('检测完成日志报混淆计数', hunterSrc.includes('重度混淆') && hunterSrc.includes('局部混淆'))
-  // v1.9.5：灌入闸门（runImport 下载后、规划前）+ 完成日志计数
-  ck('runImport 含灌入前剔除闸门', hunterSrc.includes('灌入前剔除') && hunterSrc.includes('obfuscationRisk'))
+  // v1.9.5：灌入闸门（runImport 下载后、规划前）+ 完成日志计数（v1.10.7 改为 applyObfGate 隔离闸）
+  ck('runImport 含灌入前隔离闸门', hunterSrc.includes("'灌入前'") && hunterSrc.includes('applyObfGate') && hunterSrc.includes('obfuscationRisk'))
   ck('灌入完成日志报剔除数', hunterSrc.includes('高危混淆剔除'))
   // v1.9.5：默认开（store.js）
   const storeSrc = fs.readFileSync(path.join(__dirname, '../src/core/store.js'), 'utf8')
