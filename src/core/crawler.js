@@ -15,7 +15,7 @@
  *  网络环境下（用户实测），裸 fetch 会把所有压缩包音源漏掉，镜像链是刚需。 */
 const { fetchWithTimeout, crawlFetch, readText, sleep } = require('./net')
 const { unzip, isArchivePath } = require('./zip')
-const { scoreEntry, sha256Str } = require('./checker')
+const { scoreEntry, classifyEntry, sha256Str, isHostAdapterScript } = require('./checker')
 
 const GH_HEADERS_BASE = { 'User-Agent': 'lx-hunter-pc/1.0', 'Accept': 'application/vnd.github+json' }
 
@@ -202,6 +202,9 @@ function extractArchiveCandidates(tree, maxPerRepo) {
 /** 压缩包内挑出「像洛雪音源」的 .js，返回候选条目（code 已就位，检测时无需再下载） */
 function pickScriptsFromZip(entries, archivePath, repo, rawUrl, maxPerArchive) {
   const out = []
+  // 宿主插件安装包（plugin.json + 包内无真音源脚本）整包跳过：
+  // 否则会把插件主脚本 index.js 当音源抽出（2026-11-08 假阳性复盘）。
+  if (isPluginPackage(entries)) return out
   for (const f of entries) {
     if (!/\.js$/i.test(f.path) || f.data.length > 2 * 1024 * 1024) continue
     if (/(^|\/)(node_modules|test|tests|__tests__)\//.test(f.path)) continue
@@ -384,12 +387,30 @@ async function checkQuota(need, token) {
  *    `HYWmusic_.V1.2.0.js`、`wow-origin.rewrite.js`(581KB)。
  * 判据：先排掉构建产物名，再要求「名字像源」或「体积很小」。
  */
-function isSourceAsset(a) {
+/**
+ * 宿主播放器插件安装包识别（2026-11-08 假阳性复盘）：包内带 plugin.json（MyGo / MusicFree 等插件清单），
+ * 且没有任何一条真音源脚本 → 整包不是音源分发。
+ * 保守口径：只要包里有一条通过 classifyEntry 的脚本就不判插件包，避免误伤自带清单的聚合包；
+ * 真音源包（如 zlyon/lx-hunter 的 lx-hunter-v1.4.28.jsplugin.zip）内没有 plugin.json，不受影响。
+ */
+function isPluginPackage(entries) {
+  const files = Array.isArray(entries) ? entries : []
+  if (!files.some(f => /(^|\/)plugin\.json$/i.test(String((f && f.path) || '')))) return false
+  return !files.some(f => {
+    const p = String((f && f.path) || '')
+    if (!/\.js$/i.test(p) || !f.data || f.data.length > 2 * 1024 * 1024) return false
+    return classifyEntry(p, f.data.toString('utf8'))
+  })
+}
+
+function isSourceAsset(a, entries) {
   const n = String((a && a.name) || '')
   if (!/\.(js|zip|7z|rar)$/i.test(n)) return false
   // 图标/哈希/自动更新清单之类不是分发内容
   if (/\.(yml|sha256|blockmap|json|txt)$/i.test(n)) return false
   if (/(^|[^a-z])(win(dows)?|mac(os)?|linux|darwin|arm64|aarch64|x64|amd64|x86_64|x86|armv7l|universal|dmg|setup|installer|portable|appimage|deb|rpm)([^a-z]|$)/i.test(n)) return false
+  // 收紧：拿到包内文件列表时，宿主插件安装包一律不算音源资产（名字含 source 也不行）
+  if (Array.isArray(entries) && isPluginPackage(entries)) return false
   if (/音源|source|src|plugin|script|api/i.test(n)) return true
   return Number(a && a.size || 0) > 0 && Number(a && a.size) <= 1024 * 1024
 }
@@ -476,12 +497,15 @@ async function verifyRepoHasSource(repo, o) {
   })
   let best = 0
   let weakHit = null
+  let hostAdapter = null
   for (const f of js.slice(0, 3)) {
     const enc = f.path.split('/').map(encodeURIComponent).join('/')
     try {
       const c = await get(`https://api.github.com/repos/${repo}/contents/${enc}?ref=${encodeURIComponent(branch)}`, true)
       if (!c.ok) continue
       const text = await readText(c, tmo)
+      // 宿主插件/适配层：scoreEntry 已归零，这里显式记下来，后面压过「压缩包/Release 放行」
+      if (isHostAdapterScript(text)) { hostAdapter = hostAdapter || { file: f.path }; continue }
       const sc = scoreEntry(f.path, text)
       if (sc > best) best = sc
       if (sc >= 4) {
@@ -491,6 +515,8 @@ async function verifyRepoHasSource(repo, o) {
       }
     } catch (e) { /* 单个文件失败不影响整仓判定 */ }
   }
+  // ★ 仓库主体是宿主插件时整仓判死：它的 zip/Release 就是插件安装包，不能按「名字像源」放行
+  if (hostAdapter) return { ok: false, reason: '宿主插件/适配层（非音源脚本）', score: best, file: hostAdapter.file }
   // ★ 压缩包分发：很多仓库把音源打包成 zip 发（skxingyu/lx_music- 树里 4 个 zip、无散装 .js），
   //   树里只有零散构建脚本甚至没有 .js。这种情况不能因为「抽检的 .js 不是音源」就判死，
   //   只要树里有压缩包就放行，交给爬取阶段的解压挑脚本。
@@ -738,6 +764,10 @@ async function crawl(opts, onEvent, shouldStop) {
             relBytes += a.size || 0
             if (a.kind === 'js') {
               const code = await readText(res2, timeoutMs)
+              if (isHostAdapterScript(code)) {
+                onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：release ${a.tag} 资产 ${a.name} 是宿主插件/适配层脚本，跳过` })
+                continue
+              }
               relHit++
               newOnes.push({
                 id: repo + '::release:' + a.tag + ':' + a.name,
@@ -761,6 +791,11 @@ async function crawl(opts, onEvent, shouldStop) {
               const buf = Buffer.from(await res2.arrayBuffer())
               if (buf.length > MAX_ASSET_BYTES) throw new Error('压缩包过大（' + Math.round(buf.length / 1048576) + 'MB）')
               const files = unzip(buf)
+              // 包内清单级复核：名字像源也不行，宿主插件安装包直接跳过
+              if (!isSourceAsset(a, files)) {
+                onEvent('log', { level: 'info', module: '爬取', msg: `${repo}：release ${a.tag} 资产 ${a.name} 是宿主插件安装包（非音源分发），跳过` })
+                continue
+              }
               const picked = pickScriptsFromZip(files, 'release:' + a.tag + ':' + a.name, repo, a.url, 50)
               if (picked.length) {
                 relHit += picked.length

@@ -80,6 +80,17 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
     'const musicSources = {}',
     'const qualitys = {}'
   ].join('\n')
+  // 宿主插件主脚本（MyGo Music 的 LX Source 适配器）：造 lx 运行时、导出播放器插件 API，
+  // 但自己从不注册 lx.on、也没有 @name 元信息头 —— 不是音源脚本。
+  const HOST_TEXT = [
+    '// MyGo Music 插件：把洛雪音源脚本接到播放器上',
+    'const lx = { EVENT_NAMES: { request: "request" }, on(name, handler) {} }',
+    'const module = { exports: {} }',
+    'const factory = new Function("lx", "module", code)',
+    'factory(lx, module, module.exports)',
+    'export async function search({ query }) {}',
+    'export async function stream({ id, quality }) {}'
+  ].join('\n')
   const fixtures = {
     // 树里直接有音源脚本 —— 应当凭「含音源脚本」放行
     'a/lx-music-source': {
@@ -152,6 +163,14 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
         ] },
         { tag_name: 'v2.12.5', assets: [{ name: 'lx-music-desktop-2.12.5-x64.dmg', size: 132 * 1024 * 1024 }] }
       ]
+    },
+    // 宿主插件/适配层（2026-11-08 246 实机假阳性）：树里 index.js 造 lx 运行时，
+    // release 里还有一个名字含 source 的插件安装包 zip —— 两条放行路径都必须被挡住
+    'i/mygo-music-lx-source': {
+      branch: 'main',
+      tree: [{ type: 'blob', path: 'index.js', size: 63000 }],
+      files: { 'index.js': HOST_TEXT },
+      releases: [{ tag_name: 'v0.2.2', assets: [{ name: 'mygo-music-lx-source-v0.2.2.zip', size: 48548 }] }]
     }
   }
   const ghCalls = []
@@ -195,8 +214,37 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
   const vh = await verifyRepoHasSource('h/lx-music-desktop', { timeoutMs: 3000 })
   ck('内容验真：客户端的 dmg/7z 发行包不算音源分发',
     vh.ok === false, JSON.stringify(vh))
+  // ---------- 宿主插件/适配层（2026-11-08 假阳性复盘）----------
+  const { scoreEntry, isHostAdapterScript } = require('../src/core/checker')
+  const { isSourceAsset, pickScriptsFromZip } = require('../src/core/crawler')
+  const vi = await verifyRepoHasSource('i/mygo-music-lx-source', { timeoutMs: 3000 })
+  ck('内容验真：宿主插件整仓判死，且压过「Release 资产分发」放行',
+    vi.ok === false && vi.reason === '宿主插件/适配层（非音源脚本）', JSON.stringify(vi))
+  ck('宿主判据：插件主脚本命中、真音源脚本不命中',
+    isHostAdapterScript(HOST_TEXT) === true && isHostAdapterScript(SRC_TEXT) === false)
+  ck('打分：宿主脚本归零、真音源仍达阈值',
+    scoreEntry('index.js', HOST_TEXT) === 0 && scoreEntry('lx-source.js', SRC_TEXT) >= 4,
+    scoreEntry('index.js', HOST_TEXT) + '/' + scoreEntry('lx-source.js', SRC_TEXT))
+  const pluginZip = [
+    { path: 'plugin.json', data: Buffer.from('{"id":"lx-source","main":"index.js"}') },
+    { path: 'index.js', data: Buffer.from(HOST_TEXT) },
+    { path: 'README.md', data: Buffer.from('# plugin') }
+  ]
+  const realZip = [{ path: '洛雪音源.js', data: Buffer.from(SRC_TEXT) }]
+  ck('资产收紧：带 plugin.json 的插件安装包被拒、真音源 jsplugin.zip 不受影响',
+    isSourceAsset({ name: 'mygo-music-lx-source-v0.2.2.zip', size: 48548 }, pluginZip) === false &&
+    isSourceAsset({ name: 'lxmusic.jsplugin.zip', size: 483 * 1024 }, realZip) === true)
+  ck('压缩包抽取：插件包 0 条、真音源包至少 1 条',
+    pickScriptsFromZip(pluginZip, 'release:v0.2.2:x.zip', 'i/mygo-music-lx-source', 'http://x', 50).length === 0 &&
+    pickScriptsFromZip(realZip, 'release:v1:y.zip', 'a/lx-music-source', 'http://y', 50).length >= 1)
+  // 真音源 fixture 全量扫描：宿主判据零误伤
+  const fs = require('fs'), pathMod = require('path')
+  const fxDir = pathMod.join(__dirname, 'fixtures')
+  const jsFixtures = fs.readdirSync(fxDir).filter(f => /\.js$/i.test(f))
+  const mis = jsFixtures.filter(f => isHostAdapterScript(fs.readFileSync(pathMod.join(fxDir, f), 'utf8')))
+  ck('宿主判据对全部 ' + jsFixtures.length + ' 个脚本 fixture 零误伤', mis.length === 0, mis.join(','))
+
   // 资产判据单测：真分发包 vs 客户端构建产物
-  const { isSourceAsset } = require('../src/core/crawler')
   const assetsOk = [
     ['lxmusic.jsplugin.zip', 483 * 1024],
     ['LxMusicApi_1.0.0.0.zip', 30 * 1024 * 1024],
@@ -234,17 +282,18 @@ function mkDeep({ loadable = true, cancelled = false, platforms = {}, loadError 
     return json({ default_branch: fx.branch })
   }
   const noVerify = await discoverReposViaSearch({ keywords: ['lx 音源'], known: new Set(), timeoutMs: 3000 })
-  ck('内容验真：未开启时 8 个命中全收（不做额外请求）',
-    noVerify.repos.length === 8 && !ghCalls.some(u => /\/git\/trees\//.test(u)), 'repos=' + noVerify.repos.length)
+  const fxCount = Object.keys(fixtures).length
+  ck('内容验真：未开启时全部命中都收（不做额外请求）',
+    noVerify.repos.length === fxCount && !ghCalls.some(u => /\/git\/trees\//.test(u)), 'repos=' + noVerify.repos.length + ' expect=' + fxCount)
   const yesVerify = await discoverReposViaSearch({ keywords: ['lx 音源'], known: new Set(), timeoutMs: 3000, verify: true })
-  ck('内容验真：开启后剔除客户端、测试夹具、题库与客户端发行仓库',
+  ck('内容验真：开启后剔除客户端、测试夹具、题库、客户端发行包与宿主插件',
     yesVerify.repos.length === 4 &&
-    ['c/lxmusic-android', 'e/lx-music-source-manager', 'g/math-model', 'h/lx-music-desktop'].every(x => !yesVerify.repos.includes(x)),
+    ['c/lxmusic-android', 'e/lx-music-source-manager', 'g/math-model', 'h/lx-music-desktop', 'i/mygo-music-lx-source'].every(x => !yesVerify.repos.includes(x)),
     yesVerify.repos.join(','))
   ck('内容验真：压缩包与 Release 分发型都被保住',
     yesVerify.repos.includes('b/lx-source-pack') && yesVerify.repos.includes('d/lx-source-release'), yesVerify.repos.join(','))
   ck('内容验真：droppedNoSource 计数与 details 对齐',
-    yesVerify.droppedNoSource === 4 && yesVerify.discovered === 8 && yesVerify.details.length === 8,
+    yesVerify.droppedNoSource === fxCount - 4 && yesVerify.discovered === fxCount && yesVerify.details.length === fxCount,
     `dropped=${yesVerify.droppedNoSource} discovered=${yesVerify.discovered} details=${yesVerify.details.length}`)
 
   globalThis.fetch = mockFetch(null, { failMessage: 'API rate limit exceeded' })

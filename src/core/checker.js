@@ -76,12 +76,40 @@ function extractMeta(code) {
 }
 
 /**
+ * 宿主插件 / 适配层识别（2026-11-08 实机假阳性复盘）。
+ *
+ * 背景：jfeng018/mygo-music-lx-source 是「把洛雪音源脚本接进 MyGo Music」的播放器插件。
+ * 它的 index.js 为了给第三方脚本造运行时，自带 `globalThis.lx`、`EVENT_NAMES`、`musicUrl`、
+ * `inited` 等字样，scoreEntry 算出 8 分 → 被当成音源脚本收进库；release 里同一个 zip
+ * 又被 isSourceAsset（名字含 source）放行 → 一次爬取凭空多出 2 条假音源。
+ *
+ * 判据只认「脚本宿主」而非关键词，且以真音源的硬契约做豁免，避免误伤：
+ *  - 真音源必须注册 lx 事件（lx.on 调用）或带 @name 元信息头 → 一律不判宿主；
+ *  - 宿主特征：自己 `new Function` 执行第三方脚本 + 提供 EVENT_NAMES/module.exports，
+ *    或导出播放器插件生命周期 API（search/stream/lyrics/home/setSetting…）。
+ */
+function isHostAdapterScript(content) {
+  if (!content || typeof content !== 'string') return false
+  // ① 洛雪音源脚本的核心契约，命中即豁免（测试夹具里的 globalThis.lx = {} 也靠这条保住）
+  if (/\blx\s*\.\s*on\s*\(|\bLX\s*\.\s*on\s*\(|on\s*\(\s*['"]request['"]/.test(content)) return false
+  // ② 标准音源元信息头，命中即豁免
+  if (/@name\s+\S|@version\s+\S/.test(content)) return false
+  // ③ 宿主运行时 / 宿主插件 API
+  const buildsRuntime = /new\s+Function\s*\(/.test(content) &&
+    /EVENT_NAMES/.test(content) && /module\.exports/.test(content)
+  const exportsHostApi = /export\s+(?:async\s+)?function\s+(?:search|stream|lyrics|home|setSetting|browse|signIn|account|playlists)\b/.test(content)
+  return buildsRuntime || exportsHostApi
+}
+
+/**
  * 音源疑似度打分。阈值从 5 下调到 4：
  * 旧阈值会把「只有 lx.request + @name + 文件名带 source」这类真实音源挡在深检之外，
  * 它们连手动点击「检测」都进不了沙箱（用户表现为「明明能用却检测不出来」）。
  * 深检本身有并发与预算保护，多放行一档不会拖垮速度。
  */
 function scoreEntry(path, content) {
+  // 宿主插件/适配层不是音源脚本：直接归零，避免「造 lx 运行时」的代码被当成音源特征
+  if (content && isHostAdapterScript(content)) return 0
   const fname = String(path || '').split('/').pop() || ''
   let score = 0
   if (/音源|源|source|lx-source/i.test(fname)) score += 2
@@ -744,7 +772,7 @@ function apiDownVerdict(e, cfg) {
 
 module.exports = {
   TEST_SONGS, PLATFORMS, PLATFORM_LABEL,
-  sha256Str, extractMeta, classifyEntry, scoreEntry, obfuscationRisk, obfuscationTip, verifyUrl,
+  sha256Str, extractMeta, classifyEntry, scoreEntry, isHostAdapterScript, obfuscationRisk, obfuscationTip, verifyUrl,
   checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge,
   isTransient, isLocalNetworkIssue, deepFailKind, applyProbeRecord, extractApiHosts, probeApiHosts, apiDownVerdict
 }
