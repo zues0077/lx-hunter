@@ -235,8 +235,12 @@ ipcMain.handle('config:set', guard((e, patch) => {
     }
     patch.repos = out
   }
+  const prevProxy = store.config.crawlProxy
+  const prevPolicy = store.config.proxyPolicy
   store.saveConfig(patch)
-  require('../core/net').applyConfig(store.config) // 网络设置改动即时生效
+  const netmod = require('../core/net')
+  if (store.config.crawlProxy !== prevProxy || store.config.proxyPolicy !== prevPolicy) netmod.resetProxyHealth()
+  netmod.applyConfig(store.config) // 网络设置改动即时生效
   return store.config
 }))
 
@@ -287,6 +291,14 @@ ipcMain.handle('net:mirrorPoolSet', guard((e, patch) => {
 ipcMain.handle('net:proxyTest', guard(async (e, opts) => {
   const { testProxy } = require('../core/net')
   return await testProxy(opts || {})
+}))
+
+// 代理健康状态（v1.11.0，与 Web 版 /api/net/proxy-health 对应）
+ipcMain.handle('net:proxyHealth', guard(() => require('../core/net').getProxyHealth()))
+ipcMain.handle('net:proxyHealthReset', guard(() => {
+  const netmod = require('../core/net')
+  netmod.resetProxyHealth()
+  return netmod.getProxyHealth()
 }))
 
 // ---------------- 音源采集站（v1.9.20 补桌面版通道，逻辑与 Web 版一致）----------------
@@ -420,6 +432,20 @@ ipcMain.handle('sources:get', guard(() => {
 ipcMain.handle('logs:get', guard(() => logs.slice(-800)))
 
 ipcMain.handle('logs:clear', guard(() => { logs.length = 0; return true }))
+
+// 站外分发源（v1.11.0）：与 Web 版 /api/externals/* 一一对应
+ipcMain.handle('externals:get', guard(() => ({ sources: hunter.listExternalSources() })))
+ipcMain.handle('externals:probe', guard(async (e, url) => await hunter.probeExternal(String(url || ''))))
+ipcMain.handle('externals:add', guard(async (e, payload) => {
+  const p = payload || {}
+  const det = p.detect || await hunter.probeExternal(String(p.url || ''))
+  return { ok: true, sources: hunter.addExternalSource(String(p.url || ''), det) }
+}))
+ipcMain.handle('externals:update', guard((e, payload) => {
+  const p = payload || {}
+  return { ok: true, sources: hunter.updateExternalSource(String(p.url || ''), p.patch || {}) }
+}))
+ipcMain.handle('externals:remove', guard((e, url) => ({ ok: true, sources: hunter.removeExternalSource(String(url || '')) })))
 
 ipcMain.handle('crawl:start', guard(async (e, opts) => {
   // v1.10.6：opts.only 非空时定向主动采集（清单页每行「采集」按钮）

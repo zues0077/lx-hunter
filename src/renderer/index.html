@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=17">
+<link rel="stylesheet" href="styles.css?v=19">
 <script src="auth-bg.js?v=2"></script>
 </head>
 <body>
@@ -289,6 +289,10 @@
               <button class="btn ghost" id="btnProxyTest" type="button" title="只验证这个代理本身：CONNECT 隧道能否建立、经代理能否取到响应、耗时多少（另给一次直连对照）">测试代理</button>
             </div>
           </label>
+          <div class="field-row" style="margin-top:6px">
+            <span class="hint proxy-health" id="proxyHealthTip" style="width:auto;margin:0">代理状态：读取中…</span>
+            <button class="btn ghost" id="btnProxyHealthReset" type="button" hidden title="清掉熔断计数，立刻重新尝试代理（不必等冷却结束）">立即恢复代理</button>
+          </div>
           <label class="field"><span>单仓库候选上限</span><input class="input" id="cfgMaxCand" type="number"></label>
           <label class="field"><span>并发数（1–16）</span><input class="input" id="cfgConc" type="number" min="1" max="16"></label>
           <label class="field"><span>下载超时 (ms)</span><input class="input" id="cfgTmo" type="number"></label>
@@ -303,13 +307,19 @@
         <p class="hint">自动发现的镜像进入<strong>镜像池</strong>：既作为「自动」模式的兜底候选追加在候选链末尾，也会出现在上方「raw 加速镜像」下拉框的「自动发现（镜像池）」分组里，可像内置镜像一样直接固定选用。自动发现<strong>不依赖「强制代理」和「jsDelivr 加速」开关</strong>——它直接实测各镜像站点本身，勾选项不影响发现结果，无需先取消勾选。</p>
         <div id="mirrorPoolList" class="mirror-list" hidden></div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgForceProxy"><span>强制代理：把代理排在候选链最前（代理稳定时省去逐个镜像试错）</span></label>
+          <label class="field" style="min-width:280px"><span>代理策略</span>
+            <select class="input" id="cfgProxyPolicy">
+              <option value="off">关闭：任何链路都不用代理（地址保留）</option>
+              <option value="auto">自动（推荐）：第三方站点优先走代理，GitHub 走直连+镜像</option>
+              <option value="force">强制：代理排在 GitHub 候选链最前</option>
+            </select>
+          </label>
           <label class="chk"><input type="checkbox" id="cfgUseJsdelivr"><span>jsDelivr 加速（关闭后不再使用 jsDelivr 兜底，避免 CDN 缓存旧脚本）</span></label>
           <button class="ghost" id="btnNetTest" type="button" style="align-self:flex-start">测试网络连通</button>
         </div>
         <div class="field-row"><span class="hint" id="netTestResult"></span></div>
         <div class="field-row"><span class="hint" id="proxyTestResult"></span></div>
-        <div class="field-row"><span class="hint" style="width:auto">爬取代理只用于 GitHub 爬取（仓库扫描 / 脚本与压缩包下载），格式 <code>http://host:port</code>，不影响音源检测与灌入。<strong>raw 加速镜像</strong>可下拉直接指定某一个，点「测速」会逐个实测耗时并列出结果，点结果右边的「选用」即可把最快的那个固定下来（选「自动」则由程序直连优先、失败自动切换）。测速结果为「HTTP 404」表示这条通道本身是通的、只是探针文件不在，仍可选。</span></div>
+        <div class="field-row"><span class="hint" style="width:auto">爬取代理（格式 <code>http://host:port</code>）作用于 <strong>GitHub 爬取</strong>（仓库扫描 / 脚本与压缩包下载）<strong>和第三方站点</strong>（音源采集站 / 网页音源站 / 站外分发源）；音源检测的播放请求与灌入从不走代理。「自动」= 第三方站点优先试代理、失败自动回退直连，GitHub 始终走直连+镜像；「强制」额外把代理插到 GitHub 候选链最前；「关闭」= 任何链路都不用代理（地址仍保留）。代理连续失败 3 次会自动临时停用并按 5→10→20 分钟退避重试，状态显示在代理框下方，点「测试代理」或「立即恢复代理」可手动恢复。<strong>raw 加速镜像</strong>可下拉直接指定某一个，点「测速」会逐个实测耗时并列出结果，点结果右边的「选用」即可把最快的那个固定下来（选「自动」则由程序直连优先、失败自动切换）。测速结果为「HTTP 404」表示这条通道本身是通的、只是探针文件不在，仍可选。</span></div>
         <div class="field-row">
           <label class="chk"><input type="checkbox" id="cfgAutoUnsafe"><span>脚本要求 VM 模式时自动放行（有安全风险）</span></label>
         </div>
@@ -383,6 +393,19 @@
         </div>
         <p class="hint" style="margin-top:4px">除 GitHub 仓库外，也支持粘贴<strong>任意挂音源脚本的网页地址</strong>（如 <code>https://zrcdy.dpdns.org/lx/vers.php</code> 这类「插件下载中心」页面）：爬取时抓取页面里的 .js 直链，逐个甄别后入库。网页站不消耗 GitHub API 配额。列表里显示「网页」标记。</p>
         <div id="blockedBox" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">站外分发源（Pages / 自建域名 / 直链）</h3>
+        <p class="hint">有些作者不把音源放在 GitHub 仓库里，而是由 CI 部署到 Cloudflare Pages、GitHub Pages、自建域名或对象存储（Git 树里看不到 .js，旧采集口径判死属口径边界，不是仓库失效）。把<strong>直链脚本地址</strong>、<strong>分发首页</strong>或<strong>压缩包地址</strong>加到这里即可采集：直链直接验真入库，首页同时认 <code>href/src</code> 链接和页面上以纯文本给出的导入地址，压缩包解压后挑真音源脚本。验真闸门与 GitHub 通道完全一致（宿主插件/适配层判死、<code>plugin.json</code> 安装包拒收、疑似度 ≥4），不消耗 GitHub API 配额。</p>
+        <div id="externalList" class="repo-list"></div>
+        <div class="repo-add">
+          <input class="input" id="externalAddInput" type="text" placeholder="添加站外源：https://xxx.pages.dev/lx.js 或首页 / .zip 地址">
+          <button class="btn btn-sm" id="btnAddExternal">探测并添加</button>
+          <button class="btn btn-sm" id="btnCrawlExternals">立即采集全部</button>
+        </div>
+        <p class="hint" style="margin-top:6px">添加前会先下载验真，不是音源不让加。启用后<strong>全量爬取 / 定时爬取 / 行级「采集」自动带上</strong>；「立即采集全部」只跑这些 URL，不碰 GitHub 配额。移除只移出清单，已采回的音源保留在库里。</p>
+        <p class="hint" style="margin-top:2px"><strong>时间窗口径</strong>：站外源没有 Git 提交/发布时间，设了「只爬近期更新的仓库（N 天）」时按<strong>响应体指纹是否变化</strong>判定——内容没变就当「N 天内没有新音源」整源跳过，内容变了才采，首次采集一律放行；N=0 则每轮全采。首页里同组多版本直链照旧按「同组音源只保留最新版」开关处理，直链本身天然只有一版。</p>
       </div>
 
       <div class="card">
@@ -665,7 +688,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
-<script src="web-bridge.js?v=54"></script>
-<script src="app.js?v=59"></script>
+<script src="web-bridge.js?v=56"></script>
+<script src="app.js?v=61"></script>
 </body>
 </html>

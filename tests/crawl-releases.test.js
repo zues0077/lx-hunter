@@ -346,7 +346,7 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
   ck('音源库徽章显示混淆隔离', appSrc.includes("status === 'quarantined'") && appSrc.includes('混淆隔离</span>'))
   ck('隔离条目不落入「未检测」筛选', appSrc.includes("e.status !== 'quarantined'"))
   ck('设置页文案改为隔离表述', htmlSrc.includes('自动隔离') && htmlSrc.includes('「混淆隔离」页'))
-  ck('缓存戳提升到 app.js v59 / web-bridge v54 / styles v17', htmlSrc.includes('app.js?v=59') && htmlSrc.includes('web-bridge.js?v=54') && htmlSrc.includes('styles.css?v=17'))
+  ck('缓存戳提升到 app.js v61 / web-bridge v56 / styles v19', htmlSrc.includes('app.js?v=61') && htmlSrc.includes('web-bridge.js?v=56') && htmlSrc.includes('styles.css?v=19'))
 
   // —— v1.10.8 改名检测（prune 301 识别）+ 仓库行快捷拉黑 ——
   {

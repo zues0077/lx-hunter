@@ -245,7 +245,8 @@ async function loadConfig() {
   $('cfgMirrorCustom').value = c.mirrorCustom || ''
   $('cfgMirrorCustom').parentNode.style.display = (c.mirror === 'custom') ? '' : 'none'
   $('cfgCrawlProxy').value = c.crawlProxy || ''
-  $('cfgForceProxy').checked = !!c.forceProxy
+  $('cfgProxyPolicy').value = c.proxyPolicy || (c.forceProxy ? 'force' : 'auto')
+  if (!$('cfgProxyPolicy').value) $('cfgProxyPolicy').value = 'auto'
   $('cfgUseJsdelivr').checked = c.useJsdelivr !== false
   $('cfgMaxCand').value = c.maxCandidatesPerRepo || 400
   $('cfgConc').value = c.concurrency || 8
@@ -277,6 +278,7 @@ async function loadConfig() {
     : (Array.isArray(c.defaultRepos) ? c.defaultRepos : [])
   renderRepoList(c.repos, state.defaultRepos)
   renderHubList(c.hubs)
+  renderExternalList(c.externalSources)
   renderMirrorPool(c.mirrorPool)
   $('cfgSearchEnabled').checked = !!c.searchEnabled
   $('cfgSearchKeywords').value = (c.searchKeywords || []).join('\n')
@@ -286,6 +288,7 @@ async function loadConfig() {
   $('cfgSearchVerify').checked = c.searchVerify !== false
   renderInstalledAccountInfo()
   testConn()
+  refreshProxyHealth()
 }
 
 // v1.10.8：设置页与「采集源」页共用同一保存逻辑（按 ID 全局收集，两页输入框都在 DOM 里）
@@ -297,7 +300,8 @@ async function saveAllCfg() {
     mirror: $('cfgMirror').value || 'auto',
     mirrorCustom: $('cfgMirrorCustom').value.trim(),
     crawlProxy: $('cfgCrawlProxy').value.trim(),
-    forceProxy: $('cfgForceProxy').checked,
+    proxyPolicy: $('cfgProxyPolicy').value || 'auto',
+    forceProxy: $('cfgProxyPolicy').value === 'force',
     useJsdelivr: $('cfgUseJsdelivr').checked,
     maxCandidatesPerRepo: parseInt($('cfgMaxCand').value, 10) || 400,
     concurrency: Math.max(1, Math.min(16, parseInt($('cfgConc').value, 10) || 8)),
@@ -339,6 +343,7 @@ async function saveAllCfg() {
   state.config = r.data
   renderRepoList(state.config.repos, state.defaultRepos)
   renderHubList(state.config.hubs)
+  renderExternalList(state.config.externalSources)
   renderInstalledAccountInfo()
   // 保存时把两处「看起来对、实际不会触发」的组合说明白，别让用户以为设好了却没动静：
   //  ① 自动灌入是从属于定时爬取的（没开定时爬取就不会有「爬取结束」这个时机）；
@@ -350,6 +355,7 @@ async function saveAllCfg() {
   toast('设置已保存（仓库地址已自动规范为 owner/repo 格式）' + warnAuto + warnTarget,
     (warnAuto || warnTarget) ? 'warn' : 'ok')
   testConn()
+  refreshProxyHealth()
 }
 $('btnSaveCfg').addEventListener('click', saveAllCfg)
 $('btnSaveCfg2').addEventListener('click', saveAllCfg)
@@ -571,6 +577,148 @@ $('btnAddRepo').addEventListener('click', async () => {
   if (!added) return toast('没有可添加的新仓库（可能格式不对或已存在）', 'warn')
   const ok = await persistRepos()
   if (ok) toast('已添加 ' + added + ' 个仓库', 'ok')
+})
+
+// ---------------- 站外分发源（v1.11.0）----------------
+// Pages / 自建域名 / 对象存储直链。独立清单不进 repos（躲开「清理非音源仓库」的 GitHub 验真误删），
+// 由核心层 buildRepoSeeds 并进爬取种子，全量 / 定时 / 行级采集自动覆盖。
+function extKindLabel(k) {
+  return ({ script: '直链脚本', archive: '直链压缩包', index: '索引页', unchanged: '内容未变' })[String(k || '')] || (k ? String(k) : '未探测')
+}
+function extStateText(s) {
+  const lc = s.lastCrawl || null
+  const lp = s.lastProbe || null
+  if (!lc) {
+    if (!lp) return '尚未采集'
+    return lp.ok ? `探测通过：${extKindLabel(lp.kind)} / ${lp.scripts || 0} 个脚本`
+      : `探测失败：${esc(String(lp.reason || '').slice(0, 40))}`
+  }
+  const at = lc.at ? new Date(lc.at).toLocaleString() : ''
+  if (lc.mode === 'unchanged') return `上次采集：内容未变，按时间窗跳过（${at}）`
+  if (lc.ok) return `上次采集：收入 ${lc.added || 0} 条${lc.skippedOld ? ` / 旧版跳过 ${lc.skippedOld}` : ''}（${at}）`
+  return `上次采集失败：${esc(String(lc.reason || '').slice(0, 40))}`
+}
+function renderExternalList(sources) {
+  if (Array.isArray(sources)) state.config.externalSources = sources
+  const list = state.config.externalSources || []
+  const box = $('externalList')
+  if (!box) return
+  if (!list.length) {
+    box.innerHTML = '<p class="hint" style="margin:0">还没有站外分发源 —— 在下方填 Pages / 自建域名的 .js 直链、分发首页或压缩包地址，点「探测并添加」。</p>'
+    return
+  }
+  box.innerHTML = list.map(s => {
+    const on = s.enabled !== false
+    const bad = (s.lastProbe && s.lastProbe.ok === false) || (s.lastCrawl && s.lastCrawl.ok === false)
+    return `<div class="repo-row" data-ext="${esc(s.url)}">
+      <label class="repo-toggle"><input type="checkbox" class="ext-enabled" ${on ? 'checked' : ''}><span>${on ? '启用' : '已禁用'}</span></label>
+      <span class="repo-name" title="${esc(s.url)}">${esc(s.name || s.url)}</span>
+      <span class="repo-origin origin-external">${esc(extKindLabel(s.kind))}</span>
+      <span class="ext-state${bad ? ' is-bad' : ''}">${extStateText(s)}</span>
+      <button class="btn btn-sm ext-probe" title="重新下载验真（不入库）">验真</button>
+      <button class="btn btn-sm ext-crawl" title="主动采集：只采这一个站外源">采集</button>
+      <button class="btn btn-sm danger-ghost ext-del" title="移出清单（已采回的音源保留在库中）">删除</button>
+    </div>`
+  }).join('')
+}
+
+$('externalList').addEventListener('change', async (ev) => {
+  const cb = ev.target.closest('.ext-enabled')
+  if (!cb) return
+  const row = cb.closest('.repo-row')
+  const url = row && row.getAttribute('data-ext')
+  if (!url) return
+  const r = await api.externalsUpdate(url, { enabled: cb.checked })
+  if (!r.ok) return toast('站外源状态保存失败: ' + r.error, 'err')
+  state.config.externalSources = (r.data && r.data.sources) || state.config.externalSources
+  renderExternalList(state.config.externalSources)
+})
+
+$('externalList').addEventListener('click', async (ev) => {
+  const row = ev.target.closest('.repo-row')
+  const url = row && row.getAttribute('data-ext')
+  if (!url) return
+  const probeBtn = ev.target.closest('.ext-probe')
+  if (probeBtn) {
+    probeBtn.disabled = true; probeBtn.textContent = '验真中…'
+    try {
+      const r = await api.externalsProbe(url)
+      const d = (r.ok && r.data) ? r.data : null
+      if (!d) return toast('验真失败: ' + (r.error || '未知错误'), 'err')
+      toast(d.ok ? `验真通过：${extKindLabel(d.kind)}，${(d.scripts || []).length} 个脚本` : '验真未通过：' + (d.reason || '未知原因'), d.ok ? 'ok' : 'err')
+    } finally { probeBtn.disabled = false; probeBtn.textContent = '验真' }
+    return
+  }
+  const crawlBtn = ev.target.closest('.ext-crawl')
+  if (crawlBtn) {
+    if (crawlBtn.disabled) return
+    crawlBtn.disabled = true; crawlBtn.textContent = '采集中…'
+    setBusy(true)
+    $('progStep').textContent = '主动采集站外源 ' + url + ' …'
+    try {
+      const r = await api.crawlStart({ only: [url] })
+      if (!r.ok) return toast('采集失败: ' + r.error, 'err')
+      const d = r.data || {}
+      toast(`站外源采集完成：新增 ${d.added || 0} 条、更新 ${d.updated || 0} 条、跳过 ${d.skipped || 0} 条`, 'ok')
+      loadSources()
+      loadConfig()
+    } finally {
+      setBusy(false)
+      crawlBtn.disabled = false; crawlBtn.textContent = '采集'
+    }
+    return
+  }
+  const delBtn = ev.target.closest('.ext-del')
+  if (!delBtn) return
+  if (!confirm('移出站外分发源「' + url + '」？\n\n只移出清单并停止后续采集，已采回的音源保留在库中。')) return
+  const r = await api.externalsRemove(url)
+  if (!r.ok) return toast('移除失败: ' + r.error, 'err')
+  state.config.externalSources = (r.data && r.data.sources) || []
+  renderExternalList(state.config.externalSources)
+  toast('已移出站外分发源', 'ok')
+})
+
+// 探测并添加：先验真（直链脚本 / 压缩包 / 索引页），不是音源不让加
+$('btnAddExternal').addEventListener('click', async () => {
+  const url = ($('externalAddInput').value || '').trim()
+  if (!url) return toast('请填写站外源地址', 'warn')
+  const btn = $('btnAddExternal')
+  btn.disabled = true; btn.textContent = '探测中…'
+  try {
+    const t = await api.externalsProbe(url)
+    const det = (t.ok && t.data) ? t.data : null
+    if (!det) return toast('探测失败: ' + (t.error || '未知错误'), 'err')
+    if (!det.ok) return toast('该地址不是可用音源：' + (det.reason || '验真未通过'), 'err')
+    const r = await api.externalsAdd(url, det.name, det)
+    if (!r.ok) return toast('添加失败: ' + r.error, 'err')
+    $('externalAddInput').value = ''
+    state.config.externalSources = (r.data && r.data.sources) || []
+    renderExternalList(state.config.externalSources)
+    toast(`已添加：${extKindLabel(det.kind)}，验真通过 ${(det.scripts || []).length} 个脚本`, 'ok')
+  } finally {
+    btn.disabled = false; btn.textContent = '探测并添加'
+  }
+})
+
+// 立即采集全部：only 里只放 URL，runCrawl 会跳过 GitHub 通道，零 API 配额
+$('btnCrawlExternals').addEventListener('click', async () => {
+  const urls = (state.config.externalSources || []).filter(s => s && s.enabled !== false).map(s => s.url)
+  if (!urls.length) return toast('没有启用的站外分发源', 'warn')
+  const btn = $('btnCrawlExternals')
+  btn.disabled = true; btn.textContent = '采集中…'
+  setBusy(true)
+  $('progStep').textContent = `采集 ${urls.length} 个站外分发源…`
+  try {
+    const r = await api.crawlStart({ only: urls })
+    if (!r.ok) return toast('采集失败: ' + r.error, 'err')
+    const d = r.data || {}
+    toast(`站外源采集完成：新增 ${d.added || 0} 条、更新 ${d.updated || 0} 条、跳过 ${d.skipped || 0} 条`, 'ok')
+    loadSources()
+    loadConfig()
+  } finally {
+    setBusy(false)
+    btn.disabled = false; btn.textContent = '立即采集全部'
+  }
 })
 
 // ---------------- 音源采集站（v1.9.19）----------------
@@ -942,7 +1090,7 @@ $('btnNetTest').addEventListener('click', async () => {
       mirror: $('cfgMirror').value,
       mirrorCustom: $('cfgMirrorCustom').value.trim(),
       crawlProxy: $('cfgCrawlProxy').value.trim(),
-      forceProxy: $('cfgForceProxy').checked,
+      proxyPolicy: $('cfgProxyPolicy').value || 'auto',
       useJsdelivr: $('cfgUseJsdelivr').checked
     })
     if (!r.ok) { el.textContent = '测试失败：' + (r.error || '未知错误'); return }
@@ -988,12 +1136,59 @@ $('btnProxyTest').addEventListener('click', async () => {
     el.textContent = via + direct
     if (d.ok) toast('代理可用（' + d.ms + 'ms）', 'ok')
     else toast('代理不可用：' + (d.error || '未知原因'), 'err')
+    refreshProxyHealth()   // 测试成功会清掉熔断，失败则把状态刷新给用户看
   } catch (e) {
     el.textContent = '测试失败：' + String((e && e.message) || e)
   } finally {
     if (btn) btn.disabled = false
   }
 })
+
+// ---------------- 代理健康状态（v1.11.0：熔断/退避可见、可手动恢复） ----------------
+async function refreshProxyHealth() {
+  const el = $('proxyHealthTip')
+  const btn = $('btnProxyHealthReset')
+  if (!el || !api.proxyHealth) return
+  try {
+    const r = await api.proxyHealth()
+    if (!r.ok) { el.textContent = '代理状态：读取失败（' + (r.error || '未知错误') + '）'; return }
+    const h = r.data || {}
+    const mins = Math.ceil((Number(h.cooldownRemainingMs) || 0) / 60000)
+    const map = {
+      unset: ['未配置代理（任何链路都不会使用代理）', 'is-off'],
+      off: ['策略「关闭」：任何链路都不用代理（地址保留）', 'is-off'],
+      invalid: ['代理地址格式无效（应为 http://host:port）', 'is-warn'],
+      healthy: ['正常（' + (h.policy || 'auto') + ' 策略，连续失败 0/' + (h.failThreshold || 3) + '）', 'is-ok'],
+      degraded: ['可疑（连续失败 ' + h.fails + '/' + (h.failThreshold || 3) + '，失败自动回退直连）', 'is-warn'],
+      cooldown: ['已临时停用：连续失败触发熔断，约 ' + mins + ' 分钟后半开重试（期间全部直连）', 'is-warn'],
+      'half-open': ['半开重试中：正在验证代理是否恢复', 'is-warn']
+    }
+    const hit = map[h.state] || ['状态未知', 'is-off']
+    el.textContent = '代理状态：' + hit[0] + (h.lastError ? '｜最后错误：' + h.lastError : '')
+    el.className = 'hint proxy-health ' + hit[1]
+    if (btn) btn.hidden = !(h.state === 'cooldown' || h.state === 'degraded' || h.state === 'half-open')
+  } catch (e) {
+    el.textContent = '代理状态：读取失败（' + String((e && e.message) || e) + '）'
+  }
+}
+
+$('btnProxyHealthReset').addEventListener('click', async () => {
+  const btn = $('btnProxyHealthReset')
+  if (btn) btn.disabled = true
+  try {
+    const r = await api.proxyHealthReset()
+    if (!r.ok) return toast('恢复失败：' + (r.error || '未知错误'), 'err')
+    toast('已重置熔断状态，下次请求会重新尝试代理', 'ok')
+    await refreshProxyHealth()
+  } catch (e) {
+    toast('恢复失败：' + String((e && e.message) || e), 'err')
+  } finally {
+    if (btn) btn.disabled = false
+  }
+})
+
+// 设置页开着时低频刷新（30s）：采集过程中触发熔断也能及时显示，不做高频轮询
+setInterval(() => { if (!document.hidden) refreshProxyHealth() }, 30000)
 
 async function testConn(explicit) {
   const chip = $('connChip'), txt = $('connText')
@@ -3117,6 +3312,7 @@ async function handleDataImport(scope) {
   const c = state.config
   renderRepoList(c.repos, state.defaultRepos)
   renderHubList(c.hubs)
+  renderExternalList(c.externalSources)
   renderMirrorPool(c.mirrorPool)
   if (scope === 'mirrors') {
     populateMirrors(state.mirrors, c.mirrorPool)

@@ -200,22 +200,148 @@ const MIRROR_PRESETS = [
   { id: 'jsdelivr', label: 'jsDelivr CDN', gh: true, build: (owner, repo, ref, p) => `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${p}` }
 ]
 
-/* ================= 爬取代理 / 候选链开关（v1.9.7，借鉴 songloft 版网络设置） =================
- * - crawlProxy：HTTP 代理（如 http://192.168.1.246:7890），仅作用于 GitHub 爬取链
- *   （仓库扫描 / 脚本 / 压缩包下载，全部走 crawlFetch），不影响音源检测的播放请求与灌入。
- * - forceProxy：把「经代理直连目标」排到候选链最前（代理稳定的环境省掉逐个镜像试错）。
- * - useJsdelivr：jsDelivr 是否参与候选链（默认参与；关掉可排除 CDN 缓存旧文件的干扰）。
- * - mirrorCustom：镜像下拉选「自定义…」时的前缀镜像基址。
+/* ================= 代理策略 / 候选链开关（v1.11.0 统一重整） =================
+ * 适用范围（旧注释把作用范围限定成 GitHub 爬取链，是错的，2026-11-08 实机核实）：
+ *   - GitHub 爬取链 crawlFetch：raw 脚本 / release 包 / 仓库扫描；
+ *   - 第三方站点 fetchAuto：音源采集站 hubfeed、网页音源站 / 站外分发源 websource。
+ *   音源检测的播放请求与灌入从不走代理。
+ * - proxyPolicy：off=全局不用代理（地址仍保留）；auto=第三方站点代理优先、GitHub 走直连+镜像（默认）；
+ *   force=在 auto 基础上把「经代理直连」插到 GitHub 候选链最前（等价旧 forceProxy=true）。
+ * - forceProxy：旧字段，写入时与 proxyPolicy 同步；applyConfig 见到旧配置（无 proxyPolicy）会据它推导。
+ * - 健康熔断（借鉴 P-0850「失败短缓存 + 全站熔断」）：连续失败 3 次进入冷却，期间所有链路跳过代理
+ *   直连；冷却到期半开探一次，成功恢复、失败指数退避（5→10→20 分钟封顶）。
+ * - 分级预算：健康态给足完整超时（慢代理不误杀）；失败过/半开态给短预算快速失败，回退直连仍用完整预算。
  * 零依赖实现：http 目标走代理绝对 URI；https 目标走 CONNECT 隧道 + TLS。
  */
-const NETCFG = { crawlProxy: '', forceProxy: false, useJsdelivr: true, mirrorCustom: '', mirrorPool: [] }
+const PROXY_POLICIES = ['off', 'auto', 'force']
+const PROXY_FAIL_THRESHOLD = 3
+const PROXY_COOLDOWN_MIN_MS = 5 * 60 * 1000
+const PROXY_COOLDOWN_MAX_MS = 20 * 60 * 1000
+const NETCFG = { crawlProxy: '', forceProxy: false, proxyPolicy: 'auto', useJsdelivr: true, mirrorCustom: '', mirrorPool: [] }
+
 function applyConfig(cfg) {
   if (!cfg) return
   if ('crawlProxy' in cfg) NETCFG.crawlProxy = String(cfg.crawlProxy || '').trim()
-  if ('forceProxy' in cfg) NETCFG.forceProxy = !!cfg.forceProxy
+  // proxyPolicy 优先；旧调用方只传 forceProxy 时按它推导，保证升级前后行为一致
+  if ('proxyPolicy' in cfg && PROXY_POLICIES.indexOf(cfg.proxyPolicy) >= 0) NETCFG.proxyPolicy = cfg.proxyPolicy
+  else if ('forceProxy' in cfg && typeof cfg.forceProxy === 'boolean') NETCFG.proxyPolicy = cfg.forceProxy ? 'force' : 'auto'
+  NETCFG.forceProxy = NETCFG.proxyPolicy === 'force'   // 派生：读它的旧代码/测试仍拿到正确值
   if ('useJsdelivr' in cfg) NETCFG.useJsdelivr = cfg.useJsdelivr !== false
   if ('mirrorCustom' in cfg) NETCFG.mirrorCustom = String(cfg.mirrorCustom || '').trim()
   if (Array.isArray(cfg.mirrorPool)) NETCFG.mirrorPool = cfg.mirrorPool
+}
+
+/* ---------------- 代理健康状态机（进程内，不落盘；P-0850 思路） ---------------- */
+const proxyState = {
+  fails: 0, cooldownUntil: 0, cooldownMs: PROXY_COOLDOWN_MIN_MS,
+  lastError: '', lastOkAt: 0, lastFailAt: 0, totalFails: 0, totalOk: 0, transitions: 0
+}
+let halfOpenInFlight = false
+
+function proxyConfigured() { return !!(NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy)) }
+
+function proxyStateLabel() {
+  if (!NETCFG.crawlProxy) return 'unset'
+  if (NETCFG.proxyPolicy === 'off') return 'off'
+  if (!proxyConfigured()) return 'invalid'
+  if (Date.now() < proxyState.cooldownUntil) return 'cooldown'
+  if (proxyState.fails >= PROXY_FAIL_THRESHOLD) return 'half-open'
+  return proxyState.fails ? 'degraded' : 'healthy'
+}
+
+/** 只在状态切换时打一条日志，避免 P-1316 那种每分钟刷屏 */
+function proxyLog(kind, detail) {
+  proxyState.transitions++
+  try { console.log('[proxy] ' + kind + (detail ? '：' + detail : '')) } catch (e) {}
+}
+
+function markProxyOk() {
+  const wasBad = proxyState.fails > 0 || proxyState.cooldownUntil > 0
+  proxyState.fails = 0
+  proxyState.cooldownUntil = 0
+  proxyState.cooldownMs = PROXY_COOLDOWN_MIN_MS
+  proxyState.lastOkAt = Date.now()
+  proxyState.totalOk++
+  if (wasBad) proxyLog('代理恢复可用，退出熔断', NETCFG.crawlProxy)
+}
+
+function markProxyFail(e) {
+  proxyState.fails++
+  proxyState.lastFailAt = Date.now()
+  proxyState.lastError = String((e && e.message) || e).slice(0, 120)
+  proxyState.totalFails++
+  const half = halfOpenInFlight
+  if (half || proxyState.fails >= PROXY_FAIL_THRESHOLD) {
+    const ms = Math.min(proxyState.cooldownMs, PROXY_COOLDOWN_MAX_MS)
+    proxyState.cooldownUntil = Date.now() + ms
+    proxyState.cooldownMs = Math.min(ms * 2, PROXY_COOLDOWN_MAX_MS)
+    proxyLog('连续失败，临时停用代理 ' + Math.round(ms / 60000) + ' 分钟', proxyState.lastError)
+  }
+}
+
+/** 健康态给完整预算（慢代理别误杀）；失败过/半开态给短预算快速失败 */
+function proxyAttemptBudget(timeoutMs) {
+  const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15000
+  if (proxyState.fails === 0 && !proxyState.cooldownUntil) return ms
+  return Math.max(1500, Math.min(4000, Math.floor(ms / 3)))
+}
+
+/** 是否允许本次发起代理请求（半开态只放一个请求进去） */
+function proxyAcquire() {
+  const s = proxyStateLabel()
+  if (s === 'cooldown' || s === 'off' || s === 'unset' || s === 'invalid') return false
+  if (s === 'half-open') {
+    if (halfOpenInFlight) return false
+    halfOpenInFlight = true
+  }
+  return true
+}
+
+/**
+ * 统一的代理请求入口：所有链路都经过它，才能共享熔断状态与失败计数。
+ * @returns {null|{res:Object, degraded:boolean}} null=没走代理（被熔断/跳过或连接失败），调用方应回退直连
+ */
+async function managedProxyFetch(url, opt, timeoutMs) {
+  if (NETCFG.proxyPolicy === 'off' || !proxyConfigured() || !proxyAcquire()) return null
+  try {
+    const res = await proxyFetchRaw(url, opt, proxyAttemptBudget(timeoutMs), NETCFG.crawlProxy)
+    markProxyOk()
+    // 代理本身通了但回 5xx：算「通道可用但这次没取到」，交给调用方回退
+    return { res, degraded: res.status >= 500 }
+  } catch (e) {
+    markProxyFail(e)
+    return null
+  } finally {
+    halfOpenInFlight = false
+  }
+}
+
+function getProxyHealth() {
+  const now = Date.now()
+  return {
+    policy: NETCFG.proxyPolicy,
+    proxy: NETCFG.crawlProxy,
+    configured: proxyConfigured(),
+    state: proxyStateLabel(),
+    fails: proxyState.fails,
+    failThreshold: PROXY_FAIL_THRESHOLD,
+    cooldownRemainingMs: Math.max(0, proxyState.cooldownUntil - now),
+    lastError: proxyState.lastError,
+    lastOkAt: proxyState.lastOkAt,
+    lastFailAt: proxyState.lastFailAt,
+    totalFails: proxyState.totalFails,
+    totalOk: proxyState.totalOk
+  }
+}
+
+function resetProxyHealth(quiet) {
+  const had = proxyState.fails || proxyState.cooldownUntil
+  proxyState.fails = 0
+  proxyState.cooldownUntil = 0
+  proxyState.cooldownMs = PROXY_COOLDOWN_MIN_MS
+  proxyState.lastError = ''
+  halfOpenInFlight = false
+  if (had && !quiet) proxyLog('健康状态已手动重置', NETCFG.crawlProxy)
 }
 
 /* ================= 加速镜像自动发现（v1.9.19） =================
@@ -247,18 +373,19 @@ function isLanHost(url) {
 }
 
 /**
- * 通用取数（v1.9.19，给采集站这类「非 GitHub raw」的第三方接口用）：
- * 配了爬取代理且目标在外网 → 先走代理，代理也失败再直连；内网地址一律直连。
- * 为什么需要它：像 lxhub.lllh.de 这种 Cloudflare 站点，容器里 Node 直连会 ETIMEDOUT，
- * 而 curl 走代理能通 —— 爬虫的 crawlFetch 只处理 raw 链接，第三方接口得自己挑通道。
+ * 通用取数（第三方接口/站外源）：代理策略与健康熔断都由 managedProxyFetch 统一裁决。
+ *  - off 策略 → 任何情况都不走代理；auto/force → 外网目标先试代理，失败（或被熔断跳过）才回退直连；
+ *  - 内网地址一律直连；代理返回 5xx 也回退直连；
+ *  - 连续失败达阈值后进入冷却，期间 0 次代理连接，不再逐请求白撞失效代理。
+ * 为什么需要它：像 lxhub.lllh.de 这类 Cloudflare 站点，容器里 Node 直连会 ETIMEDOUT，
+ * 而走代理能通 —— 爬虫的 crawlFetch 只处理 raw 链接，第三方接口得自己挑通道。
  */
 async function fetchAuto(url, options, timeoutMs) {
   const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : 15000
   const opt = Object.assign({ headers: { 'User-Agent': UA } }, options || {})
-  if (NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy) && !isLanHost(url)) {
-    try {
-      return await proxyFetchRaw(url, opt, ms, NETCFG.crawlProxy)
-    } catch (e) { /* 代理不通就退回直连，不把整站判死 */ }
+  if (!isLanHost(url)) {
+    const got = await managedProxyFetch(url, opt, ms)
+    if (got && !got.degraded) return got.res
   }
   return await fetchWithTimeout(url, opt, ms)
 }
@@ -490,7 +617,8 @@ function jsdelivrAllowed() { return NETCFG.useJsdelivr !== false }
 
 /**
  * 生成候选 URL 列表：
- *  - 开了强制代理且配了爬取代理 → 「经代理直连目标」排最前（省去逐个镜像试错）；
+ *  - 仅 force 策略且配了有效代理 → 「经代理直连目标」排最前（省去逐个镜像试错）；
+ *  - 代理处于熔断冷却时连候选都不生成，省一次空转；
  *  - 用户指定镜像（含自定义）其次；然后直连，最后其余镜像兜底。
  *  - useJsdelivr=false 时 jsDelivr 不参与（FastGit 仅 raw 路径，保留）。
  */
@@ -500,7 +628,7 @@ function buildCandidates(rawUrl, mirrorId) {
   // 按「通道 + URL」去重，而不是只按 URL：经代理直连与直连的 URL 相同但通道不同，
   // 只按 URL 去重会把其中一条吃掉（测试模式下就只报一条，看不出第二条通不通）
   const push = (id, url) => { if (url && out.every(o => !(o.id === id && o.url === url))) out.push({ id, url }) }
-  if (NETCFG.forceProxy && NETCFG.crawlProxy && parseProxyUrl(NETCFG.crawlProxy)) push('proxy', rawUrl)
+  if (NETCFG.proxyPolicy === 'force' && proxyConfigured() && proxyStateLabel() !== 'cooldown') push('proxy', rawUrl)
   const p = parseRaw(rawUrl)
   // 可选镜像 = 内置清单 + 自定义 + 自动发现的镜像池（v1.9.20：池内镜像也能在下拉里直接固定选用）
   const pickPreset = (id) => {
@@ -553,9 +681,19 @@ async function crawlFetch(rawUrl, options, timeoutMs, mirrorId, preferredId) {
   for (const c of cands) {
     const t0 = Date.now()
     try {
-      const res = c.id === 'proxy' && NETCFG.crawlProxy
-        ? await proxyFetchRaw(c.url, Object.assign({ headers: { 'User-Agent': UA } }, options || {}), timeoutMs, NETCFG.crawlProxy)
-        : await fetchWithTimeout(c.url, Object.assign({ headers: { 'User-Agent': UA } }, options || {}), timeoutMs)
+      const opt2 = Object.assign({ headers: { 'User-Agent': UA } }, options || {})
+      let res
+      if (c.id === 'proxy') {
+        // 统一走健康状态机：被熔断跳过 / 连接失败 / 代理回 5xx 都直接试下一条通道
+        const got = await managedProxyFetch(c.url, opt2, timeoutMs)
+        if (!got || got.degraded) {
+          attempts.push({ mirror: c.id, url: c.url, error: got ? '代理返回 HTTP ' + got.res.status : '代理不可用（熔断或连接失败，已跳过）', ms: Date.now() - t0 })
+          continue
+        }
+        res = got.res
+      } else {
+        res = await fetchWithTimeout(c.url, opt2, timeoutMs)
+      }
       attempts.push({ mirror: c.id, url: c.url, status: res.status, ms: Date.now() - t0 })
       if (res.ok) return { res, url: c.url, mirror: c.id, attempts }
       if (res.status === 404) { // 404 说明镜像工作正常但文件不在，继续试下一个没意义
@@ -568,7 +706,8 @@ async function crawlFetch(rawUrl, options, timeoutMs, mirrorId, preferredId) {
   return { res: null, url: rawUrl, mirror: null, attempts }
 }
 
-/** 网络连通性测试（设置页「测试」按钮）：对探针 URL 跑一遍候选链，报告每条通道的耗时/结果 */
+/** 网络连通性测试（设置页「测试」按钮）：对探针 URL 跑一遍候选链，报告每条通道的耗时/结果。
+ *  用表单快照跑，但**不改动生产熔断状态**（测试里的代理尝试不记账、不重置）。 */
 async function testNetwork(opts) {
   const o = opts || {}
   // 探针必须用公开仓库文件：私有仓库的 raw 未授权返回 404，会被误判成「通道失败」
@@ -576,7 +715,16 @@ async function testNetwork(opts) {
   // 测试时用传入的配置快照，而不是全局 NETCFG（便于「保存前」先试）
   const saved = Object.assign({}, NETCFG)
   try {
-    applyConfig({ crawlProxy: o.crawlProxy != null ? o.crawlProxy : saved.crawlProxy, forceProxy: o.forceProxy != null ? o.forceProxy : saved.forceProxy, useJsdelivr: o.useJsdelivr != null ? o.useJsdelivr : saved.useJsdelivr, mirrorCustom: o.mirrorCustom != null ? o.mirrorCustom : saved.mirrorCustom })
+    // 新前端传 proxyPolicy；旧调用方只传 forceProxy 时按它推导，避免测试口径与表单不一致
+    const policy = o.proxyPolicy != null ? o.proxyPolicy
+      : (o.forceProxy != null ? (o.forceProxy ? 'force' : 'auto') : saved.proxyPolicy)
+    applyConfig({
+      crawlProxy: o.crawlProxy != null ? o.crawlProxy : saved.crawlProxy,
+      proxyPolicy: policy,
+      forceProxy: o.forceProxy != null ? o.forceProxy : saved.forceProxy,
+      useJsdelivr: o.useJsdelivr != null ? o.useJsdelivr : saved.useJsdelivr,
+      mirrorCustom: o.mirrorCustom != null ? o.mirrorCustom : saved.mirrorCustom
+    })
     // 测试与真实爬取不同：404 也继续测下一条通道，把每条通道的真实状态都报告出来
     const cands = buildCandidates(probe, o.mirror || 'auto')
     const attempts = []
@@ -593,7 +741,11 @@ async function testNetwork(opts) {
         attempts.push({ mirror: c.id, url: c.url, error: String(e && e.message || e), ms: Date.now() - t0 })
       }
     }
-    return { ok: !!hit, status: hit ? hit.status : (attempts.find(a => a.status != null) || {}).status || null, via: hit ? hit.mirror : null, attempts }
+    return {
+      ok: !!hit, status: hit ? hit.status : (attempts.find(a => a.status != null) || {}).status || null,
+      via: hit ? hit.mirror : null, attempts,
+      proxyPolicy: NETCFG.proxyPolicy, proxyHealth: getProxyHealth()
+    }
   } finally {
     Object.assign(NETCFG, saved)
   }
@@ -617,7 +769,8 @@ async function testMirrorSpeeds(opts) {
   try {
     applyConfig({
       crawlProxy: o.crawlProxy != null ? o.crawlProxy : saved.crawlProxy,
-      forceProxy: false,   // 测速只看镜像本身，不让代理插队，否则量到的是代理的速度
+      // 测速只看镜像本身：强制 auto 策略，不让代理插队，否则量到的是代理的速度
+      proxyPolicy: 'auto', forceProxy: false,
       useJsdelivr: o.useJsdelivr != null ? o.useJsdelivr : saved.useJsdelivr,
       mirrorCustom: o.mirrorCustom != null ? o.mirrorCustom : saved.mirrorCustom
     })
@@ -666,6 +819,8 @@ async function testProxy(opts) {
     out.status = res.status
     out.ok = !!res.ok
     if (!res.ok) out.error = 'HTTP ' + res.status
+    // 用户显式测通「当前正在用的代理」= 手动恢复信号，清掉熔断重新计数
+    if (out.ok && proxy === NETCFG.crawlProxy) { resetProxyHealth(); out.healthReset = true }
   } catch (e) {
     out.ms = Date.now() - t0
     out.error = String((e && e.message) || e).slice(0, 120)
@@ -687,5 +842,7 @@ module.exports = {
   fetchWithTimeout, fetchAnyWithTimeout, readText, buildCandidates, crawlFetch, sleep, UA, MIRROR_PRESETS,
   hostFetch, describeNetError, isConnLevel, buildDualChannel, dohLookup, isGhAssetUrl,
   applyConfig, testNetwork, testMirrorSpeeds, proxyFetchRaw, customPreset,
-  discoverMirrors, poolPresets, hostToId, SEED_MIRROR_HOSTS, fetchAuto, isLanHost, testProxy
+  discoverMirrors, poolPresets, hostToId, SEED_MIRROR_HOSTS, fetchAuto, isLanHost, testProxy,
+  getProxyHealth, resetProxyHealth, proxyStateLabel, PROXY_POLICIES, managedProxyFetch,
+  proxyAttemptBudget, proxyConfigured
 }
