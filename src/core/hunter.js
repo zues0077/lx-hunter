@@ -1,7 +1,7 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
 const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource, resolveRepoRename } = require('./crawler')
-const { crawlWebSite, isWebRepo } = require('./websource')
+const { crawlWebSite, isWebRepo, probeExternalSource, normalizeExternalUrl } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
 const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict } = require('./checker')
@@ -23,10 +23,21 @@ function normName(s) {
 function buildRepoSeeds(cfg) {
   const c = cfg || {}
   const rl = Array.isArray(c.repos) ? c.repos : null
-  if (rl) return rl.filter(r => r && r.enabled !== false).map(r => normalizeRepo(r.repo)).filter(Boolean)
-  const out = DEFAULT_REPOS.slice()
-  for (const r of (c.customRepos || [])) {
-    const n = normalizeRepo(r)
+  let out
+  if (rl) out = rl.filter(r => r && r.enabled !== false).map(r => normalizeRepo(r.repo)).filter(Boolean)
+  else {
+    out = DEFAULT_REPOS.slice()
+    for (const r of (c.customRepos || [])) {
+      const n = normalizeRepo(r)
+      if (n && out.indexOf(n) === -1) out.push(n)
+    }
+  }
+  // v1.11.0 站外分发源：与仓库清单并列的一类采集源（Pages / 自建域名 / 对象存储直链）。
+  // URL 原样保留，由 isWebRepo 分流到 crawlWebSite；不放进 repos 是为了躲开
+  // 「清理非音源仓库」的 GitHub 验真（URL 拼进 api.github.com/repos/… 必然 404 → 误删）。
+  for (const s of (Array.isArray(c.externalSources) ? c.externalSources : [])) {
+    if (!s || s.enabled === false || !s.url) continue
+    const n = normalizeExternalUrl(s.url) || normalizeRepo(s.url)
     if (n && out.indexOf(n) === -1) out.push(n)
   }
   return out
@@ -517,19 +528,43 @@ class Hunter {
         const names = (crawlStats.staleRepos || []).slice(0, 5).join('、')
         this.log(`主动采集：${names}${(crawlStats.staleRepos || []).length > 5 ? ' 等' : ''} 在 ${sinceDays} 天内无提交且无新发布，按设置整仓跳过；如需强制采集，把设置页「只爬近期更新的仓库」改为 0`, '爬取', 'warn')
       }
-      // 网页音源站采集（v1.10.0）：与 GitHub 爬取并列的一类仓库来源
+      // 网页音源站 / 站外分发源采集（v1.10.0 → v1.11.0）：与 GitHub 爬取并列的一类来源
       if (webRepos.length) {
+        let stateDirty = false
+        if (!cfg.externalStates || typeof cfg.externalStates !== 'object') cfg.externalStates = {}
         for (let wi = 0; wi < webRepos.length; wi++) {
           if (this.cancelRequested) break
           const site = webRepos[wi]
-          this.step(`采集网页音源站 ${wi + 1}/${webRepos.length} ${site}`)
+          this.step(`采集站外源 ${wi + 1}/${webRepos.length} ${site}`)
           this.progress({ reposDone: ghRepos.length + wi + 1, repoTotal: repos.length })
           try {
-            await crawlWebSite(site, { timeoutMs: cfg.timeoutMs, latestOnly }, onCrawlEvent, () => this.cancelRequested)
+            // 时间窗：把上次响应体指纹带进去，内容未变即「sinceDays 天内无新音源」整源跳过。
+            // externalStates 按 URL 独立存，覆盖从旧「网页音源站」入口加进 repos 的 URL。
+            const st = await crawlWebSite(site, {
+              timeoutMs: cfg.timeoutMs, latestOnly, sinceDays,
+              knownExternal: cfg.externalStates[site] || null
+            }, onCrawlEvent, () => this.cancelRequested)
+            if (st && st.hash) {
+              cfg.externalStates[site] = { hash: st.hash, at: Date.now() }
+              stateDirty = true
+            }
+            const rec = (Array.isArray(cfg.externalSources) ? cfg.externalSources : [])
+              .find(x => x && (normalizeExternalUrl(x.url) || x.url) === site)
+            if (rec) {
+              rec.lastCrawl = {
+                at: Date.now(), ok: !!(st && st.ok), mode: (st && st.mode) || '',
+                hash: (st && st.hash) || '', added: (st && st.collected) || 0,
+                skippedOld: (st && st.droppedOld) || 0, reason: (st && st.reason) || '',
+                lastModified: (st && st.lastModified) || ''
+              }
+              if (st && st.ok && st.mode && st.mode !== 'unchanged') rec.kind = st.mode
+              stateDirty = true
+            }
           } catch (e) {
-            this.log(`网页音源站 ${site} 采集异常：` + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
+            this.log(`站外源 ${site} 采集异常：` + String((e && e.message) || e).slice(0, 100), '爬取', 'warn')
           }
         }
+        if (stateDirty) this.store.saveConfig()
       }
       // v1.10.3：失效仓库自动清理（仅非内置；只删确定性 404，不误删临时失败/限流）
       if (crawlStats && Array.isArray(crawlStats.deadRepos) && crawlStats.deadRepos.length && cfg.autoCleanDeadRepos !== false) {
@@ -922,12 +957,19 @@ class Hunter {
     // 内置仓库是人工维护的种子，不动；只查附加/发现/社区三类
     const cands = []
     const seen = new Set()
+    let skippedWeb = 0
     for (const x of rl) {
       if (!x || x.origin === 'builtin') continue
       const n = normalizeRepo(x.repo)
       if (!n || seen.has(n)) continue
+      // v1.11.0：URL 形态的网页音源站 / 站外源不走 GitHub 验真。
+      // verifyRepoHasSource 会把 URL 原样拼进 https://api.github.com/repos/<url> → 必然 404，
+      // 旧逻辑会据此把好好的站外源判成「非音源仓库」移出清单并拉黑（误删）。
+      // 站外源由 websource 自己验真，临时失败一律不删，这里直接跳过。
+      if (isWebRepo(n)) { skippedWeb++; continue }
       seen.add(n); cands.push(n)
     }
+    if (skippedWeb) this.log(`非音源仓库清理：跳过 ${skippedWeb} 个网页/站外 URL 源（不走 GitHub 验真，避免误删）`, '音源库')
     // ⓪ 先清黑名单仓库的残留脚本：上一次清理只删了 active 条目，版本废弃（deprecated）的旧副本
     //    会留下来（246 实测：首轮删 297 条、残留 398 条 deprecated）。再点一次即可清干净，幂等。
     const blkSet = new Set((Array.isArray(cfg.blockedRepos) ? cfg.blockedRepos : [])
@@ -1122,6 +1164,75 @@ class Hunter {
     this.store.saveConfig()
     this.log(`已解除拉黑仓库 ${name}：移出黑名单${reAdded ? '、已加回仓库清单' : ''}（后续可正常采集）`, '音源库', 'info')
     return { unblocked: name, wasBlocked, reAdded }
+  }
+
+  // ---------------- 站外分发源（v1.11.0）----------------
+  // Pages / 自建域名 / 对象存储直链。独立清单而非塞进 repos 的原因见 store.js 注释：
+  // repos 规范化只留 4 个字段，且清理非音源仓库会对每条做 GitHub 验真（URL 必然 404）。
+  // 这些是配置管理，不占任务位（与 blockRepo/unblockRepo 一致的轻量操作）。
+  _externalList() {
+    const cfg = this.store.config
+    if (!Array.isArray(cfg.externalSources)) cfg.externalSources = []
+    return cfg.externalSources
+  }
+
+  listExternalSources() { return this._externalList().slice() }
+
+  async probeExternal(url) {
+    const norm = normalizeExternalUrl(url)
+    if (!norm) return { ok: false, reason: '只支持 http(s) 开头的网址' }
+    const r = await probeExternalSource(norm, { timeoutMs: this.store.config.timeoutMs })
+    this.log(`站外源探测 ${norm}：${r.ok ? `可用（${r.kind}，验真通过 ${r.scripts.length} 个脚本）` : '失败：' + r.reason}`, '采集', r.ok ? 'info' : 'warn')
+    return r
+  }
+
+  addExternalSource(url, detect) {
+    const norm = normalizeExternalUrl(url)
+    if (!norm) throw new Error('站外源地址必须是 http(s) 网址')
+    if (detect && detect.ok === false) throw new Error('该地址不是可用音源：' + (detect.reason || '验真未通过'))
+    const list = this._externalList()
+    if (list.some(x => x && (normalizeExternalUrl(x.url) || x.url) === norm)) throw new Error('该站外源已在清单中')
+    const d = detect || {}
+    const rec = {
+      url: norm,
+      name: String(d.name || '').slice(0, 80) || (norm.split('/').pop() || '站外源'),
+      enabled: true,
+      origin: 'external',
+      kind: d.kind || 'index',
+      addedAt: Date.now(),
+      lastProbe: { at: Date.now(), ok: !!d.ok, kind: d.kind || '', reason: d.reason || '', scripts: (d.scripts || []).length },
+      lastCrawl: null
+    }
+    list.push(rec)
+    this.store.saveConfig()
+    this.log(`已添加站外分发源「${rec.name}」（${norm}，${rec.kind}）；后续全量/定时/行级采集会自动覆盖`, '采集')
+    return this.listExternalSources()
+  }
+
+  removeExternalSource(url) {
+    const norm = normalizeExternalUrl(url)
+    if (!norm) throw new Error('站外源地址必须是 http(s) 网址')
+    const cfg = this.store.config
+    const before = this._externalList().length
+    cfg.externalSources = this._externalList().filter(x => !x || (normalizeExternalUrl(x.url) || x.url) !== norm)
+    if (cfg.externalSources.length === before) throw new Error('该站外源不在清单中')
+    if (cfg.externalStates && typeof cfg.externalStates === 'object') delete cfg.externalStates[norm]
+    this.store.saveConfig()
+    // 与采集站一致：只移出清单，已采回的音源保留在库里（不会自动加回，但也不会误删数据）
+    this.log(`已移除站外分发源 ${norm}（已采回的音源保留在库中）`, '采集')
+    return this.listExternalSources()
+  }
+
+  updateExternalSource(url, patch) {
+    const norm = normalizeExternalUrl(url)
+    if (!norm) throw new Error('站外源地址必须是 http(s) 网址')
+    const rec = this._externalList().find(x => x && (normalizeExternalUrl(x.url) || x.url) === norm)
+    if (!rec) throw new Error('该站外源不在清单中')
+    const p = patch || {}
+    if (p.enabled !== undefined) rec.enabled = !!p.enabled
+    if (p.name !== undefined) rec.name = String(p.name || '').slice(0, 80) || rec.name
+    this.store.saveConfig()
+    return this.listExternalSources()
   }
 
   // ---------------- 检测 ----------------

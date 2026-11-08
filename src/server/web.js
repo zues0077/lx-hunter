@@ -236,8 +236,13 @@ route('POST', '/api/config', guard(async (req, res, ctx) => {
     }
     ctx.body.repos = out
   }
+  const prevProxy = store.config.crawlProxy
+  const prevPolicy = store.config.proxyPolicy
   store.saveConfig(ctx.body)
-  require('../core/net').applyConfig(store.config) // 网络设置改动即时生效
+  const netmod = require('../core/net')
+  // 换了代理地址或策略，旧的失败计数/冷却不该继承
+  if (store.config.crawlProxy !== prevProxy || store.config.proxyPolicy !== prevPolicy) netmod.resetProxyHealth()
+  netmod.applyConfig(store.config) // 网络设置改动即时生效
   return store.config
 }))
 
@@ -288,6 +293,15 @@ route('POST', '/api/net/mirror-pool', guard(async (req, res, ctx) => {
 route('POST', '/api/net/proxy-test', guard(async (req, res, ctx) => {
   const { testProxy } = require('../core/net')
   return await testProxy(ctx.body || {})
+}))
+
+// 代理健康状态（v1.11.0）：设置页显示熔断/退避；测试代理成功会自动恢复，
+// 这里也给一个手动重置入口（用户修好代理后想立刻恢复，不必等冷却）
+route('GET', '/api/net/proxy-health', guard(() => require('../core/net').getProxyHealth()))
+route('POST', '/api/net/proxy-health/reset', guard(() => {
+  const netmod = require('../core/net')
+  netmod.resetProxyHealth()
+  return netmod.getProxyHealth()
 }))
 
 // ---------------- 数据导入/导出（v1.9.20，仓库/采集站/镜像三类配置搬家）----------------
@@ -425,6 +439,25 @@ route('POST', '/api/hubs/remove', guard(async (req, res, ctx) => {
   store.saveConfig({ hubs: list })
   pushLog({ msg: '已移除音源采集站：' + String(b.id || ''), module: '采集', level: 'info', at: Date.now() })
   return { ok: true, hubs: list }
+}))
+
+// 站外分发源（v1.11.0）：Pages / 自建域名 / 对象存储直链。
+// 添加前先探测（直链脚本 / 压缩包 / 索引页三形态 + 与 GitHub 通道同口径的验真），
+// 验真不过不让加；采集仍走 /api/crawl（only:[url] 行级，或全量/定时自动带上）。
+route('GET', '/api/externals', guard(() => ({ sources: hunter.listExternalSources() })))
+route('POST', '/api/externals/probe', guard(async (req, res, ctx) => await hunter.probeExternal(String((ctx.body || {}).url || ''))))
+route('POST', '/api/externals', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  // 前端探测过就带上结果，避免同一个站重复下载一轮
+  const det = b.detect || await hunter.probeExternal(String(b.url || ''))
+  return { ok: true, sources: hunter.addExternalSource(String(b.url || ''), det) }
+}))
+route('POST', '/api/externals/update', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  return { ok: true, sources: hunter.updateExternalSource(String(b.url || ''), b.patch || {}) }
+}))
+route('POST', '/api/externals/remove', guard(async (req, res, ctx) => {
+  return { ok: true, sources: hunter.removeExternalSource(String((ctx.body || {}).url || '')) }
 }))
 
 // 立即采集一轮（不跑 GitHub 爬取）

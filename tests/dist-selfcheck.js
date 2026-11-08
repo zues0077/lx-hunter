@@ -489,7 +489,9 @@ ck('Web 角标不再写死版本号', !/textContent\s*=\s*['"]Web\/Docker 版 v\
 console.log('\n== v1.9.7 网络加速 ==')
 const netSrc2 = read('src/core/net.js')
 ck('net 层提供爬取代理（http CONNECT）', has(netSrc2, /CONNECT/) && has(netSrc2, /proxyFetchRaw/))
-ck('net 层支持强制代理（代理排候选最前）', has(netSrc2, /forceProxy/) && has(netSrc2, /push\('proxy', rawUrl\)/))
+ck('net 层支持三态代理策略（off/auto/force）', has(netSrc2, /proxyPolicy/) && has(netSrc2, /PROXY_POLICIES/) && has(netSrc2, /push\('proxy', rawUrl\)/))
+ck('net 层保留旧 forceProxy 兼容', has(netSrc2, /forceProxy/))
+ck('net 层提供健康熔断与状态查询', has(netSrc2, /getProxyHealth/) && has(netSrc2, /resetProxyHealth/) && has(netSrc2, /PROXY_FAIL_THRESHOLD/))
 ck('net 层支持 jsDelivr 开关', has(netSrc2, /useJsdelivr/))
 ck('net 层支持自定义镜像', has(netSrc2, /mirrorCustom/) && has(netSrc2, /customPreset/))
 // 只看 MIRROR_PRESETS 数组本体：注释里会点名这些失效域名，直接全文匹配会误伤自己
@@ -497,7 +499,11 @@ const presetBlock = (netSrc2.match(/const MIRROR_PRESETS = \[[\s\S]*?\n\]/) || [
 ck('内置镜像不含已失效域名（FastGit / vvv.ee / gh1.lh1.one / ghproxy.cn）',
   presetBlock.length > 0 && !/fastgit|ghproxy\.vvv\.ee|gh1\.lh1\.one|ghproxy\.cn/.test(presetBlock))
 ck('设置页提供爬取代理输入框', has(html, /id="cfgCrawlProxy"/))
-ck('设置页提供强制代理 / jsDelivr 开关', has(html, /id="cfgForceProxy"/) && has(html, /id="cfgUseJsdelivr"/))
+ck('设置页提供代理策略下拉 / jsDelivr 开关 / 健康状态与重置', has(html, /id="cfgProxyPolicy"/) && has(html, /id="cfgUseJsdelivr"/) && has(html, /id="proxyHealthTip"/) && has(html, /id="btnProxyHealthReset"/))
+ck('设置页代理文案写明适用范围与熔断规则', has(html, /第三方站点/) && has(html, /连续失败 3 次/))
+ck('Web 版暴露代理健康查询/重置', has(read('src/server/web.js'), /\/api\/net\/proxy-health/))
+ck('桌面版暴露 net:proxyHealth 通道', has(read('src/main/index.js'), /net:proxyHealth/) && has(read('src/main/preload.js'), /proxyHealth/))
+ck('Web bridge 透传代理健康', has(read('src/renderer/web-bridge.js'), /\/api\/net\/proxy-health/))
 ck('设置页提供自定义镜像与测试按钮', has(html, /id="cfgMirrorCustom"/) && has(html, /id="btnNetTest"/))
 ck('镜像下拉不再有 FastGit 选项', !/value="fastgit"/.test(html))
 ck('Web 版暴露 /api/net/test', has(read('src/server/web.js'), /\/api\/net\/test/))

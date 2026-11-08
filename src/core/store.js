@@ -23,11 +23,15 @@ const DEFAULT_CONFIG = {
   activePlatformId: null,
   ghToken: '',
   mirror: 'auto',
-  // ---------------- 网络加速（v1.9.7，借鉴 songloft 版设置页） ----------------
-  // crawlProxy：HTTP 代理（http://host:port），仅作用于 GitHub 爬取链（仓库扫描/脚本/压缩包下载），
-  // 不影响音源检测的播放请求与灌入；forceProxy：把代理排到候选链最前；
+  // ---------------- 网络加速 / 代理策略（v1.11.0 统一重整） ----------------
+  // crawlProxy：HTTP 代理（http://host:port）。作用于 GitHub 爬取链（raw / release / 仓库扫描）
+  // 与第三方站点取数（采集站 hubfeed、网页音源站、站外分发源 websource）；
+  // 不影响音源检测的播放请求与灌入。
+  // proxyPolicy：off=全局不用代理；auto=第三方站点代理优先、GitHub 走直连+镜像（默认）；
+  // force=在 auto 基础上把代理插到 GitHub 候选链最前。forceProxy 是旧字段，写入时与之同步。
   // useJsdelivr：jsDelivr 是否参与镜像候选链；mirrorCustom：镜像选「自定义…」时的前缀基址。
   crawlProxy: '',
+  proxyPolicy: 'auto',
   forceProxy: false,
   useJsdelivr: true,
   mirrorCustom: '',
@@ -66,6 +70,17 @@ const DEFAULT_CONFIG = {
   // 非音源仓库黑名单（v1.10.3）：被「清理非音源仓库脚本」判定删除的仓库（播放器/管理器/网关等）。
   // 记在这里后，搜索发现与社区精选都不会再把它们加回清单，避免「清了又回来」。
   blockedRepos: [],
+  // ---------------- 站外分发源（v1.11.0）----------------
+  // externalSources：用户显式添加的 Pages / 自建域名 / 对象存储直链源，与仓库清单并列的一类采集源。
+  // 每项 {url, name, enabled, origin:'external', kind, addedAt, lastProbe, lastCrawl}。
+  // 刻意不放进 repos：repos 规范化只保留 repo/enabled/builtin/origin 四个字段，
+  // 且「清理非音源仓库」会对 repos 里的每条做 GitHub 验真（URL 必然 404 → 误删好源）。
+  // buildRepoSeeds 会把 enabled 的站外源 URL 并进爬取种子，全链路（手动/定时/行级采集）自动复用。
+  externalSources: [],
+  // 站外源时间窗指纹：{ [url]: {hash, at} }。站外源没有 Git 提交/发布时间，
+  // 用「响应体指纹是否变化」等价判定「sinceDays 天内有没有新音源」（见 websource.js）。
+  // 独立于 externalSources，是为了让从旧「网页音源站」入口加进 repos 的 URL 也吃到同一时间窗。
+  externalStates: {},
   // ---------------- 社区精选订阅（v1.9.18，借鉴 lx-hub 的 community.json market） ----------------
   // communityEnabled：爬取时拉取 zlyon/lx-hunter-market 维护的社区精选清单
   // （人工提交、维护者审核，带 submitter/approvedAt），把其中 type=repo 的条目并入种子
@@ -151,7 +166,10 @@ class Store {
     this.configFile = path.join(dir, 'config.json')
     this.dbFile = path.join(dir, 'sources.json')
     this.importedFile = path.join(dir, 'imported.json')
-    this.config = Object.assign({}, DEFAULT_CONFIG, this._read(this.configFile))
+    const rawCfg = this._read(this.configFile)
+    this.config = Object.assign({}, DEFAULT_CONFIG, rawCfg)
+    // v1.11.0：旧配置只有 forceProxy，按它推导 proxyPolicy，保证升级后行为不变
+    if (rawCfg && rawCfg.proxyPolicy == null && rawCfg.forceProxy === true) this.config.proxyPolicy = 'force'
     this.db = this._read(this.dbFile) || { sources: {}, lastCrawl: 0, patrol: { lastRun: 0 } }
     if (!this.db.sources) this.db.sources = {}
     if (!this.db.patrol) this.db.patrol = { lastRun: 0 }
@@ -244,7 +262,12 @@ class Store {
   }
 
   saveConfig(patch) {
-    if (patch) this.config = Object.assign(this.config, patch)
+    if (patch) {
+      this.config = Object.assign(this.config, patch)
+      // v1.11.0：两个字段必须始终一致，避免只提交其中一个时行为漂移
+      if (patch.proxyPolicy != null) this.config.forceProxy = patch.proxyPolicy === 'force'
+      else if (typeof patch.forceProxy === 'boolean') this.config.proxyPolicy = patch.forceProxy ? 'force' : 'auto'
+    }
     return this._write(this.configFile, this.config)
   }
 

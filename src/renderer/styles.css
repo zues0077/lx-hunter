@@ -276,7 +276,15 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
 .origin-builtin { background: rgba(96,165,250,.18); color: #60a5fa; }
 .origin-custom { background: rgba(52,211,153,.18); color: var(--ok); }
 .origin-discovered { background: rgba(251,191,36,.16); color: var(--warn); }
+/* 站外分发源（v1.11.0）：与「网页」标记同族但独立配色，便于一眼区分来源 */
+.repo-origin.origin-external { background: rgba(167,139,250,.18); color: #a78bfa; }
+.ext-state { font-size: 11px; color: var(--muted); flex: 1; min-width: 0; }
+.ext-state.is-bad { color: var(--dead); }
 .repo-add { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 代理健康状态（v1.11.0）：熔断/退避用告警色，正常用成功色，未启用用弱色 */
+.proxy-health.is-ok { color: var(--ok); }
+.proxy-health.is-warn { color: var(--warn); }
+.proxy-health.is-off { color: var(--muted); }
 .repo-add .input { flex: 1; min-width: 220px; }
 
 .plats { display: flex; gap: 4px; flex-wrap: wrap; }
