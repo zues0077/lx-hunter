@@ -1708,6 +1708,15 @@ function statusCell(e) {
   if (e.deprecated && !e.deep) return `<span class="badge gray" title="${esc(mergeTip(e))}">重复·已合并</span>`
   // 内容有更新（定时爬取发现上游换了内容，检测结果已重置）—— 不能显示成普通「未检测」
   if (e.updated && !e.deep) return '<span class="badge warn" title="上游内容已变更（定时爬取发现），检测结果已重置：重新检测后生效；灌入时会自动替换服务端上的同名旧版">有更新·待检测</span>'
+  // v1.12.0 质量守门：疑似回归标记（软拦截——自动灌入跳过，手动不受限）。
+  // 回归条目通常仍可用，所以放在「可用」判定之前，两个徽章并列展示。
+  if (e.regression && e.regression.suspected) {
+    const tip = `版本回归对比：上一版通过 [${(e.regression.prevPassed || []).join('/') || '—'}]，` +
+      `本版通过 [${(e.regression.passed || []).join('/') || '—'}]（丢失 ${(e.regression.lost || []).join('/') || '—'}）。` +
+      `定时任务不会自动灌入这个版本；手动检测/灌入不受限，复测恢复后徽章自动消失。`
+    const base = e.usable ? '<span class="badge ok">可用</span> ' : ''
+    return base + `<span class="badge warn" title="${esc(tip)}">疑似回归</span>`
+  }
   if (e.usable) return '<span class="badge ok">可用</span>'
   if (e.status === 'quarantined') return `<span class="badge warn" title="${esc(obfTip(e))}">混淆隔离</span>`
   if (e.status === 'dead') return '<span class="badge fail">失效</span>'
@@ -2383,6 +2392,43 @@ $('btnFullPlat').addEventListener('click', async () => {
     loadSources()
   } else toast('检测失败: ' + r.error, 'err')
 })
+
+// 第三方探针对照（v1.12.0，报告层只读）：拉对方探针 JSON、按 sha256 对齐、渲染差异
+$('btnCrosscheck').addEventListener('click', async () => {
+  const btn = $('btnCrosscheck')
+  btn.disabled = true
+  $('crosscheckInfo').textContent = '正在拉取对方探针快照并对齐库内音源…'
+  try {
+    const r = await api.crosscheck()
+    if (!r.ok) { $('crosscheckInfo').textContent = '对照失败: ' + (r.error || '未知错误'); return }
+    renderCrosscheck(r.data || r)
+  } finally {
+    btn.disabled = false
+  }
+})
+
+function renderCrosscheck(rep) {
+  const s = rep.summary || {}
+  $('crosscheckInfo').textContent = `对方快照 ${rep.theirTestedAt ? new Date(rep.theirTestedAt).toLocaleString() : '时间未知'}：` +
+    `${rep.theirTotal} 条，对上 ${rep.matchedCount} 条，未对上 ${rep.unmatchedCount} 条；` +
+    `强漂移 ${s.deadDrift} / 平台漂移 ${s.platformDrift} / 一致 ${s.agree}` +
+    (rep.via ? `（经 ${rep.via} 通道）` : '')
+  const rows = (rep.matched || []).map(m => {
+    const drift = m.drift === 'dead' ? '<span class="badge fail" title="' + esc(m.driftNote || '') + '">强漂移</span>'
+      : m.drift === 'platform' ? '<span class="badge warn" title="' + esc(m.driftNote || '') + '">平台漂移</span>'
+      : '<span class="badge gray">一致</span>'
+    return '<tr><td>' + esc(m.theirName || m.ourName) + '</td>' +
+      '<td>' + (m.ourUsable ? '<span class="badge ok">可用</span> [' + esc((m.ourPassed || []).join('/')) + ']' : '<span class="badge gray">未通过</span>') + '</td>' +
+      '<td>[' + esc((m.theirPassed || []).join('/') || '—') + '] 失败[' + esc((m.theirFailed || []).join('/') || '—') + ']</td>' +
+      '<td>' + drift + '</td></tr>'
+  }).join('')
+  $('crosscheckResult').innerHTML = rows
+    ? '<div class="table-wrap"><table class="table"><thead><tr><th>音源</th><th>我们（库内）</th><th>对方探针</th><th>对照</th></tr></thead><tbody>' +
+      rows + '</tbody></table></div>'
+    : '<div class="empty">对方快照里没有能和库内对上指纹的音源</div>'
+  $('crosscheckResult').hidden = false
+  toast(`对照完成：对上 ${rep.matchedCount} 条（漂移 ${(s.deadDrift || 0) + (s.platformDrift || 0)}）`, 'ok')
+}
 
 async function startCheck(ids) {
   setBusy(true)

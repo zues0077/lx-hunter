@@ -4,7 +4,7 @@ const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoH
 const { crawlWebSite, isWebRepo, probeExternalSource, normalizeExternalUrl } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
-const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict } = require('./checker')
+const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict, passedPlatforms, regressionJudge } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
 const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
 const { Store } = require('./store')
@@ -656,6 +656,101 @@ class Hunter {
   }
 
   /**
+   * 质量守门（v1.12.0）：版本回归对比 + 软拦截。
+   *
+   * 背景：定时管线「增量爬取 → 检测 → 自动灌入」只看可用性，上游发布一个
+   * 「能加载但平台通过范围缩水」的回归版本也会被原样灌进服务端（此前唯一维度
+   * 是 contentHash 去重，内容变了就是「新版本」，没有质量维度）。
+   *
+   * 做法（借鉴 shellsec/lx-music-source 的 previousPassed/passed 回归对比，证据口径更保守）：
+   *  - 每次深检收尾，把「实测通过平台集合」连内容指纹存成 passSnapshot；
+   *  - 内容指纹变化（新版本）且上一版有通过记录时做回归对比：
+   *    丢失的平台只认「上一版通过 ∧ 新版实测失败」，untested/skipped 算未定证据；
+   *  - 判定「疑似回归」→ 写 e.regression（软标记，不改 usable），
+   *    自动灌入跳过该版本（runAutoPipeline 过滤），手动检测/灌入不受限；
+   *  - 复测恢复到不小于上一版范围 → 自动解除标记并更新快照。
+   *
+   * @param {object} e 音源条目（deep 已写入、applyProbeRecord 已跑过）
+   * @returns {boolean} 是否标记了疑似回归
+   */
+  applyQualityGate(e) {
+    if (!e || e.deprecated || e.fromServer) return false
+    const fresh = !!(e.deep && e.deep.hash && e.contentHash && e.deep.hash === e.contentHash)
+    const passed = fresh ? passedPlatforms(e.deep) : []
+    const failed = fresh
+      ? Object.keys(e.deep.platforms || {}).filter(s => e.deep.platforms[s] && e.deep.platforms[s].status === 'failed')
+      : []
+    const snap = e.passSnapshot
+    const name = e.lxName || e.scriptName || e.name || e.id
+    const now = Date.now()
+
+    // ① 结果不新鲜（下载失败/取消等）：不动快照，也不判定
+    if (!fresh) return false
+
+    // ② 新版本全平台未过而上一版有通过记录：可用性本来就会挡住灌入，
+    //    但这里补一个回归标记，让「这版比上版差」在界面上可见
+    if (!passed.length) {
+      if (snap && snap.sha && snap.sha !== e.contentHash && Array.isArray(snap.passed) && snap.passed.length) {
+        e.regression = { suspected: true, sha: e.contentHash, prevSha: snap.sha, prevPassed: snap.passed, passed: [], lost: snap.passed.slice(), gained: [], at: now }
+        this.log(`疑似回归：${name} 新版本五平台全未通过（上一版通过 ${snap.passed.join('/')}），已标记并停止自动灌入`, '质量', 'warn')
+        return true
+      }
+      return false
+    }
+
+    // ③ 内容变化 + 上一版有通过记录 → 回归对比
+    if (snap && snap.sha && snap.sha !== e.contentHash && Array.isArray(snap.passed) && snap.passed.length) {
+      const j = regressionJudge(snap.passed, passed, failed)
+      if (j.suspect) {
+        e.regression = { suspected: true, sha: e.contentHash, prevSha: snap.sha, prevPassed: snap.passed, passed, lost: j.lost, gained: j.gained, at: now }
+        this.log(`疑似回归：${name} 平台通过从 [${snap.passed.join('/')}] 缩小到 [${passed.join('/')}]（丢失 ${j.lost.join('/')}），先不自动灌入；手动检测/灌入不受限，复测恢复后自动解除`, '质量', 'warn')
+        return true
+      }
+      // 新版本通过范围没有缩小：解除旧标记、快照推进到新版本
+      // （推进仍守「只增不减」：新版只是没测全（快速模式）时别把基线记小）
+      if (e.regression) e.regression = null
+      if (passed.length >= snap.passed.length) e.passSnapshot = { sha: e.contentHash, passed, at: now }
+      return false
+    }
+
+    // ④ 同内容复测：若带着疑似回归且本轮实测恢复到不小于上一版范围 → 解除
+    if (e.regression && e.regression.suspected && e.regression.sha === e.contentHash) {
+      const j = regressionJudge(e.regression.prevPassed || [], passed, failed)
+      if (!j.suspect) {
+        e.regression = null
+        this.log(`回归解除：${name} 复测通过 [${passed.join('/')}]，不再小于上一版范围，恢复自动灌入资格`, '质量')
+      }
+    }
+
+    // ⑤ 快照只增不减（同内容复测时通过数变小多为快速模式/波动，别把基线越记越低）
+    if (!snap || !Array.isArray(snap.passed) || !snap.passed.length || passed.length >= snap.passed.length) {
+      e.passSnapshot = { sha: e.contentHash, passed, at: now }
+    }
+    return false
+  }
+
+  /** 自动灌入候选的质量闸：带疑似回归标记（且标记对应当前内容）的版本不进自动灌入 */
+  _autoImportBlocked(e) {
+    return !!(e && e.regression && e.regression.suspected && e.regression.sha === e.contentHash)
+  }
+
+  /**
+   * 第三方探针对照（v1.12.0，报告层只读）：拉 shellsec/lx-music-source 的
+   * latest-probe.json，按 sha256 对齐库内 contentHash，产出「我们 vs 对方」的差异报告。
+   * 纯报告，不改库内任何状态（红线：无 LICENSE 只取结论、证据弱不进决策链）。
+   */
+  async runCrosscheck(opts) {
+    const { runCrosscheck } = require('./crosscheck')
+    const cfg = this.store.config || {}
+    return runCrosscheck(this.store, {
+      timeoutMs: cfg.timeoutMs || 20000,
+      mirror: cfg.mirror,
+      mirrorPref: this.mirrorPref,
+      log: (m, lv) => this.log(m, '对照', lv)
+    })
+  }
+
+  /**
    * 定时任务全链路（v1.9.0）：增量爬取 → 检测新增/内容变化的音源 → 灌入可用音源。
    *
    * 为什么把三步串成一个方法，而不是在定时器里连着调三次：
@@ -714,13 +809,21 @@ class Hunter {
     // ③ 灌入 = 可用 ∧ 有脚本地址（或正文已随条目保存，如私人音源） ∧ 灌入目标账号里还有没灌过的。
     //    粗筛用本地账本挡掉「每个目标都灌过了」的，避免每轮定时任务都拿整库走一遍裁决；
     //    服务端上那条到底还在不在，交给 runImport 内部的服务端列表 + 账本对账去发现。
+    //    v1.12.0 质量守门：带「疑似回归」标记的版本不进自动灌入（软拦截——手动检测/灌入
+    //    不受限，复测恢复后 applyQualityGate 会自动解除标记）。
     const targets = getBatchImportAccounts(cfg)
     const tids = targets.map(a => a && a.id).filter(Boolean)
     const activeId = cfg.activePlatformId || null
-    const ids = this.store.getSources()
+    const all = this.store.getSources()
       .filter(e => !e.deprecated && e.usable && (e.url || typeof e.code === 'string'))
       .filter(e => !this._importedEverywhere(e.id, tids, activeId))
-      .map(e => e.id)
+    const gated = all.filter(e => this._autoImportBlocked(e))
+    if (gated.length) {
+      this.log(`质量守门：${gated.length} 条疑似回归版本本轮不自动灌入（` +
+        gated.slice(0, 5).map(e => e.lxName || e.scriptName || e.name || e.id).join('、') +
+        (gated.length > 5 ? ' 等' : '') + `）；音源库带「疑似回归」徽章，人工复测通过后自动解除`, '质量', 'warn')
+    }
+    const ids = all.filter(e => !this._autoImportBlocked(e)).map(e => e.id)
     if (!ids.length) {
       out.skipped = 'nothing-to-import'
       this.log('定时任务：新增音源里没有可灌入的（检测未通过，或灌入目标账号都已有），本轮结束', '定时')
@@ -1474,6 +1577,7 @@ class Hunter {
               if (rec) { rec.deep = e.deep || d; if (rec.resolve) { rec.resolve(rec.deep); rec.resolve = null } }
               e.usable = usableCount(e) > 0
               applyProbeRecord(e, e.deep)   // v1.9.9：把深检结论固化为可记录的探针/validTier
+              this.applyQualityGate(e)      // v1.12.0：版本回归对比（质量守门，软标记）
               // 混淆标注（v1.7.1）：checkBasic 已把 obfLevel/obfHits 写到条目上，
               // 重度/局部混淆都在状态徽章可见；这里只汇总日志。
               if (e.obfLevel) obfSeen[e.obfLevel] = (obfSeen[e.obfLevel] || 0) + 1
