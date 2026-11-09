@@ -770,9 +770,50 @@ function apiDownVerdict(e, cfg) {
   return { verdict: 'suspect', note: `接口域名连续 ${streak} 次不可达`, streak }
 }
 
+/**
+ * 收集一次深检结果里「实测通过」的平台清单（质量守门 v1.12.0 用）。
+ * 只认 status === 'usable'（与 usableCount 同口径）；'untested'/'skipped' 是「没测/未提供」，
+ * 不是「测了不过」，不进通过集合。调用方负责先确认 deep.hash === contentHash（结果属于当前内容）。
+ * @param {object} deep 深检结果 { platforms: { src: { status } } }
+ * @returns {string[]} 通过的平台名数组（保持 platforms 的键序）
+ */
+function passedPlatforms(deep) {
+  const p = (deep && deep.platforms) || {}
+  const out = []
+  for (const s of Object.keys(p)) if (p[s] && p[s].status === 'usable') out.push(s)
+  return out
+}
+
+/**
+ * 版本回归判定（质量守门 v1.12.0，纯函数便于测试）：
+ * 新版本实测通过范围是否比上一版「缩小」。
+ *
+ * 证据口径刻意保守（借鉴 shellsec/lx-music-source 的 previousPassed/passed 回归对比，
+ * 但比它稳）：只有「上一版通过、这一版**实测失败**」才算丢失平台——快速模式的
+ * 'untested'、未声明平台的 'skipped' 都算未定证据，不计入丢失，避免把
+ * 「没测到」误判成「测了不过」（风控波动 / 单样本抽测的证据强度撑不起更激进的口径）。
+ *
+ * suspect = 有实测失败导致的丢失 ∧ 通过总数变少。
+ * @param {string[]} prevPassed 上一版通过的平台
+ * @param {string[]} newPassed  新版通过的平台
+ * @param {string[]} newFailed  新版实测失败的平台（status === 'failed'）
+ * @returns {{suspect:boolean, lost:string[], gained:string[]}}
+ */
+function regressionJudge(prevPassed, newPassed, newFailed) {
+  const prev = Array.isArray(prevPassed) ? prevPassed : []
+  const next = Array.isArray(newPassed) ? newPassed : []
+  const failedSet = new Set(Array.isArray(newFailed) ? newFailed : [])
+  const nextSet = new Set(next)
+  const prevSet = new Set(prev)
+  const lost = prev.filter(s => failedSet.has(s))
+  const gained = next.filter(s => !prevSet.has(s))
+  return { suspect: lost.length > 0 && next.length < prev.length, lost, gained }
+}
+
 module.exports = {
   TEST_SONGS, PLATFORMS, PLATFORM_LABEL,
   sha256Str, extractMeta, classifyEntry, scoreEntry, isHostAdapterScript, obfuscationRisk, obfuscationTip, verifyUrl,
   checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge,
-  isTransient, isLocalNetworkIssue, deepFailKind, applyProbeRecord, extractApiHosts, probeApiHosts, apiDownVerdict
+  isTransient, isLocalNetworkIssue, deepFailKind, applyProbeRecord, extractApiHosts, probeApiHosts, apiDownVerdict,
+  passedPlatforms, regressionJudge
 }
