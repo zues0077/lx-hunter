@@ -191,18 +191,27 @@ const eNoVer = ent('no-ver', { deep: null, repo: 'zues0077/doujs', name: 'doujs'
 ck('版本号比不出高低 → 仍留实测可用旧版', !H.betterKeeper(eNoVer, eOldOkV))
 ck('低版本未检测挑战高版本实测可用 → 留旧版', !H.betterKeeper(ent('low-v', { deep: null, repo: 'zues0077/doujs', scriptVersion: '8.10.1-r1', name: 'doujs' }), eOldOkV))
 
-// dedupe 全链路：采集后裁决留新版废旧版（带翻案入口）；新版深检失效 → ②b 恢复旧版
+// dedupe 全链路（v1.12.2 先测后判）：同名不同内容双方都留，真实检测后按可用度择优
 const h3 = mkHunter()
 const oldOkV = ent('doujs-rel-8.10.3', { deep: deepOf(2), usable: true, repo: 'zues0077/doujs', scriptVersion: '8.10.3-r1', scriptName: 'doujs', name: 'doujs' })
 const newUnV = ent('doujs-rel-8.10.12', { deep: null, repo: 'zues0077/doujs', scriptVersion: '8.10.12-r1', scriptName: 'doujs', name: 'doujs' })
 h3.store.mergeSources([oldOkV, newUnV], { incremental: false })
 h3.dedupe()
 const o1 = h3.store.db.sources['doujs-rel-8.10.3'], n1 = h3.store.db.sources['doujs-rel-8.10.12']
-ck('采集后裁决：未检测的新版留作候选、旧版让位', !n1.deprecated && o1.deprecated === true)
-ck('被废旧版标「同名旧版本（已有更新版本）」（②b 翻案入口）', o1.dupReason === '同名旧版本（已有更新版本）' && o1.dupOf === 'doujs-rel-8.10.12')
-n1.deep = deepOf(0, 'dead')   // 新版深检全失效
+ck('先测后判：一方实测一方未测 → 双方都留作候选（不凭名字废弃）', !n1.deprecated && !o1.deprecated)
+n1.deep = deepOf(0, 'dead')
 h3.dedupe()
-ck('新版深检失效 → ②b 翻案恢复旧版可用', !o1.deprecated && o1.usable === true && n1.deprecated === true && n1.dupReason === '同名版本（此版本已失效）')
+ck('新版实测全失效 → 旧版留、新版标「此版本已失效」', !o1.deprecated && o1.usable === true && n1.deprecated === true && n1.dupReason === '同名版本（此版本已失效）')
+// 反向对决：新版实测平台更多 → 新版留、旧版让位（谁优质留谁）
+o1.deprecated = false; o1.dupOf = null; o1.dupReason = null
+n1.deprecated = false; n1.dupOf = null; n1.dupReason = null; n1.usable = true
+n1.deep = deepOf(4)
+h3.dedupe()
+ck('新版实测平台更多 → 新版留、旧版标「同名旧版本（已有更新版本）」', !n1.deprecated && n1.usable && o1.deprecated === true && o1.dupReason === '同名旧版本（已有更新版本）' && o1.dupOf === 'doujs-rel-8.10.12')
+// 撤销去重单条（v1.12.2）：勾选范围恢复，其余废弃项不动
+h3.restoreDedupe(['doujs-rel-8.10.3'])
+ck('单条撤销：只恢复勾选的废弃条目', !o1.deprecated && !o1.dupReason)
+ck('单条撤销不影响保留方', !n1.deprecated)
 
 // ---------- ⑤ 灌入同名裁决（检测失效不替换） ----------
 console.log('\n== 灌入同名裁决（_planImportQueue） ==')
@@ -370,7 +379,7 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
   ck('音源库徽章显示混淆隔离', appSrc.includes("status === 'quarantined'") && appSrc.includes('混淆隔离</span>'))
   ck('隔离条目不落入「未检测」筛选', appSrc.includes("e.status !== 'quarantined'"))
   ck('设置页文案改为隔离表述', htmlSrc.includes('自动隔离') && htmlSrc.includes('「混淆隔离」页'))
-  ck('缓存戳提升到 app.js v63（v1.12.1 去重修复 + 对照徽章；web-bridge v57 / styles v19 不变）', htmlSrc.includes('app.js?v=63') && htmlSrc.includes('web-bridge.js?v=57') && htmlSrc.includes('styles.css?v=19'))
+  ck('缓存戳提升到 app.js v64（v1.12.2 去重修复 + 对照徽章；web-bridge v57 / styles v19 不变）', htmlSrc.includes('app.js?v=64') && htmlSrc.includes('web-bridge.js?v=57') && htmlSrc.includes('styles.css?v=19'))
 
   // —— v1.10.8 改名检测（prune 301 识别）+ 仓库行快捷拉黑 ——
   {

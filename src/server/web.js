@@ -485,9 +485,10 @@ route('POST', '/api/job/cancel', guard(() => ({ cancelled: hunter.requestCancel(
 route('GET', '/api/job/state', guard(() => ({ running: hunter.job.running, type: hunter.job.type, progress: hunter.job.progress, step: hunter.job.step })))
 route('POST', '/api/patrol', guard(async () => await hunter.runPatrol()))
 route('POST', '/api/revoke', guard(async (req, res, ctx) => await hunter.runRevoke(ctx.body.ids)))
-route('POST', '/api/db/undedupe', guard(() => {
+route('POST', '/api/db/undedupe', guard((req, res, ctx) => {
   if (hunter.job.running) return { restored: 0, busy: true }
-  return Object.assign({ busy: false }, hunter.restoreDedupe())
+  const ids = (ctx.body || {}).ids
+  return Object.assign({ busy: false }, hunter.restoreDedupe(Array.isArray(ids) ? ids : null))
 }))
 route('POST', '/api/db/clear', guard(() => { store.clearSources(); return { ok: true } }))
 

@@ -481,9 +481,9 @@ ipcMain.handle('patrol:start', guard(async () => await hunter.runPatrol()))
 
 ipcMain.handle('revoke', guard(async (e, ids) => await hunter.runRevoke(ids)))
 
-ipcMain.handle('db:undedupe', guard(() => {
+ipcMain.handle('db:undedupe', guard((e, ids) => {
   if (hunter.job.running) return { restored: 0, busy: true }
-  const r = hunter.restoreDedupe()
+  const r = hunter.restoreDedupe(Array.isArray(ids) ? ids : null)
   return Object.assign({ busy: false }, r)
 }))
 

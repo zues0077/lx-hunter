@@ -1749,9 +1749,10 @@ function statusCell(e) {
   if (e.checking) return '<span class="badge accent">检测中…</span>'
   const im = importedBadge(e)
   if (im) return im
-  // 去重废弃的重复条目压根没进过检测 —— 显示成「未检测」会让人以为检测坏了。
+  // 去重废弃的条目一律显示「重复·已合并」——不管它有没有历史检测结果。
+  // 旧逻辑只在无深检结果时显示，带历史结果的会落进「疑似」分支，让人误判成检测失败。
   // 它的真实状态是「已合并到保留项」，必须这么说。
-  if (e.deprecated && !e.deep) return `<span class="badge gray" title="${esc(mergeTip(e))}">重复·已合并</span>`
+  if (e.deprecated) return `<span class="badge gray" title="${esc(mergeTip(e))}">重复·已合并</span>`
   // 内容有更新（定时爬取发现上游换了内容，检测结果已重置）—— 不能显示成普通「未检测」
   if (e.updated && !e.deep) return '<span class="badge warn" title="上游内容已变更（定时爬取发现），检测结果已重置：重新检测后生效；灌入时会自动替换服务端上的同名旧版">有更新·待检测</span>'
   // v1.12.0 质量守门：疑似回归标记（软拦截——自动灌入跳过，手动不受限）。
@@ -2407,16 +2408,22 @@ $('btnHashDedupe').addEventListener('click', async () => {
   } else toast('去重失败: ' + r.error, 'err')
 })
 
-// 撤销去重：把被判重复的条目全部恢复为候选
+// 撤销去重（v1.12.2）：有勾选 → 只恢复勾选的废弃条目；没勾选 → 恢复全部
 $('btnUndedupe').addEventListener('click', async () => {
   if (state.busy) return toast('已有任务在运行', 'warn')
-  if (!confirm('撤销去重会把所有被判为重复的条目恢复为候选（检测结果和已灌入记录都会保留）。\n\n适用于误杀复查或想换一种去重方式。确定继续？')) return
-  const r = await api.dbUndedupe()
+  const selDep = state.sources.filter(e => e.deprecated && state.selected.has(e.id))
+  const scoped = selDep.length > 0
+  const ids = scoped ? selDep.map(e => e.id) : null
+  const scopeTxt = scoped
+    ? `撤销勾选的 ${selDep.length} 条废弃条目（其余废弃项不受影响）`
+    : '把所有被判为重复的条目恢复为候选'
+  if (!confirm(scopeTxt + '。\n\n检测结果和已灌入记录都会保留；恢复后如与同名条目冲突，下次去重按「先测后判」重新裁决。确定继续？')) return
+  const r = await api.dbUndedupe(ids)
   if (r.restored > 0) {
     toast(`已恢复 ${r.restored} 条候选（库内共 ${r.total} 条）`, 'ok')
     loadSources()
   } else if (r.busy) toast('已有任务在运行', 'warn')
-  else toast('当前没有已废弃的重复项', 'info')
+  else toast(scoped ? '勾选的条目里没有已废弃的重复项' : '当前没有已废弃的重复项', 'info')
 })
 
 // 补全平台覆盖：只对「已可用」的条目跑全平台完整检测（关闭快速模式，逐个平台真取链）

@@ -91,7 +91,7 @@
           <button class="btn ghost" id="btnSelectAll" title="把当前筛选结果的所有条目加入选择">选全部筛选结果</button>
           <button class="btn ghost" id="btnSelUnimported" title="排除已灌入/已合并项，只勾选当前筛选下「未灌入」的音源（与状态排序「已灌入垫底」配套：排除已灌入部分，只灌未灌入部分）">只选未灌入</button>
           <button class="btn ghost" id="btnHashDedupe" title="只下载并计算内容指纹（不进沙箱），先按内容去重，检测时直接跳过重复项">快速去重（内容指纹）</button>
-          <button class="btn ghost" id="btnUndedupe" title="把被判为重复的条目全部恢复为候选（保留检测结果，可重新去重）">撤销去重</button>
+          <button class="btn ghost" id="btnUndedupe" title="有勾选 → 只撤销勾选的废弃条目；没勾选 → 恢复全部废弃条目为候选（保留检测结果，可重新去重）">撤销去重</button>
           <button class="btn ghost" id="btnFullPlat" title="对已可用的音源跑「全平台完整检测」：逐个平台真实取链，补齐快速模式下没测的平台">补全平台覆盖</button>
           <button class="btn danger-ghost" id="btnDeleteSel" title="把勾选的音源从本地音源库删除（不影响服务端已灌入的脚本）；删掉的条目会记入「不再自动采集」名单，可在设置页清除记录后重新爬取">删除选中</button>
           <button class="btn ghost" id="btnClearSel">清空选择</button>
@@ -698,6 +698,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=57"></script>
-<script src="app.js?v=63"></script>
+<script src="app.js?v=64"></script>
 </body>
 </html>

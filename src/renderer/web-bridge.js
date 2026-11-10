@@ -214,7 +214,7 @@
     dbDelete: ids => call('/api/db/delete', { ids }),
     dbDeletedList: () => call('/api/db/deleted/list', {}),
     dbDeletedClear: () => call('/api/db/deleted/clear', {}),
-    dbUndedupe: () => call('/api/db/undedupe', {}),
+    dbUndedupe: (ids) => call('/api/db/undedupe', { ids: Array.isArray(ids) ? ids : null }),
     dbExport,
     dbImport,
     sourceImportSingle,

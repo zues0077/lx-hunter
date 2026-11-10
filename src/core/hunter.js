@@ -913,20 +913,35 @@ class Hunter {
       dep(drop, keep, 'dupContent'); res.dupContent++
       byHash[k] = keep
     }
-    // ② 同名旧版本（以 @name 为准，内容不同视为版本迭代）
-    //    同样的弱文件名守卫：「6」「index」这类名字不构成音源身份，不能拿来判版本
-    //    门槛放宽到「有内容哈希」（不限 status=ok，v1.7.0）：增量爬取刚更新的条目
-    //    检测结果已重置（status=unknown），但内容确实是新版本，要能立刻参与同名裁决，
-    //    否则「内容更新」永远排在旧版后面，用户要求的更新添加不生效。
+    // ② 同名裁决（v1.12.2「先测后判」，用户 2026-11-10 定稿）：同名不同内容是「质量对决」，
+    //    只要有一方还没深检（且已检方不是确认失效），就不按名字/占位规则废弃任何一方，
+    //    双方都留作候选，交给真实检测的可用度裁决（runCheck 收尾 dedupe 按实测平台数择优，
+    //    平手才比版本号新旧）。此前 v1.7.0 的占位规则会凭「实测可用 > 未检测」把新版
+    //    直接废掉（doujs 8.10.12-r1 误废实测），先测后判彻底消除这类误杀。
+    //    弱文件名守卫不变：「6」「index」这类名字不构成音源身份，不能拿来判版本。
     const byName = {}
+    let pendingDuel = 0
+    const checkedDeep = x => (x.deep && x.deep.checkedAt ? x.deep : null)
     for (const e of all) {
       if (e.deprecated || e.fromServer || e.private || !e.contentHash) continue
       const nm = normName(e.lxName || e.scriptName || e.name)
       if (!nm) continue
       if (isWeakBaseName(nm)) { weakSkipped++; continue }
       if (!byName[nm]) { byName[nm] = e; continue }
-      const keep = this.betterKeeper(e, byName[nm]) ? e : byName[nm]
-      const drop = keep === e ? byName[nm] : e
+      const cur = byName[nm]
+      const dc = checkedDeep(cur), dn = checkedDeep(e)
+      if (!dc || !dn) {
+        if (dc && usableCount({ deep: dc }) === 0) {
+          // 已检方深检 0 平台（确认失效）→ 让位给未检测方，这条例外维持不变
+          dep(cur, e, 'oldVersion'); res.oldVersion++
+          byName[nm] = e
+        } else {
+          pendingDuel++   // 先测后判：双方都留，等检测裁决
+        }
+        continue
+      }
+      const keep = this.betterKeeper(e, cur) ? e : cur
+      const drop = keep === e ? cur : e
       // v1.12.1：保留方是真版本迭代（有更新标记 / 同仓库更高版本）→ 标「已有更新版本」，
       // 这样被废的旧版在保留方深检全失效时能被 ②b 翻案恢复
       dep(drop, keep, this._isNewerIteration(keep, drop) ? 'oldVersionUpdated' : 'oldVersion'); res.oldVersion++
@@ -969,20 +984,29 @@ class Hunter {
       byFile[k] = keep
     }
     res.weakSkipped = weakSkipped
-    if (res.dupContent || res.oldVersion || res.dupFile) {
+    res.pendingDuel = pendingDuel
+    if (res.dupContent || res.oldVersion || res.dupFile || pendingDuel) {
       this.store.saveDb()
       this.log(`去重完成：废弃同内容 ${res.dupContent} 条、同名旧版本 ${res.oldVersion} 条、同仓库同名 ${res.dupFile} 条` +
+        (pendingDuel ? `（同名待测对决 ${pendingDuel} 对留待真实检测裁决）` : '') +
         (weakSkipped ? `（弱文件名 ${weakSkipped} 条不按名判重，留待指纹确认）` : ''), '去重')
     }
     return res
   }
 
-  /** 撤销去重：把所有被判为重复的条目恢复为候选（不删检测结果，不删已灌入记录） */
-  restoreDedupe() {
+  /**
+   * 撤销去重（v1.12.2 支持单条）：把被判为重复的条目恢复为候选（不删检测结果，不删已灌入记录）。
+   * - 传 ids → 只恢复指定的废弃条目（勾选单条撤销的场景）；
+   * - 不传 → 恢复全部（旧行为，误杀复查）。
+   * 恢复后如与同名条目再次冲突，下次 dedupe 按「先测后判」重新裁决。
+   */
+  restoreDedupe(ids) {
     const all = this.store.getSources()
+    const want = (Array.isArray(ids) && ids.length) ? new Set(ids.map(String)) : null
     let n = 0
     for (const e of all) {
       if (!e.deprecated) continue
+      if (want && !want.has(String(e.id))) continue
       e.deprecated = false
       e.dupOf = null
       e.dupReason = null
@@ -990,7 +1014,7 @@ class Hunter {
     }
     if (n) {
       this.store.saveDb()
-      this.log(`已撤销去重：恢复 ${n} 条候选（检测结果与已灌入记录均保留，可重新去重或重新检测）`, '去重', 'info')
+      this.log(`已撤销去重：恢复 ${n} 条候选${want ? `（勾选范围 ${want.size} 条）` : '（全部废弃条目）'}（检测结果与已灌入记录均保留，可重新去重或重新检测）`, '去重', 'info')
     }
     return { restored: n, total: all.length }
   }
