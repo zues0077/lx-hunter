@@ -3531,6 +3531,7 @@ async function boot() {
   const btn = document.getElementById('btnScanUpdates')
   const refresh = document.getElementById('btnUpdRefresh')
   const hubs = document.getElementById('updIncludeHubs')
+  const acct = document.getElementById('updAccountSel')
   const box = document.getElementById('updResult')
   const sum = document.getElementById('updSummary')
   const notes = document.getElementById('updNotes')
@@ -3540,14 +3541,29 @@ async function boot() {
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
   }
+  // 账号必须显式选：246 上「当前账号」是用户明确不动的 120/8027，
+  // 默认沿用会把只读扫描打到不该碰的服务端。
+  async function loadAccounts() {
+    if (!acct) return
+    try {
+      const r = await fetch('/api/config')
+      const j = await r.json()
+      const cfg = (j && j.data && j.data.config) || {}
+      const list = (cfg.platforms || []).filter(p => p && p.enabled !== false)
+      acct.innerHTML = '<option value="">— 请选择服务平台账号 —</option>' + list.map(p =>
+        '<option value="' + esc(p.id) + '">' + esc(p.name || p.type) + ' · ' + esc(p.url) + '</option>'
+      ).join('')
+    } catch (e) { /* 配置读不到时保留空选项，扫描时会提示 */ }
+  }
   async function scan() {
     card.hidden = false
+    if (acct && !acct.value) { box.textContent = '请先在「目标账号」里选择要扫描的服务平台账号（不默认沿用当前账号）'; return }
     box.textContent = '扫描中（只读，未写入任何数据）…'
     btn.disabled = true
     try {
       const r = await fetch('/api/source-update/scan', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ includeHubs: !!(hubs && hubs.checked) })
+        body: JSON.stringify({ platformId: acct ? acct.value : undefined, includeHubs: !!(hubs && hubs.checked) })
       })
       const j = await r.json()
       if (!j.ok) { box.textContent = '扫描失败：' + (j.error || '未知错误'); return }
@@ -3575,4 +3591,5 @@ async function boot() {
   }
   btn.addEventListener('click', scan)
   if (refresh) refresh.addEventListener('click', scan)
+  loadAccounts()
 })()

@@ -17,7 +17,7 @@ const fs = require('fs')
 const path = require('path')
 const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours, patrolSchedule } = require('../core/hunter')
-const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
+const { getActiveService, getService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
 const { createUpdater } = require('../core/sourceUpdate')
 const { DEFAULT_REPOS } = require('../core/crawler')
 const { Auth, SESSION_TTL_MS } = require('../core/auth')
@@ -716,8 +716,17 @@ route('POST', '/api/source/import-single', guard(async (req, res, ctx) => {
 // ---------------- 已添加源更新（T1 转 lx-hunter，dry-run 优先） ----------------
 // 起点是「服务端已装着的音源」，不是本地库。scan 只读；apply 必须显式 apply+confirm，
 // 且只处理最近一次 dry-run 判为 updatable 的条目（准入在 core/sourceUpdate.js）。
-function getUpdater() {
-  const svc = getActiveService(store.config)
+// platformId 可显式指定账号：默认账号未必是本次要扫的服务端
+// （实测 246 当前选中账号是用户明确「不动」的 120/8027，必须能选到 17950）。
+function getUpdater(platformId) {
+  let svc
+  if (platformId) {
+    const acct = (store.config.platforms || []).find(p => String(p.id) === String(platformId))
+    if (!acct) throw new Error('服务平台账号不存在：' + platformId)
+    svc = { adapter: getService(acct.type), acct, type: acct.type, preview: false }
+  } else {
+    svc = getActiveService(store.config)
+  }
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
   const key = String(svc.acct.id || svc.acct.url || '') + '|' + svc.type
   if (updater && updaterKey === key) return updater
@@ -760,7 +769,7 @@ function getUpdater() {
 
 route('POST', '/api/source-update/scan', guard(async (req, res, ctx) => {
   const b = ctx.body || {}
-  return await getUpdater().scan({
+  return await getUpdater(b.platformId).scan({
     owner: b.owner || null,
     allowVersionOnly: b.allowVersionOnly === true,
     includeHubs: b.includeHubs === true,
@@ -769,12 +778,16 @@ route('POST', '/api/source-update/scan', guard(async (req, res, ctx) => {
   })
 }))
 
-route('GET', '/api/source-update/last', guard(() => getUpdater().getLastReport()))
+route('GET', '/api/source-update/last', guard((req) => {
+  let pid = null
+  try { pid = new URL(req.url, 'http://x').searchParams.get('platformId') } catch (e) {}
+  return getUpdater(pid).getLastReport()
+}))
 
 route('POST', '/api/source-update/apply', guard(async (req, res, ctx) => {
   const b = ctx.body || {}
   // 默认 dry-run：不给 apply+confirm 时 core 层直接抛错，不产生任何写操作
-  return await getUpdater().apply(b.ids, {
+  return await getUpdater(b.platformId).apply(b.ids, {
     apply: b.apply === true, confirm: b.confirm === true,
     owner: b.owner || null, maxAgeMs: b.maxAgeMs
   })

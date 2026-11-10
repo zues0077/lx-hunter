@@ -188,6 +188,9 @@
         <div class="toolbar">
           <strong>已添加源更新 · dry-run 报告</strong>
           <span class="muted" id="updSummary"></span>
+          <label class="field inline"><span>目标账号</span>
+            <select class="input" id="updAccountSel" style="max-width:300px" title="必须显式选择要扫描的服务平台账号；不默认沿用「当前账号」，避免扫到不该动的服务端"><option value="">— 请选择服务平台账号 —</option></select>
+          </label>
           <label class="chk inline"><input type="checkbox" id="updIncludeHubs"><span>含采集站在线清单（只读）</span></label>
           <button class="btn ghost" id="btnUpdRefresh">重新扫描</button>
         </div>
