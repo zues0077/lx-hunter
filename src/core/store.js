@@ -127,6 +127,15 @@ const DEFAULT_CONFIG = {
   // 服务端平台更多保留现条目 / 版本高的赢 / 平台无交集则改名并存 / 有交集则替换），
   // 全都判不出来（两边信息都不足）时才看这里：true=替换服务端旧版（先删后传），false=改名并存。
   replaceSameNameOnImport: true,
+  // 2026-11-10 22:0x：公共音源「综合质量分」设置项（平台数 / 取链成功率 / p50 延迟 / 音质档）。
+  // 权重由 quality.resolveOpts 归一化，非法值一律回退默认；改动即时作用于本地去重与灌入裁决。
+  // 科学护栏：minSamples 防止拿 1 次请求当成功率，scoreMargin 防止 0.001 分差就删源，
+  // minCoverage 防止服务端只有声明值时被当成「有质量证据」。
+  qualityWeights: { platforms: 0.40, success: 0.25, latency: 0.15, quality: 0.20 },
+  qualityMinSamples: 3,
+  qualityLatencyCapMs: 3000,
+  qualityScoreMargin: 0.08,
+  qualityMinCoverage: 0.5,
   patrolAutoDisable: true,
   // v1.9.1：巡检连续失效「自动删除音源」。
   // 与 patrolAutoDisable（自动禁用）的区别：禁用只是把该音源在五个平台上的开关关掉、

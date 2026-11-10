@@ -23,7 +23,7 @@
 const crypto = require('crypto')
 const { versionKey: versionNum, cmpVersion } = require('./version')
 const { normName, repoKey, nameBody, scriptName } = require('./identity')
-const { compareQuality, describeQuality } = require('./quality')
+const { compareQuality, optsFromConfig, scoreVerdict } = require('./quality')
 
 function sha256(s) {
   return crypto.createHash('sha256').update(String(s), 'utf8').digest('hex')
@@ -119,6 +119,9 @@ function platformList(e) {
  */
 function pairSources(serverList, candidates, opts) {
   opts = opts || {}
+  // 综合评分设置项（权重 / 样本门槛 / 分差阈值）由 Web 层注入 store.config，
+  // 没注入时走 quality.js 的默认值；避免巡检与灌入链路两套口径。
+  const qopts = optsFromConfig(Object.assign({}, opts, opts.config || {}))
   const list = Array.isArray(serverList) ? serverList : []
   const cand = (Array.isArray(candidates) ? candidates : []).map(candidateMeta)
   const byBody = {}
@@ -137,6 +140,10 @@ function pairSources(serverList, candidates, opts) {
     if (!s.repository) missingEvidence.push('server.repository/homepage')
     if (!s.version) missingEvidence.push('server.version')
     if (!s.supportedSources.length) missingEvidence.push('server.supportedSources')
+    // 服务端 list 不回传脚本正文 / deep / metrics（17950 实测 38 条全无），
+    // 所以「服务端侧综合评分」在此降级为分层硬判据；如实写进证据缺口，别把
+    // 「综合分不可比」误读成「两边质量一样」。
+    missingEvidence.push('server.deep/metrics（lxserver 不回传实测证据，服务端侧综合评分降级）')
     const item = {
       id: s.id, name: s.name, owner: s.owner, enabled: s.enabled,
       verdict: 'unmatched', reason: '', applyAllowed: false,
@@ -180,7 +187,7 @@ function pairSources(serverList, candidates, opts) {
       c = samePool.reduce((best, x) => cmpVersion(x.version, best.version) > 0 ? x : best)
     } else if (crossPool.length) {
       relation = 'cross-repo'
-      c = crossPool.reduce((best, x) => compareQuality(x.raw, best.raw) > 0 ? x : best)
+      c = crossPool.reduce((best, x) => compareQuality(x.raw, best.raw, qopts) > 0 ? x : best)
     } else {
       // 服务端无 homepage 或候选无 repo：拿不到同源键，按最高版本挑一条只作报告
       c = pool.reduce((best, x) => cmpVersion(x.version, best.version) > 0 ? x : best)
@@ -245,13 +252,20 @@ function pairSources(serverList, candidates, opts) {
     if (relation === 'cross-repo') {
       // 用户口径 3：跨仓库同名按 lx-hunter 实测质量裁决；但裁决的执行在灌入链路，
       // 本反查模块只报告，绝不从服务端列表反推去删改。
-      const q = compareQuality(c.raw, s)
-      const note = '本地 ' + describeQuality(c.raw) + ' vs 服务端 ' + describeQuality(s)
-      if (q > 0) {
-        return finish('unmatched', '跨仓库同名：lx-hunter 实测质量更优（' + note +
+      // 服务端无 deep/metrics → scoreVerdict 明确标记 layered-fallback，理由里如实写出，
+      // 避免把「服务端侧证据不足」包装成「综合评分判过」。
+      const vd = scoreVerdict(c.raw, s, qopts)
+      const note = `本地 [${vd.a.desc}] vs 服务端 [${vd.b.desc}]｜模式 ${vd.mode}｜噪声带 ${vd.margin}`
+      item.evidence.quality = {
+        mode: vd.mode, margin: vd.margin,
+        localScore: vd.a.score, serverScore: vd.b.score,
+        localCoverage: vd.a.coverage, serverCoverage: vd.b.coverage
+      }
+      if (vd.cmp > 0) {
+        return finish('unmatched', '跨仓库同名：lx-hunter 综合质量更优（' + note +
           '）→ 留优删差请走「灌入」链路执行；本反查只报告', 'cross-repo-quality')
       }
-      if (q < 0) {
+      if (vd.cmp < 0) {
         return finish('unmatched', '跨仓库同名：服务端现条目质量更优（' + note + '）→ 保留服务端', 'cross-repo-quality')
       }
       return finish('unmatched', '跨仓库同名且质量判据平手（' + note + '）→ 不删任何一方，只报告', 'cross-repo-quality')

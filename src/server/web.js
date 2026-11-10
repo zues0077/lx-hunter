@@ -781,7 +781,15 @@ route('POST', '/api/source-update/scan', guard(async (req, res, ctx) => {
     allowVersionOnly: b.allowVersionOnly === true,
     includeHubs: b.includeHubs === true,
     hubTimeoutMs: b.hubTimeoutMs,
-    candidateSource: b.includeHubs === true ? 'local-library+hubs' : 'local-library'
+    candidateSource: b.includeHubs === true ? 'local-library+hubs' : 'local-library',
+    // 综合评分设置项与「灌入链路」同源，避免巡检报告与本地去重两套口径。
+    config: {
+      qualityWeights: store.config.qualityWeights,
+      qualityMinSamples: store.config.qualityMinSamples,
+      qualityLatencyCapMs: store.config.qualityLatencyCapMs,
+      qualityScoreMargin: store.config.qualityScoreMargin,
+      qualityMinCoverage: store.config.qualityMinCoverage
+    }
   })
 }))
 

@@ -12,7 +12,7 @@ const { Store } = require('./store')
 // 不再各写一份（详见 src/core/version.js 顶部说明）。
 const { versionKey: versionNum, cmpVersion } = require('./version')
 const { normName, candidateRepo, serverRepo } = require('./identity')
-const { compareQuality, describeQuality } = require('./quality')
+const { compareQuality, optsFromConfig, scoreVerdict } = require('./quality')
 
 // normName 已统一到 src/core/identity.js（hunter / sourceUpdate 必须完全同口径），
 // 这里通过顶部 require 引入；module.exports 继续导出同名符号，外部调用不受影响。
@@ -1042,6 +1042,15 @@ class Hunter {
     const da = a && a.deep && a.deep.checkedAt ? a.deep : null
     const db = b && b.deep && b.deep.checkedAt ? b.deep : null
     if (da && db) {
+      // 2026-11-10 22:0x 拍板：本地同名去重改用「平台数 + 取链成功率 + p50 延迟 + 音质档」
+      // 综合评分选优（双方都有 lx-hunter 实测证据，正是综合评分能生效的场景）。
+      // 科学护栏：分差落入噪声带 / 任一侧证据不足 → compareQuality 返回 0，
+      // 此时绝不靠 0.001 分差删条目，退回下面的原有硬判据与兜底顺序。
+      // 私人音源（用户手动导入）不参与自动质量淘汰，保持原来的可用性口径。
+      if (!a.private && !b.private) {
+        const q = compareQuality(a, b, optsFromConfig(this.store && this.store.config))
+        if (q !== 0) return q > 0
+      }
       const na = usableCount({ deep: da }), nb = usableCount({ deep: db })
       if (na !== nb) return na > nb
     } else if (da || db) {
@@ -2382,13 +2391,28 @@ class Hunter {
     const localName = nameForCmp
     const lv = versionNum(localName), sv = versionNum(srv.name)
     const vc = cmpVersion(localName, srv.name)
+    const qopts = optsFromConfig(c)
+    // 服务端 list 不回传脚本正文/deep（17950 实测 38 条全无），因此默认没有实测证据。
+    // 若调用方注入了 lx-hunter 本地留存的质量代理（srv.qualityProxy = 旧版脚本的 deep），
+    // 综合评分才真正参与；否则明确降级为分层硬判据，绝不假装两边都测过。
+    const srvDeep = srv.deep || srv.qualityProxy || null
+    const qTarget = srvDeep ? Object.assign({}, srv, { deep: srvDeep }) : srv
+    const qualityMode = srvDeep ? 'composite' : 'layered-fallback(服务端无实测证据)'
 
     if (provenSame && lv && sv) {
       if (vc > 0) {
-        if (srvN > 0 && newN >= 0 && newN < srvN) {
-          return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
+        // 口径 2「质量不劣」：服务端有实测证据时按综合评分判；无证据时退回平台数保护
+        if (srvDeep) {
+          const qd = scoreVerdict(e, qTarget, qopts)
+          if (qd.cmp < 0) {
+            return { act: 'skip', why: `同仓库同名且本地版本更高，但综合质量更差（${qd.a.desc} vs ${qd.b.desc}）→ 不做质量降级替换` }
+          }
+          return { act: 'replace', why: `同仓库同名，本地版本更高且质量不劣（${qd.mode}，分差 ${qd.a.score !== null && qd.b.score !== null ? Math.abs(qd.a.score - qd.b.score).toFixed(3) : 'n/a'}）→ 留新删旧（删旧装新）` }
         }
-        return { act: 'replace', why: `同仓库同名，本地版本更高（${localName} > ${srv.name}）→ 留新删旧（删旧装新）` }
+        if (srvN > 0 && newN >= 0 && newN < srvN) {
+          return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}；${qualityMode}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
+        }
+        return { act: 'replace', why: `同仓库同名，本地版本更高（${localName} > ${srv.name}；${qualityMode}）→ 留新删旧（删旧装新）` }
       }
       return { act: 'skip', why: `同仓库同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
     }
@@ -2396,10 +2420,10 @@ class Hunter {
       if (!checked) {
         return { act: 'rename', why: '跨仓库同名但本地未实测 → 无法按质量裁决，改名并存（请先做全平台检测）' }
       }
-      const note = `本地 ${describeQuality(e)} vs 服务端 ${describeQuality(srv)}`
-      const q = compareQuality(e, srv)
-      if (q > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 实测质量更优（${note}）→ 留优删差（删旧装新）` }
-      if (q < 0) return { act: 'skip', why: `跨仓库同名：服务端现条目质量更优（${note}）→ 保留服务端，本地不灌` }
+      const vd = scoreVerdict(e, qTarget, qopts)
+      const note = `本地 [${vd.a.desc}] vs 服务端 [${vd.b.desc}]｜模式 ${vd.mode}｜${qualityMode}`
+      if (vd.cmp > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 综合质量更优（${note}）→ 留优删差（删旧装新）` }
+      if (vd.cmp < 0) return { act: 'skip', why: `跨仓库同名：服务端现条目质量更优（${note}）→ 保留服务端，本地不灌` }
       return { act: 'rename', why: `跨仓库同名但质量判据平手（${note}）→ 不删任何一方，改名并存` }
     }
 

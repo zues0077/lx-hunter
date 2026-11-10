@@ -348,6 +348,53 @@ function declaredQualities(def) {
   return raw.filter(q => typeof q === 'string' && q).slice(0, 4)   // 最多 4 档，避免拖慢
 }
 
+/** 音质档位原始清单由调用方传入；这里只负责把「一次深检」的散布指标聚合成可评分的样本集。
+ *  设计取舍（2026-11-10 用户要求「综合性检测」）：
+ *  - 「取链成功率」的分母是**真实发出的请求数**，不是平台数；快速模式只跑 1 个平台时样本量自然小，
+ *    quality.js 会按 MIN_SAMPLES 判证据不足，绝不拿 1 个样本当成功率。
+ *  - p50 只统计「拿到 http 链接」的请求耗时；失败请求的耗时单独留档但不当体验分，
+ *    否则超时失败会把 p50 压成难看的值、把好源误判成差源。
+ *  - 音质档保留原始字符串，评分映射交给 quality.js 单一来源，避免两处口径分裂。
+ */
+function aggregateMetrics(platforms, srcDefs) {
+  let attempts = 0, successes = 0, playable = 0
+  const okLat = [], allLat = []
+  const qualityUsed = [], qualityDeclared = []
+  for (const [src, p] of Object.entries(platforms || {})) {
+    const m = p && p.metrics
+    if (m) {
+      attempts += Number(m.attempts) || 0
+      successes += Number(m.successes) || 0
+      playable += Number(m.playable) || 0
+      for (const x of (m.latencies || [])) okLat.push(Number(x) || 0)
+      for (const x of (m.attemptLatencies || [])) allLat.push(Number(x) || 0)
+      if (m.qualityUsed) qualityUsed.push(String(m.qualityUsed))
+      for (const q of (m.qualityDeclared || [])) qualityDeclared.push(String(q))
+    }
+    const def = srcDefs && srcDefs[src]
+    for (const q of declaredQualities(def)) qualityDeclared.push(String(q))
+  }
+  const lat = okLat.length ? okLat : allLat
+  lat.sort((a, b) => a - b)
+  const pct = arr => {
+    if (!arr.length) return null
+    const i = Math.floor((arr.length - 1) * 0.5)
+    return Math.round((arr[i] + arr[Math.ceil((arr.length - 1) * 0.5)]) / 2)
+  }
+  return {
+    attempts, successes, playable,
+    // 「拿到链接」≠「真能播」：lxserver 播放侧已知坑（HEAD 校验重定向失败、
+    // content-type 非音频、试听片段拒绝、1500/3000ms 超时，见 A/B 四轮报告），
+    // 所以两套比率都留档，由 quality.js 决定权重，绝不在采集层就把假可播当成功。
+    successRate: attempts > 0 ? successes / attempts : null,
+    playableRate: attempts > 0 ? playable / attempts : null,
+    p50LatencyMs: pct(lat), p90LatencyMs: null,
+    samples: lat.length,
+    okSamples: okLat.length,
+    qualityUsed, qualityDeclared
+  }
+}
+
 async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
   const songs = TEST_SONGS[src] || []
   if (!songs.length) return { status: 'skipped', message: '无测试歌曲' }
@@ -357,6 +404,8 @@ async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
     if (own.length) return own
     return ['128k', '320k']
   })()
+  const metrics = { attempts: 0, successes: 0, playable: 0, latencies: [], attemptLatencies: [], qualityUsed: null, qualityDeclared: declaredQualities(def) }
+  const done = r => Object.assign(r, { metrics })
   // 单平台总预算：够跑完「多档音质 + 一次抖动重试」，又不至于让坏脚本拖垮整个批次。
   // 显式配置了就用配置值（只兜一个很小的下限），否则按取链超时推算。
   const budgetCfg = Number(cfg.platformBudgetMs)
@@ -366,16 +415,20 @@ async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
   for (const q of QUALITIES) {
     for (const song of songs) {
       for (let attempt = 1; attempt <= 2; attempt++) {
-        if (bail()) return null
+        if (bail()) return done({ status: 'untested', message: '已停止（其它平台已确认可用）' })
         if (Date.now() > deadline) { lastMsg = lastMsg || '取链超时（已超出单平台预算）'; continue }
         onEvent('step', { text: `沙箱取链 ${PLATFORM_LABEL[src]}「${song.name}」${q} · ${displayName || ''}` })
         try {
           const left = Math.max(1000, deadline - Date.now())
           const waitMs = Math.min(Number(cfg.linkTimeoutMs) || 20000, left)
+          const t0 = Date.now()
           const r = await stoppable(
             sb.dispatch('request', { source: src, action: 'musicUrl', info: { type: q, musicInfo: musicInfo(song) } }, waitMs),
             bail
           )
+          const dt = Date.now() - t0
+          metrics.attempts++
+          metrics.attemptLatencies.push(dt)
           const ret = r && r.result
           // 规范协议要求返回字符串；少数脚本返回 {url} / {link} / {data} 形式，一并兼容，
           // 否则这批源会被当成「返回异常」误杀
@@ -387,11 +440,19 @@ async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
           }
           if (link && /^https?:\/\//i.test(link)) {
             const v = await stoppable(verifyUrl(link), bail).catch(() => ({ ok: false, reason: bail() ? '未校验（已确认可用，无需继续）' : '校验异常' }))
-            if (v.ok) return { status: 'usable', message: `「${song.name}」返回可播音频 (${q})`, url: link, verified: true }
-            // 明确是假链接（内网/非法地址）才算真的失败，且不用再试其它音质
-            if (/私有|本地|无效 URL/.test(v.reason || '')) return { status: 'failed', message: v.reason }
+            // 明确是假链接（内网/非法地址）才算真的失败，且不用再试其它音质。
+            // 注意：此时不能计入 successes/latencies —— 拿到内网串不等于「取链成功」，
+            // 否则综合评分的「取链成功率」会被假链接灌水。
+            if (/私有|本地|无效 URL/.test(v.reason || '')) return done({ status: 'failed', message: v.reason })
+            metrics.successes++
+            metrics.latencies.push(dt)
+            metrics.qualityUsed = q
+            if (v.ok) {
+              metrics.playable++
+              return done({ status: 'usable', message: `「${song.name}」返回可播音频 (${q})`, url: link, verified: true })
+            }
             // 链接已解析出来，只是本机没拉下来 —— 仍判可用，把原因标注出来供参考
-            return { status: 'usable', message: `已解析音频链接（本机未校验：${v.reason}）`, url: link, verified: false }
+            return done({ status: 'usable', message: `已解析音频链接（本机未校验：${v.reason}）`, url: link, verified: false })
           }
           lastMsg = (ret == null || ret === '') ? '返回空链接' : '返回异常: ' + String(ret).slice(0, 60)
         } catch (e) {
@@ -402,7 +463,7 @@ async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
       }
     }
   }
-  return { status: 'failed', message: lastMsg || '未知失败' }
+  return done({ status: 'failed', message: lastMsg || '未知失败' })
 }
 
 /** 沙箱深度检测：初始化脚本 + 平台真实取链
@@ -560,6 +621,8 @@ async function deepCheck(entry, code, cfg, onEvent, shouldStop) {
     if (sb) sb.destroy()
     // 统一在这里收口失效类别：无论走正常流程还是异常分支，统计口径都一致
     result.failKind = deepFailKind(result)
+    // 综合性检测样本集：异常/取消时也要有一份（可能为空），下游评分据此判「证据不足」
+    result.metrics = aggregateMetrics(result.platforms, result.sourceDefs || {})
   }
   return result
 }
@@ -814,6 +877,7 @@ module.exports = {
   TEST_SONGS, PLATFORMS, PLATFORM_LABEL,
   sha256Str, extractMeta, classifyEntry, scoreEntry, isHostAdapterScript, obfuscationRisk, obfuscationTip, verifyUrl,
   checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge,
+  aggregateMetrics, declaredQualities,
   isTransient, isLocalNetworkIssue, deepFailKind, applyProbeRecord, extractApiHosts, probeApiHosts, apiDownVerdict,
   passedPlatforms, regressionJudge
 }
