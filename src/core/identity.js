@@ -1,4 +1,5 @@
 'use strict'
+const { versionKey, cmpVersion } = require('./version')
 /**
  * 音源身份键（2026-11-10）：把散落在 hunter.js / sourceUpdate.js 的同名归一化、
  * 同源仓库键、脚本声明名解析集中到一处，保证「灌入裁决」与「源更新配对」口径一致。
@@ -81,6 +82,64 @@ function isSameRepo(a, b) {
   return !!(ka && kb && ka === kb)
 }
 
+/**
+ * 剥掉名字结尾的版本号（"xxx v1.0.0" → "xxx"）。
+ *
+ * 正则与 crawler.js 的 `latestBaseName` **同款**，那边用于「只收最新版」过滤；
+ * 这里用于灌入配对。两处必须一致，`tests/name-base-2026-11-11.test.js` 对拍锁死。
+ * 之所以复制一份而不 require crawler：crawler → checker，checker 又依赖身份键，
+ * 反向引用会成环。
+ */
+function stripVersionSuffix(name) {
+  let t = String(name || '').replace(/\.js$/i, '').toLowerCase()
+  // 循环剥结尾版本号：xxx-v2.3.17 / xxx_v1.8 / xxxv2.3.17 / xxx 2.3.17
+  while (true) {
+    const t2 = t.replace(/[\s._\-]*(?:v|ver)?\d+(?:\.\d+)+$/i, '')
+    if (t2 === t) break
+    t = t2
+  }
+  return t.replace(/[\s._\-]+$/, '')
+}
+
+/**
+ * 服务端条目的「基准名」配对键：剥版本号 + 归一化符号，太短的名字不参与配对。
+ *
+ * 背景（2026-11-11 实测 P-1404）：作者常把版本写进 `@name`（"xxx v1.0.0"），
+ * `normName()` 不剥版本号，`xxxv100 ≠ xxxv110` ⇒ 精确同名永远配不上，
+ * 每次升级都在服务端新起一条、旧条还 enabled。加这一层让它们能配上。
+ *
+ * 顺序：先去掉结尾「（v1.0.0）」这种**括号包裹**的版本号（否则归一化会把
+ * `(v1.0.0)` 拍成 `v100`，裸版本正则再也剥不掉），再剥裸版本号，最后归一符号。
+ * 已知不覆盖：版本号夹在名字中间的（"xxx v1.0 便携版"）—— 这种不配对，
+ * 退回「按新条目录入」，不会删错东西。
+ * @returns {string} 基准名；≤2 字符（含空）返回 ''，表示「弱名不猜」
+ */
+function baseNameKey(name) {
+  const raw = String(name || '')
+  const noParen = raw.replace(/[（(]\s*(?:v|ver)?\d+(?:\.\d+)+\s*[)）]\s*$/, '')
+  const k = normName(stripVersionSuffix(noParen))
+  return k.length > 2 ? k : ''
+}
+
+/**
+ * 从「同一个基准名的多条服务端条目」里挑出用于配对的那一条：版本号最高的。
+ *
+ * 场景（2026-11-11）：服务端已经并存 "xxx v1.0"、"xxx v2.0" 两条（用户手工加过、
+ * 或旧版灌入留下的），本地来了 "xxx v3.0"。只能跟其中一条配对 —— 挑版本最高的那条，
+ * 其余原样留着交给用户处理。全都取不到版本号时返回 null（调用方据此不配对，宁可新增）。
+ */
+function pickHighestVersion(list) {
+  let pick = null
+  for (const s of (list || [])) {
+    if (!s) continue
+    const key = s.version || s.name
+    if (!versionKey(key)) continue
+    if (!pick || cmpVersion(key, pick.version || pick.name) > 0) pick = s
+  }
+  return pick
+}
+
 module.exports = {
-  normName, repoKey, nameBody, scriptName, candidateRepo, serverRepo, isSameRepo, PLACEHOLDER_REPO
+  normName, repoKey, nameBody, scriptName, candidateRepo, serverRepo, isSameRepo,
+  stripVersionSuffix, baseNameKey, pickHighestVersion, PLACEHOLDER_REPO
 }

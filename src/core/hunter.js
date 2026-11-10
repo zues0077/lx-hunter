@@ -11,7 +11,7 @@ const { Store } = require('./store')
 // 2026-11-10 科学性复核：版本算法 / 身份键 / 质量判据统一到单一来源，
 // 不再各写一份（详见 src/core/version.js 顶部说明）。
 const { versionKey: versionNum, cmpVersion } = require('./version')
-const { normName, candidateRepo, serverRepo } = require('./identity')
+const { normName, candidateRepo, serverRepo, baseNameKey, pickHighestVersion } = require('./identity')
 const { compareVerdict, describeQuality, profile: qualityProfile } = require('./quality')
 
 // normName 已统一到 src/core/identity.js（hunter / sourceUpdate 必须完全同口径），
@@ -1896,6 +1896,14 @@ class Hunter {
     if (!svcs.length) throw new Error(NO_ACCOUNT_ERR)
     const multi = svcs.length > 1
 
+    // 存量正文补档：本地库里已经存着正文的条目，按 contentHash 复制一份到副本目录。
+    // 纯本地搬运、零网络，用于「服务端那条是不是我们灌的」的 size 对账；
+    // 每次灌入前跑一遍，保证新采集到的脚本下次也能参与对账。
+    try {
+      const bf = this.store.backfillScripts ? this.store.backfillScripts() : null
+      if (bf && bf.archived) this.log(`补档脚本正文副本 ${bf.archived} 份（用于服务端条目对账）`, '灌入', 'info')
+    } catch (e) { /* 补档失败不影响灌入 */ }
+
     this.job = { running: true, type: 'import', cancel: false, progress: { done: 0, total: targets.length * svcs.length }, step: '' }
     this.emit('job', { running: true, type: 'import' })
     this.emit('import-targets', svcs.map(s => ({ id: s.acct.id, name: s.acct.name || s.acct.url, type: s.type })))
@@ -1917,6 +1925,7 @@ class Hunter {
       // 前者说明服务端确实一条都没有（该重灌就重灌），后者说明我们不知道现状 ——
       // 不知道时只能相信本地账本，否则服务端一抖动就会把整库重复灌一遍。
       let serverByName = {}
+      let serverByBase = {}
       let serverIds = null
       let serverList = null
       try { serverList = await svc.adapter.list(svc.acct) } catch (e) {
@@ -1924,14 +1933,28 @@ class Hunter {
       }
       if (Array.isArray(serverList)) {
         serverIds = new Set()
+        const baseCand = {}
         for (const s of serverList) {
           if (!s) continue
           if (s.id != null) serverIds.add(s.id)
           if (s.name) serverByName[normName(s.name)] = s
+          // 基准名分组：作者把版本写进 @name 时靠它配对（见 identity.baseNameKey）
+          const bk = baseNameKey(s.name)
+          if (bk) (baseCand[bk] = baseCand[bk] || []).push(s)
         }
-        this.log(`「${label}」服务端现有音源 ${serverList.length} 个`, '灌入')
+        // 同一个基准名在服务端有多条（v1、v2 并存）→ 只拿 @version 最高的那条配对，
+        // 其余原样留着交给用户处理。都不带可解析版本则不配：宁可新增，也不猜着删。
+        let multi = 0
+        for (const bk of Object.keys(baseCand)) {
+          const arr = baseCand[bk]
+          if (arr.length > 1) multi++
+          const pick = pickHighestVersion(arr)
+          if (pick) serverByBase[bk] = pick
+        }
+        this.log(`「${label}」服务端现有音源 ${serverList.length} 个` +
+          (multi ? `（其中 ${multi} 组「删版本号后同名」并存，配对时只取版本最高那条）` : ''), '灌入')
       }
-      plans.push({ svc, label, serverByName, serverIds, serverList })
+      plans.push({ svc, label, serverByName, serverByBase, serverIds, serverList })
     }
     if (!plans.length) {
       this.job.running = false
@@ -2006,10 +2029,11 @@ class Hunter {
         if (rc.changed) this.log(`「${p.label}」账本对账：摘除 ${rc.dropped} 条服务端已不存在的灌入记录`, '灌入', 'info')
       }
       p.importedRecs = this._importedRecsFor(p.svc.acct.id, activeId)
-      p.serverScore = this._scoreByServerId(p.svc.acct.id, activeId)
+      p.serverScore = this._scoreByServerId(p.svc.acct.id, activeId, p.serverList)
       p.ledger = this._ledgerByEntry(p.svc.acct.id, activeId)
       p.queue = this._planImportQueue(targets, {
-        cfg, serverByName: p.serverByName, serverIds: p.serverIds, serverList: p.serverList,
+        cfg, serverByName: p.serverByName, serverByBase: p.serverByBase,
+        serverIds: p.serverIds, serverList: p.serverList,
         codeCache, importedRecs: p.importedRecs, serverScore: p.serverScore, ledger: p.ledger,
         // 该平台名字是不是 key：不是（MusicSync）则同名不需要改名，直接新增为独立条目
         uniqueName: p.svc.adapter.uniqueName !== false
@@ -2090,7 +2114,7 @@ class Hunter {
         // 服务端已有一份内容相同的音源（同名命中，或按脚本内容指纹比对命中）：不重复上传，
         // 直接把本地这条挂到服务端那一条上，标记为「已灌入」。
         const srv = item.sameContentServer
-        this._markImported(e, svc, srv.id, srv.name || name, srv.supportedSources || [], true)
+        this._markImported(e, svc, srv.id, srv.name || name, srv.supportedSources || [], true, codeCache[e.id])
         this.log(tag + '服务端已有同内容音源，已标记已灌入（跳过上传）：' + name, '灌入', 'info')
         await sleep(80)
         return Object.assign(base(), { status: 'synced', lxId: srv.id, message: item.why || '服务端已有内容相同的音源，已标记为已灌入（未重复上传）', platforms: srv.supportedSources || [] })
@@ -2200,7 +2224,7 @@ class Hunter {
           : await svc.adapter.importUrl(svc.acct, e.url, (e.lxName || e.scriptName || e.name))
       }
       if (r && r.success) {
-        this._markImported(e, svc, r.id, r.name || name, r.platforms || [], false)
+        this._markImported(e, svc, r.id, r.name || name, r.platforms || [], false, codeCache[e.id])
         // 把裁决理由带上：用户最常问的就是「为什么这次是替换、那次是改名」
         const note = item.replaceServer
           ? (r.replacedFallback === 'renamed'
@@ -2208,10 +2232,13 @@ class Hunter {
             : '（已替换服务端同名旧版：先删后传）' + (item.why ? ' — ' + item.why : ''))
           : item.renameServer ? '（已改名并存，未删服务端旧版）' + (item.why ? ' — ' + item.why : '')
             : (item.why ? '（' + item.why + '）' : '')
+        // 靠「删版本号后同名」配上的，明确标出来：用户看日志能分清是精确同名还是基准名配对
+        const baseNote = item.matchedByBase ? '（按删版本号后同名配对）' : ''
         const st = item.replaceServer && r.replacedFallback !== 'renamed' ? 'replaced' : 'success'
-        this.log(tag + `已灌入：${name}${note}（id=${r.id}）`, '灌入')
+        this.log(tag + `已灌入：${name}${baseNote}${note}（id=${r.id}）`, '灌入')
         return Object.assign(base(), {
-          status: st, lxId: r.id, message: (r.message || '') + note, platforms: r.platforms || [],
+          status: st, lxId: r.id, message: (r.message || '') + baseNote + note, platforms: r.platforms || [],
+          matchedByBase: !!item.matchedByBase,
           stateMigration: replaceInfo ? replaceInfo.migration : null
         })
       }
@@ -2232,7 +2259,12 @@ class Hunter {
    * 写「已灌入」记录（v1.8.0 多平台）：顶层的 platformId/accountName 指向最近一次
    * 灌入的平台，importedTo[] 保留全部平台，撤回时按账号精确摘除而不是整条删掉。
    */
-  _markImported(e, svc, lxId, name, platforms, synced) {
+  _markImported(e, svc, lxId, name, platforms, synced, code) {
+    // 正文副本落档：服务端不回正文，本地这份是「服务端那条到底是不是我们灌的」的唯一凭据
+    // （size 对账、按需复测都靠它）。同 contentHash 只写一次。
+    if (e.contentHash && typeof code === 'string' && code && this.store.archiveScript) {
+      this.store.archiveScript(e.contentHash, code)
+    }
     const prev = this.store.imported[e.id]
     const list = (prev && Array.isArray(prev.importedTo) ? prev.importedTo : [])
       .filter(x => x && x.platformId !== svc.acct.id)
@@ -2336,9 +2368,12 @@ class Hunter {
    * 让服务端侧也能有实测证据（否则服务端 list 只有声明值，第三层音质永远比不了）。
    * 只认 30 天内的快照：太久远的实测不能代表现在（音源接口随时会变资质/限流）。
    */
-  _scoreByServerId(platformId, activeId) {
+  _scoreByServerId(platformId, activeId, serverList) {
     const MAX_AGE_MS = 30 * 24 * 3600 * 1000
     const out = {}
+    // 服务端条目 id → 字节数：用来校验本地正文副本是否还对应服务端那条
+    const sizeById = {}
+    for (const s of (serverList || [])) if (s && s.id != null) sizeById[s.id] = Number(s.size) || 0
     for (const rec of Object.values(this.store.imported || {})) {
       if (!rec || !rec.score || !rec.score.metrics) continue
       const pid = rec.platformId == null ? activeId : rec.platformId
@@ -2352,8 +2387,14 @@ class Hunter {
       }
       const at = Number(rec.score.at) || 0
       const stale = !at || (Date.now() - at > MAX_AGE_MS)
+      // 本地副本字节数 vs 服务端当前字节数：不一致说明服务端那条已被换过
+      // （网页端手工改、别的工具灌过），这份快照描述的不是它 → 不给证据。
+      // 任一侧取不到（0）就不判，避免因数据缺失误伤。
+      const localSize = this.store.scriptSize ? this.store.scriptSize(rec.contentHash) : 0
       for (const id of ids) {
-        out[id] = stale ? { stale: true } : {
+        const srvSize = sizeById[id] || 0
+        const mismatch = localSize > 0 && srvSize > 0 && localSize !== srvSize
+        out[id] = (stale || mismatch) ? { stale: true } : {
           checkedAt: rec.score.checkedAt || at,
           platforms: rec.score.platforms || {},
           metrics: rec.score.metrics
@@ -2449,6 +2490,13 @@ class Hunter {
     const c = cfg || {}
     const led = (opt && opt.ledger) || null
     const nameForCmp = e.scriptName || e.lxName || e.name
+    // 版本取值：作者声明的 @version 优先，名字里的版本号兜底（2026-11-11）。
+    // 服务端 `list` 会回传 version 字段（17960 实测 `{"version":"v1.0.0"}`），
+    // 只读名字的话，「@name 固定、只升 @version」的源两边都取不到版本 →
+    // 版本比较整条路径失效，落到第 5 条「同名 + 平台重叠 → replace」，
+    // 本地旧版会把服务端新版覆盖掉（纯降级）。
+    const localVer = e.scriptVersion || nameForCmp
+    const srvVer = srv.version || srv.name
     // 1) 同名同内容 → 服务端就是它，标记已灌入即可，不重传。
     //    精确证据：内容 sha256 / 服务端回传的脚本正文全文。
     //    弱证据：字节长度相同 —— 只在「版本号不可比或版本相同」时才允许采信。
@@ -2459,8 +2507,8 @@ class Hunter {
     const srvCode = srv.script || srv.code || ''
     const sameCode = !!(code && srvCode && String(code) === String(srvCode))
     const sameSize = !!(code && srv.size && Buffer.byteLength(code, 'utf-8') === srv.size)
-    const versionConflict = !!(versionNum(nameForCmp) && versionNum(srv.name) &&
-                               cmpVersion(nameForCmp, srv.name) !== 0)
+    const versionConflict = !!(versionNum(localVer) && versionNum(srvVer) &&
+                               cmpVersion(localVer, srvVer) !== 0)
     // 本地账本（上次真正灌进去的那份正文 hash）——服务端不回 hash/正文时唯一可靠的强证据。
     //   相等 → 内容确实没变；不等 → 内容确实变了，此时 size 判据必须失效（等长改动）
     // `ledSame` 额外要求「服务端这条就是我们当初灌的那条」（lxId 对得上）：
@@ -2506,9 +2554,8 @@ class Hunter {
     const ck = candidateRepo(e), sk = serverRepo(srv)
     const provenSame = !!(ck && sk && ck === sk)
     const provenDifferent = !!(ck && sk && ck !== sk)
-    const localName = nameForCmp
-    const lv = versionNum(localName), sv = versionNum(srv.name)
-    const vc = cmpVersion(localName, srv.name)
+    const lv = versionNum(localVer), sv = versionNum(srvVer)
+    const vc = cmpVersion(localVer, srvVer)
     // 服务端 list 不回传脚本正文/deep（17950 实测 38 条全无），因此默认没有实测证据。
     // 若调用方注入了 lx-hunter 本地留存的质量代理（srv.qualityProxy = 旧版脚本的 deep），
     // 综合评分才真正参与；否则明确降级为分层硬判据，绝不假装两边都测过。
@@ -2553,9 +2600,9 @@ class Hunter {
         if (srvN > 0 && newN >= 0 && newN < srvN) {
           return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}；${srvQualitySrc}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
         }
-        return { act: 'replace', why: `同仓库同名，本地版本更高（${localName} > ${srv.name}；${srvQualitySrc}）→ 留新删旧（删旧装新）` }
+        return { act: 'replace', why: `同仓库同名，本地版本更高（${localVer} > ${srvVer}；${srvQualitySrc}）→ 留新删旧（删旧装新）` }
       }
-      return { act: 'skip', why: `同仓库同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
+      return { act: 'skip', why: `同仓库同名，服务端版本不低于本地（${srvVer} ≥ ${localVer}）→ 保留服务端` }
     }
     if (provenDifferent) {
       // 22:21 审计：跨仓库「留优删差」是要删服务端条目的不可逆操作，
@@ -2568,6 +2615,41 @@ class Hunter {
           why: `跨仓库同名但本地证据不足（${!checked ? '未实测/未做深检' : untestedN + ' 个平台未实测（快速模式）'}）→ 不按综合评分删任何一方，改名并存（请先做全平台检测）`
         }
       }
+      // 平台完全不重叠 ⇒ 名字撞了而已，是两个无关脚本。不管版本/质量都不删。
+      const overlapX = srvPlats.filter(p => localPlats.indexOf(p) >= 0)
+      if (srvPlats.length && localPlats.length && !overlapX.length) {
+        return {
+          act: 'rename',
+          why: `跨仓库同名但平台完全不重叠（服务端 ${srvPlats.join('/')} vs 本地 ${localPlats.join('/')}）→ 视作无关脚本，改名并存（不删旧的）`
+        }
+      }
+
+      // 版本优先于质量（2026-11-11 用户拍板）：大量仓库本来就是同一份源被多处转发，
+      // 仓库地址不同不足以证明它不是同一个源。只要本地版本**明确更高**且质量不劣，就可以换。
+      // 但「版本高」不是删源的唯一理由 —— 质量关必须同时过，否则保留服务端旧版。
+      if (lv && sv && vc > 0) {
+        if (srvDeep) {
+          const qd = compareVerdict(e, qTarget)
+          // 用户口径（2026-11-11）：「必须高于」才替换 —— 平手也算未通过，保留服务端。
+          if (qd.cmp <= 0) {
+            return { act: 'skip', why: `跨仓库同名，本地版本更高（${localVer} > ${srvVer}）但质量未更优（${qd.by}：${qd.reason}）→ 保留服务端（口径要求质量必须更优）` }
+          }
+          return { act: 'replace', why: `跨仓库同名，本地版本更高（${localVer} > ${srvVer}）且质量更优（${qd.by}：${qd.reason}）→ 留新删旧（删旧装新）` }
+        }
+        // 服务端侧没有实测证据：只能比「本地实测可用平台数 vs 服务端声明平台数」。
+        // 声明值是脚本自己标的，天然偏大，所以这个门槛偏保守 —— 宁可少换，不误删。
+        if (srvN <= 0) {
+          return { act: 'rename', why: `跨仓库同名，本地版本更高（${localVer} > ${srvVer}）但服务端没有声明任何平台，无从判断质量是否更优 → 不删旧的，改名并存` }
+        }
+        if (newN <= srvN) {
+          return { act: 'skip', why: `跨仓库同名，本地版本更高（${localVer} > ${srvVer}）但可用平台数未多于服务端声明（${newN} ≤ ${srvN}；服务端侧无实测证据）→ 保留服务端` }
+        }
+        return { act: 'replace', why: `跨仓库同名，本地版本更高（${localVer} > ${srvVer}）且可用平台数更多（本地实测 ${newN} 个 > 服务端声明 ${srvN} 个）→ 留新删旧（删旧装新）` }
+      }
+      if (lv && sv && vc < 0) {
+        return { act: 'skip', why: `跨仓库同名，服务端版本更高（${srvVer} > ${localVer}）→ 保留服务端` }
+      }
+
       const vd = compareVerdict(e, qTarget)
       const note = `本地 [${vd.aDesc}] vs 服务端 [${vd.bDesc}]｜判据 ${vd.by}：${vd.reason}`
       if (vd.cmp > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 实测质量更优（${note}）→ 留优删差（删旧装新）` }
@@ -2583,9 +2665,9 @@ class Hunter {
     // 4) 版本号可比 → 版本高的赢（versionKey 是字符串键，必须走 cmpVersion）
     if (lv && sv) {
       if (vc > 0) {
-        return { act: 'replace', why: `同名，本地版本更高（${localName} > ${srv.name}）→ 更新（删旧装新）` }
+        return { act: 'replace', why: `同名，本地版本更高（${localVer} > ${srvVer}）→ 更新（删旧装新）` }
       }
-      return { act: 'skip', why: `同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
+      return { act: 'skip', why: `同名，服务端版本不低于本地（${srvVer} ≥ ${localVer}）→ 保留服务端` }
     }
 
     // 5) 平台重叠：有交集 → 同一音源的新版本；完全无交集 → 明显无关，改名并存
@@ -2697,6 +2779,7 @@ class Hunter {
   _planImportQueue(targets, ctx) {
     const cfg = ctx.cfg || {}
     const serverByName = ctx.serverByName || {}
+    const serverByBase = ctx.serverByBase || {}
     const serverIds = ctx.serverIds || null   // 服务端此刻真实存在的 id 集合
     const serverList = ctx.serverList || []
     // 服务端已有条目的「内容指纹」表：只有平台会回传脚本正文时才有值
@@ -2722,8 +2805,48 @@ class Hunter {
     for (const k of Object.keys(groups)) { groups[k].sort(rank); best[k] = groups[k][0] }
     for (const k of Object.keys(ngroups)) { ngroups[k].sort(rank); nbest[k] = ngroups[k][0] }
     const queue = []
+    // 同名音源一律走同一套裁决（含 MusicSync）—— 同名/同内容该怎么处理与平台无关，
+    // 区别只有「要不要改名」：名字不是 key 的平台（MusicSync）根本不需要改，
+    // 把本地这份作为独立条目加上去即可（改名不但没用，还会破坏脚本自检）。
+    // matchedByBase：服务端那条是靠「剥掉版本号后同名」配上的（精确同名没命中），
+    // 只是配对方式不同，裁决口径完全一样。
+    const planSameName = (e, srvRaw, matchedByBase) => {
+      // 服务端 list 只有声明值，回放本地账本里「当年灌进去时那份」的打分快照，
+      // 否则第三层（音质档）永远没有可比的另一侧。
+      const snap = (ctx.serverScore && srvRaw && srvRaw.id != null) ? ctx.serverScore[srvRaw.id] : null
+      const srv = (snap && !snap.stale) ? Object.assign({}, srvRaw, { qualityProxy: snap }) : srvRaw
+      const code = codeCache[e.id]
+      const v = this.sameNameVerdict(e, srv, code, cfg, { ledger: ledger[e.id] || null })
+      const baseName = e.lxName || e.scriptName || e.name
+      const via = matchedByBase ? `（删版本号后同名，配对到服务端「${srv.name}」）` : ''
+      // matchedByBase 留给 UI/日志：用户要能分清「精确同名」与「删版本号后同名」
+      const mb = !!matchedByBase
+      if (v.act === 'synced') queue.push({ e, sameContentServer: srv, why: v.why, matchedByBase: mb })
+      else if (v.act === 'skip') queue.push({ e, skip: `与服务端同名${via}「${srv.name}」：${v.why}`, matchedByBase: mb })
+      else if (v.act === 'rename' && ctx.uniqueName === false) {
+        queue.push({
+          e,
+          why: `同名裁决：${v.why}。该平台同名音源可共存（服务端不按名字区分），直接新增为独立条目（不改名）`,
+          matchedByBase: mb
+        })
+      } else if (v.act === 'rename') {
+        // 改名安全阀前置：脚本自检名字的音源改名会变成坏源，规划阶段就说清，别等到上传失败
+        if (code && renameSelfCheck(code, (extractMeta(code) || {}).name || '')) {
+          queue.push({
+            e,
+            skip: `与服务端同名${via}「${srv.name}」：${v.why}，但该脚本内部校验自身名称，改名会让它初始化失败 → 未灌入（请先手动删除服务端同名音源，或开启「同名自动替换」）`,
+            matchedByBase: mb
+          })
+        } else queue.push({ e, renameServer: srv, baseName, why: v.why, matchedByBase: mb })
+      } else if (code) queue.push({ e, replaceServer: srv, baseName, why: v.why, matchedByBase: mb })
+      // 要替换但没有本地脚本内容（只能靠 URL 导入）→ 服务端做不了「先删后传」
+      else if (ctx.uniqueName === false) queue.push({ e, why: '没有本地脚本内容，直接按 URL 新增（该平台同名可共存，无需改名）', matchedByBase: mb })
+      else queue.push({ e, renameServer: srv, baseName, why: '没有本地脚本内容，无法先删后传 → 改为改名上传', matchedByBase: mb })
+    }
     for (const e of targets) {
-      const nm = normName(e.lxName || e.scriptName || e.name)
+      const nameForMatch = e.lxName || e.scriptName || e.name
+      const nm = normName(nameForMatch)
+      const eBase = baseNameKey(nameForMatch)
       if (!e.url || e.fromServer) {
         // 服务端原生音源本来就在服务端上，重新上传只会制造重复条目
         queue.push({ e, skip: '服务端原生音源，无需灌入' })
@@ -2751,37 +2874,11 @@ class Hunter {
       } else if (nm && nbest[nm] && nbest[nm] !== e) {
         queue.push({ e, skip: `与本次所选的「${nbest[nm].scriptName || nbest[nm].name}」同名（视为同一音源新旧版本），跳过` })
       } else if (nm && serverByName[nm]) {
-        // 同名音源：交给 sameNameVerdict 统一裁决（规则与理由都写在那个函数上）
-        // 服务端 list 只有声明值，回放本地账本里「当年灌进去时那份」的打分快照，
-        // 否则第三层（音质档）永远没有可比的另一侧。
-        const srvRaw = serverByName[nm]
-        const snap = (ctx.serverScore && srvRaw && srvRaw.id != null) ? ctx.serverScore[srvRaw.id] : null
-        const srv = (snap && !snap.stale) ? Object.assign({}, srvRaw, { qualityProxy: snap }) : srvRaw
-        const code = codeCache[e.id]
-        // 同名音源一律走同一套裁决（含 MusicSync）—— 同名/同内容该怎么处理与平台无关，
-        // 区别只有「要不要改名」：名字不是 key 的平台（MusicSync）根本不需要改，
-        // 把本地这份作为独立条目加上去即可（改名不但没用，还会破坏脚本自检）。
-        const v = this.sameNameVerdict(e, srv, code, cfg, { ledger: ledger[e.id] || null })
-        const baseName = e.lxName || e.scriptName || e.name
-        if (v.act === 'synced') queue.push({ e, sameContentServer: srv, why: v.why })
-        else if (v.act === 'skip') queue.push({ e, skip: `与服务端同名「${srv.name}」：${v.why}` })
-        else if (v.act === 'rename' && ctx.uniqueName === false) {
-          queue.push({
-            e,
-            why: `同名裁决：${v.why}。该平台同名音源可共存（服务端不按名字区分），直接新增为独立条目（不改名）`
-          })
-        } else if (v.act === 'rename') {
-          // 改名安全阀前置：脚本自检名字的音源改名会变成坏源，规划阶段就说清，别等到上传失败
-          if (code && renameSelfCheck(code, (extractMeta(code) || {}).name || '')) {
-            queue.push({
-              e,
-              skip: `与服务端同名「${srv.name}」：${v.why}，但该脚本内部校验自身名称，改名会让它初始化失败 → 未灌入（请先手动删除服务端同名音源，或开启「同名自动替换」）`
-            })
-          } else queue.push({ e, renameServer: srv, baseName, why: v.why })
-        } else if (code) queue.push({ e, replaceServer: srv, baseName, why: v.why })
-        // 要替换但没有本地脚本内容（只能靠 URL 导入）→ 服务端做不了「先删后传」
-        else if (ctx.uniqueName === false) queue.push({ e, why: '没有本地脚本内容，直接按 URL 新增（该平台同名可共存，无需改名）' })
-        else queue.push({ e, renameServer: srv, baseName, why: '没有本地脚本内容，无法先删后传 → 改为改名上传' })
+        planSameName(e, serverByName[nm], false)
+      } else if (eBase && serverByBase[eBase]) {
+        // 精确同名没命中，但「剥掉版本号后同名」命中：作者把版本写进 @name 的常态。
+        // 不加这一层，每次升级都会在服务端新起一条、旧条还 enabled（P-1404 实测）。
+        planSameName(e, serverByBase[eBase], true)
       } else {
         // 本地账本有此内容、但服务端上已经没了（用户手动删过/服务端重置）→ 重新灌入
         const rec = e.contentHash ? importedRecs[e.contentHash] : null

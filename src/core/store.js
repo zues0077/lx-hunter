@@ -278,6 +278,71 @@ class Store {
   saveDb() { return this._write(this.dbFile, this.db) }
   saveImported() { return this._write(this.importedFile, this.imported) }
 
+  // ---------------- 脚本正文副本（v1.12.7） ----------------
+  // 为什么留副本：服务端 list 不回脚本正文，也不回逐平台实测结论（`/api/custom-source/list`
+  // 只给 name/version/homepage/size/supportedSources）。要判断「服务端那条现在到底怎么样」，
+  // 唯一可行的是本地留一份**当初灌进去的那份正文**，用于：
+  //   1) 与服务端 size 对账 —— 不符说明服务端已被换过，本地打分快照不再代表它；
+  //   2) 需要时在本地沙箱复测（走的是同一套 checker，不改服务端）。
+  // 按 contentHash 命名，天然去重；单条约 50KB，1400 条约 70MB。
+  scriptDir() {
+    const d = path.join(this.dir, 'scripts')
+    try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }) } catch (e) { /* 目录建不出来就退化为不落档 */ }
+    return d
+  }
+
+  /**
+   * 只接受 sha256 hex（防路径穿越），且**不做任何 IO** —— 批量对账时会被调用上千次，
+   * 每次都 mkdir/exists 检查会白算几千次系统调用。建目录交给 scriptDir()/archiveScript。
+   */
+  _scriptPath(hash) {
+    const h = String(hash || '')
+    if (!/^[0-9a-f]{16,64}$/i.test(h)) return ''
+    return path.join(this.dir, 'scripts', h + '.js')
+  }
+
+  /** 落档（已存在则跳过：同内容不同条目不重复写） */
+  archiveScript(hash, code) {
+    if (typeof code !== 'string' || !code) return false
+    const f = this._scriptPath(hash)
+    if (!f) return false
+    this.scriptDir()
+    try {
+      if (fs.existsSync(f) && fs.statSync(f).size === Buffer.byteLength(code, 'utf8')) return true
+      fs.writeFileSync(f, code, 'utf8')
+      return true
+    } catch (e) { return false }
+  }
+
+  readScript(hash) {
+    const f = this._scriptPath(hash)
+    if (!f) return null
+    try { return fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null } catch (e) { return null }
+  }
+
+  /** 副本字节数；没有副本返回 0（0 表示「不知道」，调用方不能据此判定不符） */
+  scriptSize(hash) {
+    const f = this._scriptPath(hash)
+    if (!f) return 0
+    try { return fs.existsSync(f) ? fs.statSync(f).size : 0 } catch (e) { return 0 }
+  }
+
+  /**
+   * 存量补档：把本地库里已经存着正文（压缩包内脚本 / 采集时保存过 code）的条目
+   * 按 contentHash 复制一份到副本目录。零网络，纯本地搬运。
+   * @returns {{archived:number, skipped:number}}
+   */
+  backfillScripts() {
+    let archived = 0, skipped = 0
+    for (const e of Object.values(this.db.sources || {})) {
+      if (!e || !e.contentHash || typeof e.code !== 'string' || !e.code) { skipped++; continue }
+      if (this.scriptSize(e.contentHash) > 0) { skipped++; continue }
+      if (this.archiveScript(e.contentHash, e.code)) archived++
+      else skipped++
+    }
+    return { archived, skipped }
+  }
+
   addSources(items) {
     let added = 0
     for (const it of this._undeleted(items)) {
