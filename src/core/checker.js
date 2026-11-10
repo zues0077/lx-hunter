@@ -376,10 +376,11 @@ function aggregateMetrics(platforms, srcDefs) {
   }
   const lat = okLat.length ? okLat : allLat
   lat.sort((a, b) => a - b)
-  const pct = arr => {
+  const pctl = (arr, p) => {
     if (!arr.length) return null
-    const i = Math.floor((arr.length - 1) * 0.5)
-    return Math.round((arr[i] + arr[Math.ceil((arr.length - 1) * 0.5)]) / 2)
+    const idx = (arr.length - 1) * p
+    const lo = Math.floor(idx), hi = Math.ceil(idx)
+    return Math.round(arr[lo] + (arr[hi] - arr[lo]) * (idx - lo))
   }
   return {
     attempts, successes, playable,
@@ -388,7 +389,7 @@ function aggregateMetrics(platforms, srcDefs) {
     // 所以两套比率都留档，由 quality.js 决定权重，绝不在采集层就把假可播当成功。
     successRate: attempts > 0 ? successes / attempts : null,
     playableRate: attempts > 0 ? playable / attempts : null,
-    p50LatencyMs: pct(lat), p90LatencyMs: null,
+    p50LatencyMs: pctl(lat, 0.5), p90LatencyMs: pctl(lat, 0.9),
     samples: lat.length,
     okSamples: okLat.length,
     qualityUsed, qualityDeclared

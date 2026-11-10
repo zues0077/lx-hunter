@@ -2397,7 +2397,14 @@ class Hunter {
     // 综合评分才真正参与；否则明确降级为分层硬判据，绝不假装两边都测过。
     const srvDeep = srv.deep || srv.qualityProxy || null
     const qTarget = srvDeep ? Object.assign({}, srv, { deep: srvDeep }) : srv
-    const qualityMode = srvDeep ? 'composite' : 'layered-fallback(服务端无实测证据)'
+    const srvQualitySrc = srvDeep ? '服务端侧证据来自 lx-hunter 本地质量代理' : '服务端侧无实测证据（分层回落）'
+    // 「未测」≠「不支持」：untested/pending 才是真没跑过；skipped 是脚本压根没注册该平台，
+    // 属于已知事实而非证据缺口，不能算进来，否则几乎所有源都会被判成「证据不足」。
+    const deepPlats = (e.deep && e.deep.platforms) || {}
+    const untestedN = Object.values(deepPlats).filter(p => {
+      const st = String((p || {}).status || '')
+      return st === 'untested' || st === 'pending'
+    }).length
 
     if (provenSame && lv && sv) {
       if (vc > 0) {
@@ -2410,18 +2417,25 @@ class Hunter {
           return { act: 'replace', why: `同仓库同名，本地版本更高且质量不劣（${qd.mode}，分差 ${qd.a.score !== null && qd.b.score !== null ? Math.abs(qd.a.score - qd.b.score).toFixed(3) : 'n/a'}）→ 留新删旧（删旧装新）` }
         }
         if (srvN > 0 && newN >= 0 && newN < srvN) {
-          return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}；${qualityMode}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
+          return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}；${srvQualitySrc}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
         }
-        return { act: 'replace', why: `同仓库同名，本地版本更高（${localName} > ${srv.name}；${qualityMode}）→ 留新删旧（删旧装新）` }
+        return { act: 'replace', why: `同仓库同名，本地版本更高（${localName} > ${srv.name}；${srvQualitySrc}）→ 留新删旧（删旧装新）` }
       }
       return { act: 'skip', why: `同仓库同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
     }
     if (provenDifferent) {
-      if (!checked) {
-        return { act: 'rename', why: '跨仓库同名但本地未实测 → 无法按质量裁决，改名并存（请先做全平台检测）' }
+      // 22:21 审计：跨仓库「留优删差」是要删服务端条目的不可逆操作，
+      // 必须双方证据齐备。未实测 / 快速模式留下 untested 平台时，综合分只由
+      // 「平台数 + 音质档」凑出来（覆盖度 0.6 也能过门槛），拿它删源不科学。
+      // 这类情况一律改名并存并提示全平台重测，绝不 replace/skip 掉任何一方。
+      if (!checked || untestedN > 0) {
+        return {
+          act: 'rename',
+          why: `跨仓库同名但本地证据不足（${!checked ? '未实测/未做深检' : untestedN + ' 个平台未实测（快速模式）'}）→ 不按综合评分删任何一方，改名并存（请先做全平台检测）`
+        }
       }
       const vd = scoreVerdict(e, qTarget, qopts)
-      const note = `本地 [${vd.a.desc}] vs 服务端 [${vd.b.desc}]｜模式 ${vd.mode}｜${qualityMode}`
+      const note = `本地 [${vd.a.desc}] vs 服务端 [${vd.b.desc}]｜模式 ${vd.mode}｜${srvQualitySrc}`
       if (vd.cmp > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 综合质量更优（${note}）→ 留优删差（删旧装新）` }
       if (vd.cmp < 0) return { act: 'skip', why: `跨仓库同名：服务端现条目质量更优（${note}）→ 保留服务端，本地不灌` }
       return { act: 'rename', why: `跨仓库同名但质量判据平手（${note}）→ 不删任何一方，改名并存` }

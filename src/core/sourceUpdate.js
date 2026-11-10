@@ -242,7 +242,18 @@ function pairSources(serverList, candidates, opts) {
           'insufficient-evidence')
       }
       if (c.usablePlatforms.length < s.supportedSources.length) {
-        return finish('unsafe', '服务端现条目支持平台更多 → 保留服务端', 'fewer-platforms')
+        if (relation === 'cross-repo') {
+          // 22:21 审计：服务端 supportedSources 是脚本「声明值」，lx-hunter 是「实测可用值」，
+          // 两者口径不同，不能直接比多少来判「服务端更好」。跨仓库时交给下面的
+          // 综合质量裁决（只报告），否则 evidence.quality 永远不可达、功能等于没落地。
+          item.evidence.declaredVsMeasured = {
+            serverDeclared: s.supportedSources.length,
+            localUsable: c.usablePlatforms.length,
+            note: '声明值 vs 实测值不可直接比；综合评分在灌入链路执行'
+          }
+        } else {
+          return finish('unsafe', '服务端现条目支持平台更多 → 保留服务端', 'fewer-platforms')
+        }
       }
     }
 

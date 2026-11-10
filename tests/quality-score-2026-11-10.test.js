@@ -6,6 +6,8 @@
 const assert = require('assert')
 const Q = require('../src/core/quality')
 const C = require('../src/core/checker')
+const { Hunter } = require('../src/core/hunter')
+const U = require('../src/core/sourceUpdate')
 
 let pass = 0, fail = 0
 function ok(name, cond, extra) {
@@ -154,6 +156,60 @@ console.log('=== G. 设置项透传 ===')
   ok('config 权重生效并归一化', Math.abs(o.weights.platforms - 0.7) < 1e-9)
   ok('minSamples / margin 透传', o.minSamples === 5 && o.scoreMargin === 0.2)
   ok('空 config 走默认', Q.optsFromConfig({}).minSamples === Q.DEFAULT_OPTS.minSamples)
+}
+
+console.log('=== H. 生产路径回归：optsFromConfig 不能用 undefined 毁掉默认值（22:21 审计根因） ===')
+{
+  // 旧 bug：optsFromConfig({}) 把 minCoverage/scoreMargin/latencyCapMs 传成 undefined，
+  // Object.assign 覆盖 DEFAULT_OPTS 后被 `||` 兜底改成 0 / 0 / 8000，
+  // 于是「服务端只有声明值」也能算出综合分并参与删源。单测若只测不传 opts 的路径就全绿。
+  const o = Q.optsFromConfig({})
+  ok('部分 config 下 minCoverage 仍为 0.5', o.minCoverage === 0.5, 'got ' + o.minCoverage)
+  ok('部分 config 下 scoreMargin 仍为 0.08', o.scoreMargin === 0.08, 'got ' + o.scoreMargin)
+  ok('部分 config 下 latencyCapMs 仍为 3000', o.latencyCapMs === 3000, 'got ' + o.latencyCapMs)
+  ok('部分 config 下 minSamples 仍为 3', o.minSamples === 3)
+  const srv = { supportedSources: ['wy', 'tx', 'kw'] }
+  ok('生产 opts 下服务端声明条目判证据不足（score=null）', Q.qualityScore(srv, o).score === null)
+  ok('生产 opts 下微小分差仍判平手', Q.compareQuality(mk({ usable: 4, metrics: { p50LatencyMs: 1000 } }), mk({ usable: 4, metrics: { p50LatencyMs: 1050 } }), o) === 0)
+  ok('显式 scoreMargin=0 仍可覆盖（0 是合法值）', Q.optsFromConfig({ qualityScoreMargin: 0 }).scoreMargin === 0)
+  ok('weights 传字符串不会污染权重键', Object.keys(Q.optsFromConfig({ qualityWeights: 'oops' }).weights).length === 4)
+  ok('只给 playableRate 时不会被算成可播 0 次', Q.qualityScore({
+    deep: { checkedAt: 1, platforms: { wy: { status: 'usable' } }, metrics: { attempts: 6, successes: 6, playableRate: 0.5, p50LatencyMs: 200, samples: 6, qualityDeclared: ['320k'] } }
+  }).parts.success.raw > 0.5)
+}
+
+console.log('=== I. 三条裁决在生产 opts 下的护栏 ===')
+{
+  const H = new Hunter({ config: {} }, () => {})
+  const srv = { id: 'Demo Source v1.0.js', name: 'Demo Source v1.0', supportedSources: ['wy', 'tx', 'kw'], version: '1.0', repository: 'https://github.com/bbb/demo' }
+  const quick = {
+    id: 'c1', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', name: 'Demo Source v1.0',
+    repository: 'https://github.com/aaa/demo',
+    deep: {
+      checkedAt: Date.now(),
+      platforms: { wy: { status: 'usable', verified: true }, tx: { status: 'untested' }, kw: { status: 'untested' }, kg: { status: 'untested' }, mg: { status: 'untested' } },
+      metrics: { attempts: 2, successes: 2, playable: 2, p50LatencyMs: 150, samples: 2, qualityUsed: ['320k'], qualityDeclared: ['320k'] }
+    }
+  }
+  const v = H.sameNameVerdict(quick, srv, '/* code */', {})
+  ok('跨仓库 + 快速模式未实测 → rename 改名并存（绝不删任何一方）', v.act === 'rename', v.act + ' | ' + v.why)
+  ok('理由明确提示全平台检测', /全平台/.test(v.why))
+
+  const full = Object.assign({}, quick, { deep: Object.assign({}, quick.deep, {
+    platforms: { wy: { status: 'usable', verified: true }, tx: { status: 'usable', verified: true }, kw: { status: 'failed' }, kg: { status: 'failed' }, mg: { status: 'skipped' } },
+    metrics: { attempts: 6, successes: 6, playable: 6, p50LatencyMs: 200, samples: 6, qualityUsed: ['320k'], qualityDeclared: ['320k'] }
+  }) })
+  const v2 = H.sameNameVerdict(full, srv, '/* code */', {})
+  ok('全平台实测（skipped 不算缺证据）→ 进入质量裁决而非被未测护栏挡下', v2.act !== 'rename', v2.act + ' | ' + v2.why)
+  ok('服务端只有声明值时保守不删（skip 或平手改名，绝不 replace）', v2.act !== 'replace', v2.act + ' | ' + v2.why)
+
+  const cross = U.pairSources(
+    [{ id: 'Demo Source v1.0.js', name: 'Demo Source v1.0', version: '1.0', repository: 'https://github.com/aaa/demo', supportedSources: ['wy', 'tx'], enabled: true }],
+    [{ id: 'c1', name: 'Demo Source v1.0', scriptName: 'Demo Source v1.0', scriptVersion: '1.0', repository: 'https://github.com/ccc/demo', deep: full.deep }],
+    {}
+  )[0]
+  ok('跨仓库巡检不再被 fewer-platforms 提前拦死', cross.evidence.quality !== undefined, cross.evidence.via + ' | ' + cross.reason.slice(0, 80))
+  ok('跨仓库巡检如实标记 layered-fallback', cross.evidence.quality && cross.evidence.quality.mode === 'layered-fallback')
 }
 
 console.log('\nRESULT ' + pass + ' PASS / ' + fail + ' FAIL')

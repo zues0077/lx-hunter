@@ -64,8 +64,21 @@ const DEFAULT_OPTS = {
 }
 
 function resolveOpts(opts) {
-  const o = Object.assign({}, DEFAULT_OPTS, opts || {})
-  const w = Object.assign({}, DEFAULT_WEIGHTS, (opts && opts.weights) || {})
+  const src = opts || {}
+  // 关键（22:21 审计）：**undefined 不能覆盖默认值**。
+  // 旧写法 Object.assign({}, DEFAULT_OPTS, src) 会把 optsFromConfig 里没设置的
+  // minCoverage/scoreMargin/latencyCapMs 覆盖成 undefined，再被下面的 `|| 兜底`
+  // 改成 0 / 0 / 8000 —— 于是生产路径下「覆盖度门槛」「分差噪声带」全部失效，
+  // 服务端只有声明值也算得出综合分并参与删源，而单测（不传 opts）却全绿。
+  // 现在：只接受「显式提供且是有限数字」的覆盖，其余一律保留 DEFAULT_OPTS。
+  const o = Object.assign({}, DEFAULT_OPTS)
+  for (const k of ['minSamples', 'latencyCapMs', 'scoreMargin', 'minCoverage']) {
+    if (src[k] === undefined || src[k] === null || src[k] === '') continue
+    const v = Number(src[k])
+    if (Number.isFinite(v)) o[k] = v
+  }
+  const rawW = (src.weights && typeof src.weights === 'object' && !Array.isArray(src.weights)) ? src.weights : {}
+  const w = Object.assign({}, DEFAULT_WEIGHTS, rawW)
   // 只接受有限非负权重；全 0 时退回默认，避免除零把所有条目判成一样
   let sum = 0
   for (const k of Object.keys(DEFAULT_WEIGHTS)) {
@@ -73,13 +86,13 @@ function resolveOpts(opts) {
     w[k] = Number.isFinite(v) && v >= 0 ? v : DEFAULT_WEIGHTS[k]
     sum += w[k]
   }
-  if (sum <= 0) return Object.assign({}, DEFAULT_OPTS, { weights: Object.assign({}, DEFAULT_WEIGHTS) })
-  for (const k of Object.keys(w)) w[k] = w[k] / sum
+  if (sum <= 0) return resolveOpts({})
+  for (const k of Object.keys(DEFAULT_WEIGHTS)) w[k] = w[k] / sum
   o.weights = w
-  o.minSamples = Math.max(1, Number(o.minSamples) || 3)
-  o.latencyCapMs = Math.max(500, Number(o.latencyCapMs) || 8000)
-  o.scoreMargin = Math.max(0, Math.min(0.5, Number(o.scoreMargin) || 0))
-  o.minCoverage = Math.max(0, Math.min(1, Number(o.minCoverage) || 0))
+  o.minSamples = Math.max(1, o.minSamples)
+  o.latencyCapMs = Math.max(500, o.latencyCapMs)
+  o.scoreMargin = Math.max(0, Math.min(0.5, o.scoreMargin))
+  o.minCoverage = Math.max(0, Math.min(1, o.minCoverage))
   return o
 }
 
@@ -97,7 +110,9 @@ function optsFromConfig(cfg) {
 
 function qualityProfile(entry) {
   const e = entry || {}
-  if (e.usable !== undefined && e.verified !== undefined && e.__profile) return e
+  // 已是 profile 对象则原样返回（外部可直接传 qualityProfile 的结果）。
+  // 真实条目虽有 e.usable 布尔，但不会同时有 verified 字段，故不会误命中。
+  if (e.usable !== undefined && e.verified !== undefined) return e
   const deep = e.deep || null
   const plats = deep && deep.platforms ? deep.platforms : null
   const metrics = (deep && deep.metrics) || e.metrics || null
@@ -153,7 +168,11 @@ function qualityScore(entry, opts) {
   const attempts = Number(m.attempts) || 0
   const successes = Number(m.successes) || 0
   const hasPlayable = m.playable !== undefined || m.playableRate !== undefined
-  const playable = hasPlayable ? (Number(m.playable) || 0) : null
+  // 兼容只落 playableRate（没有逐次计数）的历史/外部数据：按 attempts 反推个数，
+  // 绝不把「有比率」当成「可播 0 次」。
+  const playable = m.playable !== undefined && m.playable !== null
+    ? Number(m.playable)
+    : (typeof m.playableRate === 'number' ? m.playableRate * attempts : 0)
   const linkRate = attempts > 0 ? successes / attempts : (typeof m.successRate === 'number' ? m.successRate : null)
   const sr = hasPlayable && linkRate !== null
     ? 0.7 * (playable / attempts) + 0.3 * linkRate
@@ -162,7 +181,9 @@ function qualityScore(entry, opts) {
   parts.success = {
     raw: srOk ? clamp01(sr) : null, w: w.success, valid: srOk,
     detail: srOk
-      ? `取链 可播 ${playable === null ? '?' : playable}/${attempts}、链接 ${successes}/${attempts} → ${(sr * 100).toFixed(0)}%`
+      ? (hasPlayable
+          ? `取链 可播 ${Number(playable).toFixed(0)}/${attempts}、链接 ${successes}/${attempts} → ${(sr * 100).toFixed(0)}%`
+          : `取链链接 ${successes}/${attempts} = ${(sr * 100).toFixed(0)}%（旧数据无可播计数）`)
       : `样本不足（${attempts}/${o.minSamples}）`
   }
   if (!srOk) reasons.push('取链成功率：样本不足')
