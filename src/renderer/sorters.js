@@ -116,9 +116,10 @@
     }
     const raw = Number(m.p50LatencyMs)
     if (!(raw > 0)) return '<span class="qbrief unscored" title="深度检测已完成，但没有取到可用于计时的成功请求">无延迟样本</span>'
-    const carried = m.carriedFrom ? '（p50 来自上次深度检测 ' + new Date(m.carriedFrom).toLocaleString() + '）' : ''
+    // 不再有「p50 来自上次深度检测」这种继承：初筛/巡检一律清分（2026-11-11 00:38 拍板），
+    // 能显示出来的 p50 一定是这一轮深度检测测出来的。
     return '<span class="qbrief" title="排序依据：可用平台 ' + n + ' 个 → p50 延迟 ' +
-      Math.round(raw) + 'ms → 最高可播档（需专项补测）' + carried + '">' + n + '平台 · ' + Math.round(raw) + 'ms</span>'
+      Math.round(raw) + 'ms → 最高可播档（需专项补测）">' + n + '平台 · ' + Math.round(raw) + 'ms</span>'
   }
 
   /** 质量排序键 → 比较器；全等时按名称兜底，保证顺序稳定。 */

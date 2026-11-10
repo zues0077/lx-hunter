@@ -11,7 +11,10 @@
  * 本文件守四件事：
  *  1. 快速模式产出的 metrics 必须被标成 depth='quick'，且 quality 层不拿它当证据；
  *  2. 深度检测（full）才产出可比数据；老记录（无 depth）应按「未打分」处理；
- *  3. 初筛/巡检不得抹掉已有的打分结果（否则分数凭空消失）；
+ *  3. 初筛/巡检**必须清分**（不继承上一轮深度检测的分数）——
+ *     2026-11-11 00:38 用户拍板：评分只是「刚测出来的参考排序」，不长期留存；
+ *     巡检默认 12h 一次，继承旧分会出现「2 平台（今天）+ 300ms/5 次全成功（昨天）」
+ *     这种自相矛盾的成绩，源已经坏了却还挂着高分排序；
  *  4. 同名冲突时若本地已打分、只缺音质档 → 触发补测；未打分的条目不允许补测。
  */
 const assert = require('assert')
@@ -94,22 +97,33 @@ console.log('=== C. 排序视图：未打分排在打分之后 ===')
      Q.sortKey(unscored)[1] === Number.MAX_SAFE_INTEGER && Q.sortKey(scored)[1] === 900)
 }
 
-console.log('=== D. 初筛/巡检不得抹掉已有打分 ===')
+console.log('=== D. 初筛/巡检一律清分（不继承上一轮打分） ===')
 {
-  const prev = mk({ usable: 4, metrics: { depth: 'full', p50LatencyMs: 240, qualityMax: 'flac', samples: 8 } })
-  const quick = mk({ usable: 1, metrics: { depth: 'quick', p50LatencyMs: 190, samples: 1 } })
-  const kept = proto._keepScoredMetrics(prev.deep, quick.deep)
-  ok('初筛覆盖后仍保留 full 打分', kept.metrics.depth === 'full' && kept.metrics.p50LatencyMs === 240, JSON.stringify(kept.metrics))
-  ok('保留的音质档没丢', kept.metrics.qualityMax === 'flac')
-  ok('留痕 carriedFrom（能看出 p50 来自哪次深度检测）', !!kept.metrics.carriedFrom)
+  const S = require('../src/renderer/sorters.js')
+  ok('Hunter 不再提供分数继承方法（防止旧行为被加回来）', typeof proto._keepScoredMetrics === 'undefined')
 
-  const fresh = mk({ usable: 2, metrics: { depth: 'quick', p50LatencyMs: 300 } })
-  const noPrev = proto._keepScoredMetrics(null, fresh.deep)
-  ok('没有历史打分时不伪造（仍是 quick）', noPrev.metrics.depth === 'quick')
+  // 场景：昨天深度检测 5 平台可用、p50=240ms；今天巡检只剩 2 平台可用。
+  const prev = mk({ usable: 5, metrics: { depth: 'full', p50LatencyMs: 240, qualityMax: 'flac', samples: 8 } })
+  const quick = mk({ usable: 2, metrics: { depth: 'quick', p50LatencyMs: 190, samples: 1 } })
+  const entry = { deep: prev.deep }
+  entry.deep = quick.deep          // 检测写回就是 e.deep = d，无任何继承
+  const pr = Q.profile(entry)
+  ok('巡检覆盖后回到「未打分」', pr.scored === false, JSON.stringify(pr))
+  ok('旧 p50 不再参与计算', pr.p50 === null)
+  ok('旧音质档不再参与计算', pr.tier === null)
+  ok('平台数用本轮真实值（2 个，不是昨天的 5 个）', pr.usable === 2)
+  ok('摘要显示「未打分」而不是昨天的 p50', /未打分/.test(S.qualityBriefHtml(entry)), S.qualityBriefHtml(entry))
+  ok('排序沉到同平台数已打分的之后', Q.compareSortKey(entry, mk({ usable: 2, metrics: { depth: 'full', p50LatencyMs: 900 } })) > 0)
 
+  // 巡检把源打成不可用（0 平台）时，也不能留下任何分数痕迹
+  const dead = mk({ usable: 0, metrics: { depth: 'quick', p50LatencyMs: 120, samples: 1 } })
+  const deadEntry = { deep: prev.deep }
+  deadEntry.deep = dead.deep
+  ok('打成不可用后 scored=false 且摘要为空', Q.profile(deadEntry).scored === false && S.qualityBriefHtml(deadEntry) === '')
+
+  // 深度检测自己照常打分（清分只针对非 full 的检测）
   const full2 = mk({ usable: 5, metrics: { depth: 'full', p50LatencyMs: 120 } })
-  const overwritten = proto._keepScoredMetrics(prev.deep, full2.deep)
-  ok('新的深度检测结果照常覆盖旧的', overwritten.metrics.p50LatencyMs === 120 && overwritten.metrics.depth === 'full')
+  ok('深度检测结果照常打分', Q.profile({ deep: full2.deep }).scored === true && Q.profile({ deep: full2.deep }).p50 === 120)
 }
 
 console.log('=== E. 服务端侧打分快照（同名比较的另一侧证据） ===')

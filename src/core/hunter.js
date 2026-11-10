@@ -1038,23 +1038,6 @@ class Hunter {
    *  - 都没检测过 → 按「有更新 > 时间 > 版本号 > id」兜底（检测前先临时占位，
    *    检测完成后 runCheck 的同名即时去重会按上面三条重新裁决）
    */
-  /**
-   * 非打分档检测（初筛 / 定时巡检）不得抹掉已有的打分结果。
-   *
-   * 背景：`e.deep` 是整体替换。用户点过一次「深度检测（打分）」后，
-   * 再点普通「检测」或第二天巡检跑一轮，就会把带 p50 的完整 metrics 覆盖成
-   * 快速模式的 1 个样本 ⇒ 分数凭空消失、排序表退回「未打分」，用户只会以为功能坏了。
-   * 做法：保留上一轮 `depth==='full'` 的 metrics 并留痕 `carriedFrom`（那次深度检测时间），
-   * 平台徽章仍以本轮结果为准（检测结论本身必须更新，不能因为要保分数就不更新可用性）。
-   */
-  _keepScoredMetrics(prevDeep, d) {
-    const prevM = prevDeep && prevDeep.metrics
-    if (d && d.metrics && d.metrics.depth !== 'full' && prevM && prevM.depth === 'full') {
-      d.metrics = Object.assign({}, prevM, { carriedFrom: prevM.carriedFrom || prevDeep.checkedAt || null })
-    }
-    return d
-  }
-
   betterKeeper(a, b) {
     const da = a && a.deep && a.deep.checkedAt ? a.deep : null
     const db = b && b.deep && b.deep.checkedAt ? b.deep : null
@@ -1639,7 +1622,12 @@ class Hunter {
                 // 取消：绝不覆盖旧的好结果；旧结果不存在但部分平台已可用时才采用部分结果
                 if (!e.deep && usableCount(d) > 0) e.deep = d
               } else {
-                e.deep = this._keepScoredMetrics(e.deep, d)
+                // 非打分档检测（初筛）**直接覆盖**，不继承上一轮的分数。
+                // 2026-11-11 00:38 用户拍板：评分只是「刚测出来的参考排序」，不长期留存。
+                // 之前的 _keepScoredMetrics 会把旧 metrics（5 次全成功、旧 p50）拼到新
+                // platforms（可能只剩 2 个可用）上 ⇒ 出现「2 平台 · 300ms（来自昨天）」
+                // 这种自相矛盾的成绩，源明明已经坏了却还挂着高分排序。
+                e.deep = d
               }
               if (rec) { rec.deep = e.deep || d; if (rec.resolve) { rec.resolve(rec.deep); rec.resolve = null } }
               e.usable = usableCount(e) > 0
@@ -2923,7 +2911,9 @@ class Hunter {
             // 保留主检结果，免得一次限流就把库里的「可用」翻成「不可用」（服务端动作由 streak 把关）。
             const keepPrevUsable = !contentChanged && prevUsable && (j.verdict === 'suspect' || (j.verdict === 'unknown' && !d.cancelled))
             if (!keepPrevUsable && !d.cancelled) {
-              e.deep = this._keepScoredMetrics(d0, d)
+              // 巡检同样不继承分数：这一轮是快速模式（depth=quick），
+              // 跑完就该回到「未打分」，而不是拿 N 天前的 p50 继续排。
+              e.deep = d
               e.usable = usableCount(d) > 0
             }
             if (keepPrevUsable) note += '；库内保留主检的可用结果'
