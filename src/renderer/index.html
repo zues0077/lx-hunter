@@ -179,9 +179,21 @@
         <div class="head-actions">
           <button class="btn" id="btnSyncServer" title="把服务端已有音源全部纳入本工具管理，算作「已灌入」（同名本地候选会标记已灌入，服务端原生音源建占位条目）">同步服务端音源</button>
           <button class="btn" id="btnPatrol">健康巡检</button>
+          <button class="btn" id="btnScanUpdates" title="dry-run：只读扫描服务端已添加的音源，列出可更新 / 已是最新 / 出处不明 / 不建议动，不写入任何数据">检查更新（dry-run）</button>
           <button class="btn" id="btnRefreshInstalled">刷新</button>
         </div>
       </header>
+      <!-- 已添加源更新 · dry-run（v1.12.6-alpha，data-feature 供 246 容器静态断言） -->
+      <div class="card" id="updCard" data-feature="source-update-dry-run" data-build="2026-11-10" hidden>
+        <div class="toolbar">
+          <strong>已添加源更新 · dry-run 报告</strong>
+          <span class="muted" id="updSummary"></span>
+          <label class="chk inline"><input type="checkbox" id="updIncludeHubs"><span>含采集站在线清单（只读）</span></label>
+          <button class="btn ghost" id="btnUpdRefresh">重新扫描</button>
+        </div>
+        <div id="updResult" class="muted">尚未扫描</div>
+        <p class="muted" id="updNotes" style="font-size:12px;line-height:1.6"></p>
+      </div>
       <div class="card" id="insCard">
         <!-- 断线时保留上次成功读取的列表，并用黄条说明它是快照（v1.10.2） -->
         <div class="snap-banner" id="insSnapshot" hidden></div>

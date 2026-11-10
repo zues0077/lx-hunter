@@ -3521,3 +3521,58 @@ async function boot() {
     await boot()
   }
 })()
+
+// ---------------- 已添加源更新（dry-run，2026-11-10） ----------------
+// 只在 Web/Docker 版启用：桌面版没有 /api/source-update/* 路由。
+// 全部只读：扫描只调服务端 list，不执行 validate / delete / upload。
+;(function () {
+  if (!window.LXH_WEB) return
+  const card = document.getElementById('updCard')
+  const btn = document.getElementById('btnScanUpdates')
+  const refresh = document.getElementById('btnUpdRefresh')
+  const hubs = document.getElementById('updIncludeHubs')
+  const box = document.getElementById('updResult')
+  const sum = document.getElementById('updSummary')
+  const notes = document.getElementById('updNotes')
+  if (!card || !btn || !box) return
+  const LABEL = { updatable: '可更新', current: '已是最新', unmatched: '出处不明', unsafe: '不建议动' }
+  const COLOR = { updatable: '#5DCAA5', current: '#B4B2A9', unmatched: '#FAC775', unsafe: '#F09595' }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  }
+  async function scan() {
+    card.hidden = false
+    box.textContent = '扫描中（只读，未写入任何数据）…'
+    btn.disabled = true
+    try {
+      const r = await fetch('/api/source-update/scan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ includeHubs: !!(hubs && hubs.checked) })
+      })
+      const j = await r.json()
+      if (!j.ok) { box.textContent = '扫描失败：' + (j.error || '未知错误'); return }
+      const d = j.data || {}
+      const s = d.summary || {}
+      sum.textContent = `共 ${s.total || 0} 条 · 可更新 ${s.updatable || 0} · 已是最新 ${s.current || 0} · 出处不明 ${s.unmatched || 0} · 不建议动 ${s.unsafe || 0} · B 信号 ${s.bSignals || 0}（dry-run，未写入）`
+      const rows = (d.items || []).map(it => {
+        const c = it.candidate || {}
+        const sig = (it.signals || []).map(x => x.type).join(' / ')
+        return '<div style="padding:7px 0;border-bottom:1px solid rgba(128,128,128,.25)">' +
+          '<span style="color:' + (COLOR[it.verdict] || '#B4B2A9') + '">[' + (LABEL[it.verdict] || it.verdict) + ']</span> ' +
+          '<b>' + esc(it.name || it.id) + '</b> ' +
+          '<span class="muted">owner=' + esc(it.owner) + ' · ' + esc(it.evidence && it.evidence.serverVersion || '-') +
+          ' → ' + esc(it.evidence && it.evidence.candidateVersion || '-') +
+          ' · ' + esc(it.evidence && it.evidence.via || '-') + '</span>' +
+          '<div class="muted" style="font-size:12px">' + esc(it.reason || '') +
+          (sig ? ' ｜ B 信号（仅提示）：' + esc(sig) : '') +
+          (c.id ? ' ｜ 候选 ' + esc(c.id) : '') + '</div></div>'
+      }).join('')
+      box.innerHTML = rows || '<span class="muted">服务端没有已添加音源</span>'
+      notes.textContent = (d.notes || []).join(' ')
+    } catch (e) {
+      box.textContent = '扫描失败：' + String((e && e.message) || e)
+    } finally { btn.disabled = false }
+  }
+  btn.addEventListener('click', scan)
+  if (refresh) refresh.addEventListener('click', scan)
+})()

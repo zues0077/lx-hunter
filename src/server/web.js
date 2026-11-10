@@ -18,6 +18,7 @@ const path = require('path')
 const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours, patrolSchedule } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
+const { createSourceUpdater } = require('../core/sourceUpdate')
 const { DEFAULT_REPOS } = require('../core/crawler')
 const { Auth, SESSION_TTL_MS } = require('../core/auth')
 
@@ -66,6 +67,9 @@ function currentUser(req) {
 // ---------------- 基础状态（与桌面版主进程保持一致） ----------------
 let store = null
 let hunter = null
+// 已添加源更新（dry-run 优先）：按当前平台账号缓存编排器，账号切换即重建
+let updater = null
+let updaterKey = ''
 const logs = []
 const MAX_LOGS = 3000
 const sseClients = new Set()
@@ -707,6 +711,73 @@ route('POST', '/api/source/import-single', guard(async (req, res, ctx) => {
     module: '音源库', level: 'info', at: Date.now()
   })
   return { imported: true, added: r.added, updated: r.updated, entry: Object.assign({}, r.entry, { code: undefined }) }
+}))
+
+// ---------------- 已添加源更新（T1 转 lx-hunter，dry-run 优先） ----------------
+// 起点是「服务端已装着的音源」，不是本地库。scan 只读；apply 必须显式 apply+confirm，
+// 且只处理最近一次 dry-run 判为 updatable 的条目（准入在 core/sourceUpdate.js）。
+function getUpdater() {
+  const svc = getActiveService(store.config)
+  if (!svc) throw new Error(NO_ACCOUNT_ERR)
+  const key = String(svc.acct.id || svc.acct.url || '') + '|' + svc.type
+  if (updater && updaterKey === key) return updater
+  updater = createSourceUpdater({
+    adapter: svc.adapter,
+    acct: svc.acct,
+    getCandidates: async (opts) => {
+      const out = store.getSources().map(s => Object.assign({}, s))
+      // A 的在线反查：只读拉采集站清单（fetchHubCandidates 不写库），
+      // 与 runHubSync / collectFromHubs 不同，绝不污染 sources.json。
+      if (opts && opts.includeHubs) {
+        try {
+          const { fetchHubCandidates } = require('../core/hubfeed')
+          const hubs = (store.config.hubs || []).filter(h => h && h.enabled !== false && h.url)
+          for (const h of hubs) {
+            const r = await fetchHubCandidates(h, Number(opts.hubTimeoutMs || 12000), () => {})
+            const entries = (r && r.ok && Array.isArray(r.entries)) ? r.entries : []
+            for (const c of entries) {
+              out.push({
+                id: 'hub:' + String(c.sha256 || c.url || Math.random()),
+                lxName: c.name || c.title || '', scriptName: c.name || c.title || '',
+                scriptVersion: c.version || '',
+                contentHash: (c.sha256 && String(c.sha256).length === 64) ? String(c.sha256) : null,
+                url: c.url || '', repository: c.repo || c.homepage || h.url || '',
+                deep: null
+              })
+            }
+          }
+        } catch (e) {
+          pushLog({ msg: '采集站只读清单拉取失败（不影响本地候选池）：' + String((e && e.message) || e), module: '源更新', level: 'warn', at: Date.now() })
+        }
+      }
+      return out
+    },
+    log: (msg) => pushLog({ msg, module: '源更新', level: 'info', at: Date.now() })
+  })
+  updaterKey = key
+  return updater
+}
+
+route('POST', '/api/source-update/scan', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  return await getUpdater().scan({
+    owner: b.owner || null,
+    allowVersionOnly: b.allowVersionOnly === true,
+    includeHubs: b.includeHubs === true,
+    hubTimeoutMs: b.hubTimeoutMs,
+    candidateSource: b.includeHubs === true ? 'local-library+hubs' : 'local-library'
+  })
+}))
+
+route('GET', '/api/source-update/last', guard(() => getUpdater().getLastReport()))
+
+route('POST', '/api/source-update/apply', guard(async (req, res, ctx) => {
+  const b = ctx.body || {}
+  // 默认 dry-run：不给 apply+confirm 时 core 层直接抛错，不产生任何写操作
+  return await getUpdater().apply(b.ids, {
+    apply: b.apply === true, confirm: b.confirm === true,
+    owner: b.owner || null, maxAgeMs: b.maxAgeMs
+  })
 }))
 
 // 打开数据目录：Web 版无「资源管理器」概念，返回路径供展示/复制
