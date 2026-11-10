@@ -10,7 +10,7 @@ const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } =
 const { Store } = require('./store')
 // 2026-11-10 科学性复核：版本算法 / 身份键 / 质量判据统一到单一来源，
 // 不再各写一份（详见 src/core/version.js 顶部说明）。
-const { versionKey: versionNum, cmpVersion } = require('./version')
+const { versionKey: versionNum, cmpVersion, verLabel } = require('./version')
 const { normName, candidateRepo, serverRepo, baseNameKey, pickHighestVersion } = require('./identity')
 const { compareVerdict, describeQuality, profile: qualityProfile } = require('./quality')
 
@@ -2495,8 +2495,11 @@ class Hunter {
     // 只读名字的话，「@name 固定、只升 @version」的源两边都取不到版本 →
     // 版本比较整条路径失效，落到第 5 条「同名 + 平台重叠 → replace」，
     // 本地旧版会把服务端新版覆盖掉（纯降级）。
-    const localVer = e.scriptVersion || nameForCmp
-    const srvVer = srv.version || srv.name
+    // 版本文案只显示版本号本身（`verLabel`）：兜底取名字时拿到的是整串
+    // 「LXHE2E 测试源 v1.0.0」，拼进理由会变成「v1.1.0 ≥ LXHE2E 测试源 v1.0.0」。
+    // 比较口径不受影响（versionKey / cmpVersion 都是整串 match 版本号）。
+    const localVer = verLabel(e.scriptVersion || nameForCmp)
+    const srvVer = verLabel(srv.version || srv.name)
     // 1) 同名同内容 → 服务端就是它，标记已灌入即可，不重传。
     //    精确证据：内容 sha256 / 服务端回传的脚本正文全文。
     //    弱证据：字节长度相同 —— 只在「版本号不可比或版本相同」时才允许采信。
@@ -2595,7 +2598,16 @@ class Hunter {
           if (qd.cmp < 0) {
             return { act: 'skip', why: `同仓库同名且本地版本更高，但质量更差（${qd.reason}）→ 不做质量降级替换` }
           }
-          return { act: 'replace', why: `同仓库同名，本地版本更高且质量不劣（${qd.by}：${qd.reason}）→ 留新删旧（删旧装新）` }
+          // 质量平手/不可比时不能照抄 compareVerdict 的 reason —— 平手分支的原文是
+          // 「…→ 平手，不删任何一方」，而这里恰恰要删（同仓库同源、版本更高），
+          // 直接拼进去就成了「平手，不删任何一方 → 留新删旧」的自相矛盾（实测出现过）。
+          if (qd.cmp === 0) {
+            const tail = qd.by === 'tie'
+              ? `质量相当（可用平台数同为 ${newN} 个，延迟与音质档无显著差异）`
+              : `服务端侧质量证据不足、无法比较优劣（${qd.reason}）`
+            return { act: 'replace', why: `同仓库同名，本地版本更高（${localVer} > ${srvVer}），${tail} → 同源以版本为准，留新删旧（删旧装新）` }
+          }
+          return { act: 'replace', why: `同仓库同名，本地版本更高（${localVer} > ${srvVer}）且质量更优（${qd.reason}）→ 留新删旧（删旧装新）` }
         }
         if (srvN > 0 && newN >= 0 && newN < srvN) {
           return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}；${srvQualitySrc}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
@@ -2847,9 +2859,20 @@ class Hunter {
       const nameForMatch = e.lxName || e.scriptName || e.name
       const nm = normName(nameForMatch)
       const eBase = baseNameKey(nameForMatch)
-      if (!e.url || e.fromServer) {
-        // 服务端原生音源本来就在服务端上，重新上传只会制造重复条目
+      if (e.fromServer) {
+        // 服务端同步建的占位条目：它本来就在服务端上，重新上传只会制造重复条目。
         queue.push({ e, skip: '服务端原生音源，无需灌入' })
+      } else if (!e.url && !(typeof e.code === 'string' && e.code)) {
+        // 门槛：只看「本地有没有脚本正文可用」。
+        // 2026-11-11 修：原来写 `!e.url || e.fromServer`，只认 url，把「导入单个音源」加进来的
+        // 私人源（有 code、无 url，addPrivateSource 就是这么存的）误判成「服务端原生音源」直接跳过，
+        // 与巡检门槛 buildPatrolItems 的 `!e.url && typeof e.code !== 'string'` 口径不一致，
+        // 也和界面文案「私人源可手动检测 / 可灌入」自相矛盾。
+        // 安全性：fromServer 已在上一个分支拦掉，且占位条目从不存 code，
+        // 所以放宽后不会把服务端原生源重复上传。
+        // 注意必须是「非空 code」：空串仍是 string，放行会让 codeCache 取不到内容、
+        // 最后拿空 url 去 importUrl —— 必失败，还多一条无意义的结果。
+        queue.push({ e, skip: '既无脚本地址、也无本地脚本正文，无法灌入' })
       } else if (cfg.skipUnusable !== false && !e.usable && e.deep && !e.stale) {
         // stale（上游内容已变待重下）的旧检测结果不作数，放行到指纹/检测流程重新裁决
         queue.push({ e, skip: '本地检测未通过（无可播放平台），跳过' })

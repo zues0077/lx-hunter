@@ -43,4 +43,19 @@ function cmpVersion(a, b) {
   return 0
 }
 
-module.exports = { versionKey, cmpVersion, MIN_SEGMENTS, SEG_WIDTH }
+/**
+ * 取版本串里那段版本号本身，用于**文案展示**（2026-11-11）。
+ *
+ * 起因：版本取值改成「@version 优先、名字兜底」后，兜底拿到的是整串名字
+ * （如「LXHE2E 测试源 v1.0.0」），直接拼进理由就成了
+ * 「v1.1.0 ≥ LXHE2E 测试源 v1.0.0」这种前后不一致的句子。
+ * 比较仍用原串（versionKey 本来就是整串 match，取子串结果一致），只有显示要短。
+ * 解析不出就原样返回 —— 那种情况调用点一般进不到版本文案分支。
+ */
+function verLabel(s) {
+  const raw = String(s == null ? '' : s)
+  const m = raw.match(/[vV]?\d+(?:\.\d+)+/)
+  return m ? m[0] : raw
+}
+
+module.exports = { versionKey, cmpVersion, verLabel, MIN_SEGMENTS, SEG_WIDTH }
