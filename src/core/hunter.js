@@ -927,7 +927,9 @@ class Hunter {
       if (!byName[nm]) { byName[nm] = e; continue }
       const keep = this.betterKeeper(e, byName[nm]) ? e : byName[nm]
       const drop = keep === e ? byName[nm] : e
-      dep(drop, keep, keep.updated ? 'oldVersionUpdated' : 'oldVersion'); res.oldVersion++
+      // v1.12.1：保留方是真版本迭代（有更新标记 / 同仓库更高版本）→ 标「已有更新版本」，
+      // 这样被废的旧版在保留方深检全失效时能被 ②b 翻案恢复
+      dep(drop, keep, this._isNewerIteration(keep, drop) ? 'oldVersionUpdated' : 'oldVersion'); res.oldVersion++
       byName[nm] = keep
     }
     // ②b 检测后的同名二次裁决（v1.7.0 按用户要求：同名内容更新以接口可用度选择）：
@@ -994,9 +996,35 @@ class Hunter {
   }
 
   /**
+   * v1.12.1：keep 是否是 drop 的「真版本迭代」。
+   *  - 弱判定（_isNewerIteration，只用于废弃归类/翻案入口）：keep 带有更新标记，
+   *    或同仓库且 keep 版本号严格更高；
+   *  - 强判定（_isSameRepoNewerVersion，用于 betterKeeper 让位例外）：必须同仓库
+   *    且版本号严格更高——release 资产已预填 tag 版本，未检测的新版也能比。
+   *    `updated` 单独不构成让位理由（旧规则：不能凭「有更新」废掉能用版）；
+   *    跨仓库同名不算迭代——那可能是两个不同脚本撞名。
+   */
+  _isSameRepoNewerVersion(keep, drop) {
+    if (!keep || !drop || !keep.repo || keep.repo !== drop.repo) return false
+    const vk = versionNum(keep.scriptVersion || keep.scriptName || keep.name)
+    if (!vk) return false
+    return vk > versionNum(drop.scriptVersion || drop.scriptName || drop.name)
+  }
+
+  _isNewerIteration(keep, drop) {
+    if (!keep || !drop) return false
+    if (keep.updated) return true
+    return this._isSameRepoNewerVersion(keep, drop)
+  }
+
+  /**
    * 同名/同内容条目的取舍（v1.7.0 按用户要求改为「接口可用度优先」）：
    *  - 双方都深检过 → 可用平台多者留（同为 0 再比新旧，此时更新时间才有意义）
-   *  - 一方实测可用、另一方没检测过 → 留实测可用的（不能凭「有更新」废掉能用版）
+   *  - 一方实测可用、另一方没检测过 → 留实测可用的（不能凭「有更新」废掉能用版）；
+   *    **例外（v1.12.1）**：未检测方与实测方同仓库、且版本号严格更高 → 这是上游
+   *    真发了新版（「只收最新版」设置的本意就是跟进新版），留新版进检测队列，
+   *    旧版废为「同名旧版本（已有更新版本）」。旧版不是直接丢：dedupe ②b 翻案
+   *    兜底——新版深检全失效时会自动恢复旧版，可用性不会凭空丢失。
    *  - 一方实测确认失效（深检 0 平台）、另一方没检测过 → 让位给未检测的（可能是
    *    可用的新版本，等它检测完自然裁决；旧版确认死了留着也没意义）
    *  - 都没检测过 → 按「有更新 > 时间 > 版本号 > id」兜底（检测前先临时占位，
@@ -1012,7 +1040,11 @@ class Hunter {
       // 只有一方检测过：可用 > 未检测 > 确认失效
       const checked = da ? a : b, other = da ? b : a
       const checkedOk = usableCount(da ? { deep: da } : { deep: db }) > 0
-      if (checkedOk) return checked === a
+      if (checkedOk) {
+        // v1.12.1 例外：同仓库严格更高版本的真版本迭代 → 让位给未检测的新版（②b 翻案兜底）
+        if (this._isSameRepoNewerVersion(other, checked)) return other === a
+        return checked === a
+      }
       if (other.updated || !other.deep) return other === a   // 未检测方优先
       return checked === a                                    // 对方也只是旧结果，保持
     }

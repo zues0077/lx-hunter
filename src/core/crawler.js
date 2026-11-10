@@ -776,6 +776,10 @@ async function crawl(opts, onEvent, shouldStop) {
                 url: a.url,
                 assetKey: a.key,
                 name: a.name.replace(/\.js$/i, ''),
+                // v1.12.1：预填 release tag 作版本号（检测后会被脚本 meta.version 覆盖）。
+                // 没有它，未检测的新版条目 versionNum=0，同名裁决/去重没法识别
+                // 「这是上游发的新版本」，会被误当成重复废弃（doujs 8.10.12-r1 实测）。
+                scriptVersion: String(a.tag || '').slice(0, 40),
                 code,
                 contentHash: sha256Str(code),
                 status: 'unknown',

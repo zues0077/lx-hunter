@@ -180,6 +180,30 @@ const upd = h1.store.db.sources['upd-dead'], old = h1.store.db.sources['old-ok2'
 ck('更新版深检失效 → 翻案恢复旧版', !old.deprecated && old.usable === true)
 ck('翻案后旧版（实测可用）被废且原因=失效让位', upd.deprecated === true && upd.dupReason === '同名版本（此版本已失效）')
 
+// ---------- ④b v1.12.1 同仓库真版本迭代（doujs 8.10.12-r1 被误废回归） ----------
+console.log('\n== 同仓库真版本迭代（v1.12.1 例外） ==')
+const eOldOkV = ent('old-rel', { deep: deepOf(3), usable: true, repo: 'zues0077/doujs', scriptVersion: '8.10.3-r1', name: 'doujs' })
+const eNewUnV = ent('new-rel', { deep: null, repo: 'zues0077/doujs', scriptVersion: '8.10.12-r1', name: 'doujs' })
+ck('同仓库+未检测方版本严格更高 → 留新版（真版本迭代，②b 兜底）', H.betterKeeper(eNewUnV, eOldOkV) === true)
+const eXRepo = ent('x-repo', { deep: null, repo: 'other/repo', scriptVersion: '99.0.0', name: 'doujs' })
+ck('跨仓库同名版本更高 → 仍留实测可用旧版（撞名不判迭代）', !H.betterKeeper(eXRepo, eOldOkV))
+const eNoVer = ent('no-ver', { deep: null, repo: 'zues0077/doujs', name: 'doujs' })
+ck('版本号比不出高低 → 仍留实测可用旧版', !H.betterKeeper(eNoVer, eOldOkV))
+ck('低版本未检测挑战高版本实测可用 → 留旧版', !H.betterKeeper(ent('low-v', { deep: null, repo: 'zues0077/doujs', scriptVersion: '8.10.1-r1', name: 'doujs' }), eOldOkV))
+
+// dedupe 全链路：采集后裁决留新版废旧版（带翻案入口）；新版深检失效 → ②b 恢复旧版
+const h3 = mkHunter()
+const oldOkV = ent('doujs-rel-8.10.3', { deep: deepOf(2), usable: true, repo: 'zues0077/doujs', scriptVersion: '8.10.3-r1', scriptName: 'doujs', name: 'doujs' })
+const newUnV = ent('doujs-rel-8.10.12', { deep: null, repo: 'zues0077/doujs', scriptVersion: '8.10.12-r1', scriptName: 'doujs', name: 'doujs' })
+h3.store.mergeSources([oldOkV, newUnV], { incremental: false })
+h3.dedupe()
+const o1 = h3.store.db.sources['doujs-rel-8.10.3'], n1 = h3.store.db.sources['doujs-rel-8.10.12']
+ck('采集后裁决：未检测的新版留作候选、旧版让位', !n1.deprecated && o1.deprecated === true)
+ck('被废旧版标「同名旧版本（已有更新版本）」（②b 翻案入口）', o1.dupReason === '同名旧版本（已有更新版本）' && o1.dupOf === 'doujs-rel-8.10.12')
+n1.deep = deepOf(0, 'dead')   // 新版深检全失效
+h3.dedupe()
+ck('新版深检失效 → ②b 翻案恢复旧版可用', !o1.deprecated && o1.usable === true && n1.deprecated === true && n1.dupReason === '同名版本（此版本已失效）')
+
 // ---------- ⑤ 灌入同名裁决（检测失效不替换） ----------
 console.log('\n== 灌入同名裁决（_planImportQueue） ==')
 const h2 = mkHunter()

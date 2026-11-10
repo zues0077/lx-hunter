@@ -26,6 +26,52 @@ function loadSort() {
 }
 function saveSort() { try { localStorage.setItem(SORT_STORE_KEY, JSON.stringify(state.sort)) } catch (e) {} }
 
+// ---------------- 第三方探针对照（v1.12.1）：列表行内徽章 ----------------
+// 报告层结论按 contentHash 对齐到音源列表行：跑过一次「对照」后，命中的条目在
+// 行内直接挂「对照」徽章（一致 / 平台漂移 / 强漂移），hover 看双方平台结论。
+// 结果缓存在 localStorage（3 天过期，或下次对照时覆盖），纯只读、不参与任何自动决策。
+const CROSSCHECK_STORE_KEY = 'lxh-crosscheck-cache'
+const CROSSCHECK_TTL_MS = 3 * 24 * 3600 * 1000
+let crosscheckByHash = (() => {
+  try {
+    const c = JSON.parse(localStorage.getItem(CROSSCHECK_STORE_KEY) || 'null')
+    if (c && c.at && (Date.now() - c.at) < CROSSCHECK_TTL_MS && c.byHash) return c
+  } catch (e) {}
+  return null
+})()
+
+function saveCrosscheckCache(rep) {
+  try {
+    const byHash = {}
+    for (const m of (rep.matched || [])) {
+      if (!m.sha256) continue
+      byHash[m.sha256] = {
+        drift: m.drift || null, driftNote: m.driftNote || '',
+        ourUsable: !!m.ourUsable, ourPassed: m.ourPassed || [],
+        theirPassed: m.theirPassed || [], theirFailed: m.theirFailed || [],
+        ourName: m.ourName || '', theirName: m.theirName || ''
+      }
+    }
+    crosscheckByHash = { at: Date.now(), testedAt: rep.theirTestedAt || null, byHash }
+    localStorage.setItem(CROSSCHECK_STORE_KEY, JSON.stringify(crosscheckByHash))
+  } catch (e) {}
+}
+
+/** 行内对照徽章：音源条目的 contentHash 在最近一次对照里有命中才显示 */
+function crosscheckBadge(e) {
+  const c = crosscheckByHash
+  if (!c || !e || !e.contentHash) return ''
+  const m = c.byHash[e.contentHash]
+  if (!m) return ''
+  const when = c.testedAt ? new Date(c.testedAt).toLocaleDateString() : ''
+  const ours = m.ourUsable ? '我方可用 [' + (m.ourPassed || []).join('/') + ']' : '我方未通过'
+  const theirs = '对方探针 通过[' + ((m.theirPassed || []).join('/') || '—') + '] 失败[' + ((m.theirFailed || []).join('/') || '—') + ']'
+  const tip = `第三方探针对照（shellsec 快照${when ? ' ' + when : ''}）：${ours}；${theirs}。只读对照信号，不影响任何自动判断`
+  if (m.drift === 'dead') return `<span class="vt vt-rejected" title="${esc(tip)}">对照失效</span>`
+  if (m.drift === 'platform') return `<span class="vt vt-warn" title="${esc(tip)}">对照漂移</span>`
+  return `<span class="vt vt-up" title="${esc(tip)}">对照一致</span>`
+}
+
 const state = {
   sources: [],
   imported: {},
@@ -1772,6 +1818,7 @@ function apiAliveBadge(e) {
 function rowHtml(e) {
   const vt = e.validTier ? `<span class="vt vt-${e.validTier}" title="探针置信：${vtLabel(e.validTier)}">${vtLabel(e.validTier)}</span>` : ''
   const al = apiAliveBadge(e)
+  const cc = crosscheckBadge(e)
   // 私人音源：手动导入的个人源，不参与去重废弃，也不参与健康巡检（可手动检测/灌入）
   const priv = e.private ? '<span class="badge private" title="私人音源：手动导入，不参与去重废弃，也不参与健康巡检（不会被自动重测、禁用或删除）；可在音源库手动检测 / 灌入">私人</span>' : ''
   // (服务端) 占位条目是本地快照，不是服务端实时视图。断线时给一个灰色行级角标，
@@ -1783,7 +1830,7 @@ function rowHtml(e) {
   return `
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
     <td><span class="nm">${esc(e.scriptName || e.name)}</span>${priv}
-        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span>${vt}${al}</td>
+        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span>${vt}${al}${cc}</td>
     <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
     <td class="c-repo"><span class="repo">${esc(e.repo)}</span>${snap}</td>
     <td class="c-status">${statusCell(e)}</td>
@@ -2409,15 +2456,21 @@ $('btnCrosscheck').addEventListener('click', async () => {
 
 function renderCrosscheck(rep) {
   const s = rep.summary || {}
+  saveCrosscheckCache(rep)   // v1.12.1：结论按指纹落给音源列表行内徽章（3 天缓存，下次对照覆盖）
+  scheduleTableRefresh()
   $('crosscheckInfo').textContent = `对方快照 ${rep.theirTestedAt ? new Date(rep.theirTestedAt).toLocaleString() : '时间未知'}：` +
     `${rep.theirTotal} 条，对上 ${rep.matchedCount} 条，未对上 ${rep.unmatchedCount} 条；` +
     `强漂移 ${s.deadDrift} / 平台漂移 ${s.platformDrift} / 一致 ${s.agree}` +
-    (rep.via ? `（经 ${rep.via} 通道）` : '')
+    (rep.via ? `（经 ${rep.via} 通道）` : '') +
+    '。已按指纹标到音源列表（行内「对照」徽章），仅辅助参考，不影响检测与灌入'
   const rows = (rep.matched || []).map(m => {
     const drift = m.drift === 'dead' ? '<span class="badge fail" title="' + esc(m.driftNote || '') + '">强漂移</span>'
       : m.drift === 'platform' ? '<span class="badge warn" title="' + esc(m.driftNote || '') + '">平台漂移</span>'
       : '<span class="badge gray">一致</span>'
-    return '<tr><td>' + esc(m.theirName || m.ourName) + '</td>' +
+    // v1.12.1：以库内名字为主（用户要在列表里找得到这条），对方名字不同时括注
+    const nm = esc(m.ourName || m.theirName) +
+      (m.theirName && m.ourName && m.theirName !== m.ourName ? ` <span class="muted">（对方名：${esc(m.theirName)}）</span>` : '')
+    return '<tr><td>' + nm + '</td>' +
       '<td>' + (m.ourUsable ? '<span class="badge ok">可用</span> [' + esc((m.ourPassed || []).join('/')) + ']' : '<span class="badge gray">未通过</span>') + '</td>' +
       '<td>[' + esc((m.theirPassed || []).join('/') || '—') + '] 失败[' + esc((m.theirFailed || []).join('/') || '—') + ']</td>' +
       '<td>' + drift + '</td></tr>'

@@ -136,7 +136,7 @@
         <h3 class="card-title">第三方探针对照</h3>
         <div class="field-row">
           <button class="btn ghost" id="btnCrosscheck" title="拉取 shellsec/lx-music-source 的探针结论（五平台 128k 抽测），按内容指纹对齐库内音源，报告「我们判可用 vs 对方实测」的差异。纯只读报告，不影响任何自动判断">跑一次对照</button>
-          <span class="hint" id="crosscheckInfo" style="width:auto;margin:0">对照对象：shellsec/lx-music-source 的 tests/latest-probe.json（对方仓库无 LICENSE，只读取探针结论，不下载脚本）</span>
+          <span class="hint" id="crosscheckInfo" style="width:auto;margin:0">对照对象：shellsec/lx-music-source 的 tests/latest-probe.json（对方仓库无 LICENSE，只读取探针结论，不下载脚本）。跑完后结论会按内容指纹标到音源列表行内（「对照一致 / 漂移 / 失效」徽章），仅辅助参考——不影响本地检测结论、灌入与巡检</span>
         </div>
         <div id="crosscheckResult" hidden></div>
       </div>
@@ -698,6 +698,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=57"></script>
-<script src="app.js?v=62"></script>
+<script src="app.js?v=63"></script>
 </body>
 </html>
