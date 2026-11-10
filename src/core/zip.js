@@ -10,8 +10,81 @@
  *  - 压缩包尺寸以中央目录为准（local header 里 bit-3 数据描述符场景不受影响）
  */
 const zlib = require('zlib')
+const { TextDecoder } = require('util')
 
-/** 在缓冲区里从尾向前找 EOCD（End Of Central Directory）签名 */
+const REPL = '\uFFFD'
+
+/** 计数替换符 U+FFFD —— 中文 GBK 字节被按 UTF-8 解时就变成它（页面上的黑色菱形问号） */
+function countReplacement(s) {
+  let n = 0
+  for (const ch of String(s || '')) if (ch === REPL) n++
+  return n
+}
+
+let _gbk = null
+function gbkDecoder() {
+  if (_gbk === null) {
+    try { _gbk = new TextDecoder('gbk') } catch (e) { _gbk = false }
+  }
+  return _gbk || null
+}
+
+/** 判断 UTF-8 解出来的「伪中文」：GBK 双字节常被解成亚美尼亚/希伯来/西里尔扩展等罕见区块 */
+function looksGarbled(s) {
+  if (countReplacement(s) > 0) return true
+  let odd = 0, cjk = 0
+  for (const ch of String(s || '')) {
+    const c = ch.codePointAt(0)
+    if (c >= 0x4e00 && c <= 0x9fff) cjk++
+    else if (c > 127 && (
+      (c >= 0x0530 && c <= 0x058f) ||  // 亚美尼亚
+      (c >= 0x0590 && c <= 0x05ff) ||  // 希伯来
+      (c >= 0x0400 && c <= 0x052f) ||  // 西里尔
+      (c >= 0x0600 && c <= 0x06ff)     // 阿拉伯
+    )) odd++
+  }
+  return odd > 0 && cjk === 0
+}
+
+/**
+ * ZIP entry 名解码。
+ * ZIP 规范：central directory 的 general purpose bit 11 (0x0800) 置位才表示文件名是 UTF-8；
+ * 未置位时是本地编码，中文 Windows 打包出来就是 GBK。旧实现无条件 toString('utf8')，
+ * 于是 Release zip 里含中文的脚本名整串变 U+FFFD（音源库页菱形），2026-11-10 实机定位。
+ */
+function decodeZipName(nameBuf, flags) {
+  const b = Buffer.isBuffer(nameBuf) ? nameBuf : Buffer.from(String(nameBuf || ''))
+  if (!b.length) return ''
+  const utf8 = b.toString('utf8')
+  const dec = gbkDecoder()
+  const gbk = dec ? dec.decode(b) : null
+  const utf8Flag = !!(Number(flags || 0) & 0x0800)
+  if (utf8Flag) {
+    // 打包工具偶尔乱置 flag：声称 UTF-8 却塞 GBK，出现替换符就回退
+    if (gbk && countReplacement(utf8) > 0 && countReplacement(gbk) < countReplacement(utf8)) return gbk
+    return utf8
+  }
+  // 未置位：按规范优先本地编码（纯 ASCII 名两种解码结果完全一致，无损）
+  if (gbk && !looksGarbled(gbk) && (looksGarbled(utf8) || countReplacement(gbk) < countReplacement(utf8))) return gbk
+  return utf8
+}
+
+/**
+ * 脚本正文解码：绝大多数是 UTF-8，保持原样（避免误伤）；只有明确出现替换符或
+ * 「伪中文」时才用 GBK 重解。ZIP 内文件名用 decodeZipName，不要用这个。
+ */
+function decodeScriptText(buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ''))
+  if (!b.length) return ''
+  const utf8 = b.toString('utf8')
+  if (!looksGarbled(utf8)) return utf8.replace(/^\uFEFF/, '')
+  const dec = gbkDecoder()
+  const gbk = dec ? dec.decode(b) : null
+  if (gbk && !looksGarbled(gbk)) return gbk.replace(/^\uFEFF/, '')
+  return utf8.replace(/^\uFEFF/, '')
+}
+
+/** 在文件末尾向前找 EOCD（End Of Central Directory）签名 */
 function findEocd(buf) {
   const min = Math.max(0, buf.length - 22 - 0xffff)
   for (let i = buf.length - 22; i >= min; i--) {
@@ -40,7 +113,9 @@ function unzip(buf) {
     const extraLen = buf.readUInt16LE(off + 30)
     const cmtLen = buf.readUInt16LE(off + 32)
     const lho = buf.readUInt32LE(off + 42)
-    const name = buf.slice(off + 46, off + 46 + nameLen).toString('utf8')
+    // bit 11 = UTF-8 文件名；未置位时是 GBK（中文 Windows 打包），见 decodeZipName
+    const gpFlags = buf.readUInt16LE(off + 8)
+    const name = decodeZipName(buf.slice(off + 46, off + 46 + nameLen), gpFlags)
     off += 46 + nameLen + extraLen + cmtLen
     if (!name || name.endsWith('/')) continue   // 目录
     if (lho + 30 > buf.length || buf.readUInt32LE(lho) !== 0x04034b50) continue
@@ -65,4 +140,4 @@ function isArchivePath(p) {
   return /\.(zip|rar|7z|tar|gz|tgz)$/i.test(String(p || ''))
 }
 
-module.exports = { unzip, isArchivePath }
+module.exports = { unzip, isArchivePath, decodeZipName, decodeScriptText, countReplacement, looksGarbled }

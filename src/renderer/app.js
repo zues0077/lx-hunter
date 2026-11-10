@@ -1772,7 +1772,24 @@ function apiAliveBadge(e) {
   return `<span class="vt ${cls}" title="接口域名存活（v1.9.11 遥测）：${esc(JSON.stringify(a))}">${txt}</span>`
 }
 
+/**
+ * 展示名兜底（2026-11-10）：历史数据里 ZIP entry 名曾被无条件按 UTF-8 解，
+ * 中文 GBK 字节整串变 U+FFFD（音源库页黑色菱形问号）。根治在 core/zip.js 的
+ * decodeZipName；这里保证任何历史脏数据在页面上都不再露出菱形。
+ */
+function displayName(e) {
+  const cands = [e && e.scriptName, e && e.lxName, e && e.name, e && e.id]
+  for (const s of cands) {
+    if (s && !/[\uFFFD]/.test(String(s))) return String(s)
+  }
+  // 全被污染：用仓库 + 版本拼可读名，别把菱形摆到用户面前
+  const repo = String((e && e.repo) || '').split('/').pop() || '未知仓库'
+  const ver = String((e && (e.scriptVersion || e.version)) || '').slice(0, 24)
+  return repo + (ver ? ' · ' + ver : '') + '（名称编码异常，待重新采集）'
+}
+
 function rowHtml(e) {
+  const nm = displayName(e)
   const vt = e.validTier ? `<span class="vt vt-${e.validTier}" title="探针置信：${vtLabel(e.validTier)}">${vtLabel(e.validTier)}</span>` : ''
   const al = apiAliveBadge(e)
   // 私人音源：手动导入的个人源，不参与去重废弃，也不参与健康巡检（可手动检测/灌入）
@@ -1785,8 +1802,8 @@ function rowHtml(e) {
     : ''
   return `
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
-    <td><span class="nm">${esc(e.scriptName || e.name)}</span>${priv}
-        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || e.name)}</span>${vt}${al}</td>
+    <td><span class="nm">${esc(nm)}</span>${priv}
+        <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || nm)}</span>${vt}${al}</td>
     <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
     <td class="c-repo"><span class="repo">${esc(e.repo)}</span>${snap}</td>
     <td class="c-status">${statusCell(e)}</td>

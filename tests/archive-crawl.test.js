@@ -3,28 +3,31 @@
  * 覆盖：内存 zip 解压（STORE/DEFLATE）→ 从中挑音源脚本 → checkBasic 就地复用内容。
  */
 const zlib = require('zlib')
-const { unzip, isArchivePath } = require('../src/core/zip')
+const { unzip, isArchivePath, decodeZipName, decodeScriptText, countReplacement, looksGarbled } = require('../src/core/zip')
 const { extractArchiveCandidates, pickScriptsFromZip } = require('../src/core/crawler')
 const { checkBasic, sha256Str } = require('../src/core/checker')
 
 let bad = 0
 const ck = (n, c, x) => { if (!c) bad++; console.log(`${c ? 'PASS' : 'FAIL'}  ${n}${x ? '  -> ' + x : ''}`) }
 
-/** 测试专用：手工构造 zip 字节（中央目录 + EOCD），支持 STORE/DEFLATE */
+/** 测试专用：手工构造 zip 字节（中央目录 + EOCD），支持 STORE/DEFLATE。
+ *  第 4 项 flags = general purpose bit flag；name 允许 Buffer（模拟 GBK 打包）。 */
 function buildZip(files) {
   const parts = [], central = []
   let off = 0
-  for (const [name, data, method] of files) {
+  for (const [name, data, method, flags] of files) {
     const comp = method === 0 ? data : zlib.deflateRawSync(data)
-    const nb = Buffer.from(name, 'utf8')
+    const nb = Buffer.isBuffer(name) ? name : Buffer.from(name, 'utf8')
+    const gp = flags || 0
     const lh = Buffer.alloc(30)
-    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4)
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(gp, 6)
     lh.writeUInt16LE(method, 8)
     lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(data.length, 22)
     lh.writeUInt16LE(nb.length, 26)
     parts.push(lh, nb, comp)
     const ch = Buffer.alloc(46)
     ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6)
+    ch.writeUInt16LE(gp, 8)
     ch.writeUInt16LE(method, 10)
     ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(data.length, 24)
     ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42)
@@ -88,6 +91,38 @@ ck('zip 内音源脚本被挑出', picked.length === 2, picked.map(p => p.path).
 ck('条目带就地内容与哈希', picked.every(p => p.code === FAKE_LX && p.contentHash === sha256Str(FAKE_LX)))
 ck('path 记录「压缩包!内部路径」', picked[0].path === '音源打包.zip!music/测试音源.js', picked[0].path)
 ck('url 指向压缩包本身', picked[0].url.includes('%E9%9F%B3%E6%BA%90.zip'))
+
+// ---------- 2.5 GBK entry 名解码（2026-11-10 实机定位：音源库页黑色菱形问号） ----------
+// 中文 Windows 打 zip 时 entry 名是 GBK 且不置 bit-11；旧实现无条件 toString('utf8') → 整串 U+FFFD
+const GBK_HELLO = Buffer.from([86, 50, 54, 49, 48, 48, 56, 47, 72, 101, 108, 108, 111, 87, 111, 114, 108, 100,
+  210, 244, 212, 180, 40, 185, 171, 210, 230, 176, 230, 41, 46, 106, 115]) // V261008/HelloWorld音源(公益版).js
+const GBK_STELLAR = Buffer.from([115, 116, 101, 108, 108, 97, 114, 119, 97, 118, 101, 45, 118, 52, 46, 48, 46, 48,
+  163, 168, 191, 225, 206, 210, 201, 212, 186, 243, 214, 167, 179, 214, 163, 169, 46, 106, 115]) // stellarwave-v4.0.0（酷我稍后支持）.js
+const HELLO_UTF8 = 'V261008/HelloWorld音源(公益版).js'
+const STELLAR_UTF8 = 'stellarwave-v4.0.0（酷我稍后支持）.js'
+
+ck('旧行为复现：GBK 字节按 utf8 直读确实产出 U+FFFD/伪字符',
+  countReplacement(GBK_HELLO.toString('utf8')) > 0 || looksGarbled(GBK_HELLO.toString('utf8')),
+  JSON.stringify(GBK_HELLO.toString('utf8')))
+ck('GBK entry 名（未置 bit-11）解回中文', decodeZipName(GBK_HELLO, 0) === HELLO_UTF8, decodeZipName(GBK_HELLO, 0))
+ck('GBK entry 名（含全角括号）解回中文', decodeZipName(GBK_STELLAR, 0) === STELLAR_UTF8, decodeZipName(GBK_STELLAR, 0))
+ck('UTF-8 entry 名 + bit-11 保持原样', decodeZipName(Buffer.from(HELLO_UTF8, 'utf8'), 0x0800) === HELLO_UTF8, decodeZipName(Buffer.from(HELLO_UTF8, 'utf8'), 0x0800))
+ck('UTF-8 entry 名但未置 bit-11 仍不被 GBK 误伤', decodeZipName(Buffer.from(HELLO_UTF8, 'utf8'), 0) === HELLO_UTF8, decodeZipName(Buffer.from(HELLO_UTF8, 'utf8'), 0))
+ck('纯 ASCII entry 名不受影响', decodeZipName(Buffer.from('music/source.js', 'utf8'), 0) === 'music/source.js')
+ck('打包工具乱置 bit-11 但塞 GBK 也能兜底', decodeZipName(GBK_HELLO, 0x0800) === HELLO_UTF8, decodeZipName(GBK_HELLO, 0x0800))
+ck('脚本正文本是 UTF-8 时不被改动', decodeScriptText(Buffer.from(FAKE_LX, 'utf8')) === FAKE_LX)
+ck('脚本正文 GBK 也能解回中文', decodeScriptText(Buffer.from([210, 244, 212, 180])).trim() === '音源',
+  JSON.stringify(decodeScriptText(Buffer.from([210, 244, 212, 180]))))
+
+// 端到端：真实 unzip 走 GBK entry 名
+const gbkZip = buildZip([[GBK_HELLO, Buffer.from(FAKE_LX, 'utf8'), 0, 0]])
+const gbkFiles = unzip(gbkZip)
+ck('unzip 端到端产出正确中文路径（无菱形）', gbkFiles.length === 1 && gbkFiles[0].path === HELLO_UTF8 &&
+  !looksGarbled(gbkFiles[0].path), gbkFiles.map(f => f.path).join(', '))
+const gbkPicked = pickScriptsFromZip(gbkFiles, 'V261008.zip', 'o/r', 'https://x/V261008.zip', 50)
+ck('GBK 包内候选 name/id 全为正确中文', gbkPicked.length === 1 &&
+  gbkPicked[0].name === 'HelloWorld音源(公益版)' && !looksGarbled(gbkPicked[0].id),
+  gbkPicked.length ? gbkPicked[0].name : '(未挑出)')
 
 // ---------- 3. checkBasic 就地复用（不再下载） ----------
 ;(async () => {

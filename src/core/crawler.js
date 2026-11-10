@@ -14,7 +14,7 @@
  *  下载统一走 crawlFetch（直连 → 前缀镜像链）：raw.githubusercontent.com 直连不通的
  *  网络环境下（用户实测），裸 fetch 会把所有压缩包音源漏掉，镜像链是刚需。 */
 const { fetchWithTimeout, crawlFetch, readText, sleep } = require('./net')
-const { unzip, isArchivePath } = require('./zip')
+const { unzip, isArchivePath, decodeScriptText } = require('./zip')
 const { scoreEntry, classifyEntry, sha256Str, isHostAdapterScript } = require('./checker')
 
 const GH_HEADERS_BASE = { 'User-Agent': 'lx-hunter-pc/1.0', 'Accept': 'application/vnd.github+json' }
@@ -208,7 +208,8 @@ function pickScriptsFromZip(entries, archivePath, repo, rawUrl, maxPerArchive) {
   for (const f of entries) {
     if (!/\.js$/i.test(f.path) || f.data.length > 2 * 1024 * 1024) continue
     if (/(^|\/)(node_modules|test|tests|__tests__)\//.test(f.path)) continue
-    const text = f.data.toString('utf8')
+    // 包内脚本正文也可能是 GBK；用 decodeScriptText 兜底，别再无条件 toString('utf8')
+    const text = decodeScriptText(f.data)
     const score = scoreEntry(f.path, text)
     if (score < 4) continue   // 压缩包里常混文档/示例/构建产物，宁缺毋滥
     const id = repo + '::' + archivePath + '!' + f.path
@@ -399,7 +400,7 @@ function isPluginPackage(entries) {
   return !files.some(f => {
     const p = String((f && f.path) || '')
     if (!/\.js$/i.test(p) || !f.data || f.data.length > 2 * 1024 * 1024) return false
-    return classifyEntry(p, f.data.toString('utf8'))
+    return classifyEntry(p, decodeScriptText(f.data))
   })
 }
 
