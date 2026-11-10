@@ -24,7 +24,6 @@ const api = {
   externalsUpdate: (url, patch) => ipcRenderer.invoke('externals:update', { url, patch }),
   externalsRemove: (url) => ipcRenderer.invoke('externals:remove', url),
   // 第三方探针对照（v1.12.0，报告层只读）
-  crosscheck: () => ipcRenderer.invoke('quality:crosscheck'),
   dataExport: (scope) => ipcRenderer.invoke('data:export', scope),
   dataImport: (scope) => ipcRenderer.invoke('data:import', scope),
   serviceTest: (cfg) => ipcRenderer.invoke('service:test', cfg),

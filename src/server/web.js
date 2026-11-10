@@ -474,7 +474,6 @@ route('POST', '/api/repos/block', guard(async (req, res, ctx) => await hunter.bl
 route('POST', '/api/repos/unblock', guard(async (req, res, ctx) => await hunter.unblockRepo(String((ctx.body || {}).repo || ''), (ctx.body || {}).reAdd)))
 route('POST', '/api/check', guard(async (req, res, ctx) => await hunter.runCheck(ctx.body.ids, ctx.body.opts)))
 // v1.12.0 第三方探针对照（报告层只读）：按 sha256 对齐库内 contentHash，产出「我们 vs 对方」差异报告
-route('GET', '/api/quality/crosscheck', guard(async () => await hunter.runCrosscheck()))
 // 混淆隔离：信任/取消信任（v1.10.7）——body {id, trust}
 route('POST', '/api/sources/trust-obf', guard(async (req, res, ctx) => await hunter.trustObfSource(String((ctx.body || {}).id || ''), !!(ctx.body || {}).trust)))
 route('POST', '/api/hash', guard(async (req, res, ctx) => await hunter.runHash(ctx.body.ids)))

@@ -187,80 +187,8 @@ async function pipelineFilterCase() {
   ok('定时灌入跳过疑似回归版本并写守门日志（clean/fresh 正常进候选）')
 }
 
-// ---------------- 第三方探针对照（报告层，只读） ----------------
-async function crosscheckCase() {
-  console.log('\n== 第三方探针对照（报告层）==')
-  const { runCrosscheck, resetCrosscheckCache, CROSSCHECK_URL } = require('../src/core/crosscheck')
-  assert.ok(/raw\.githubusercontent\.com\/shellsec\/lx-music-source/.test(CROSSCHECK_URL), '默认对照对象是 shellsec/lx-music-source 的探针快照')
-  ok('对照源固定为 shellsec/lx-music-source tests 快照（只读结论，不下脚本）')
-
-  const SNAP = {
-    testedAt: '2026-11-09T02:07:15.043Z',
-    results: [
-      { id: 'same', name: '一致源', sha256: 'sha-same', attempts: [
-        { source: 'kw', resolved: true, audio: true }, { source: 'kg', resolved: true, audio: true } ] },
-      { id: 'theirdead', name: '对方全挂', sha256: 'sha-theirdead', attempts: [
-        { source: 'kw', error: 'no stream' }, { source: 'kg', error: 'no stream' } ] },
-      { id: 'theirfail1', name: '对方单平台失败', sha256: 'sha-theirfail1', attempts: [
-        { source: 'kw', error: 'no stream' }, { source: 'kg', resolved: true, audio: true } ] },
-      { id: 'ourdead', name: '我们未过', sha256: 'sha-ourdead', attempts: [
-        { source: 'kw', resolved: true, audio: true } ] }
-    ]
-  }
-  // 打桩 crawlFetch（模块在 require 时解构引用，需先改 net 再清缓存重进）
-  const origFetch = net.crawlFetch
-  net.crawlFetch = async (url) => ({ res: { status: 200, text: async () => JSON.stringify(SNAP) }, url, mirror: 'direct', attempts: [] })
-  delete require.cache[require.resolve('../src/core/crosscheck')]
-  const cc = require('../src/core/crosscheck')
-
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-qgate-cc-'))
-  const store = new Store(dir)
-  const mk = (id, name, hash, usable, plats) => { store.db.sources[id] = { id, name, lxName: name, usable, contentHash: hash, deep: { checkedAt: 1, hash, platforms: plats } } }
-  mk('a1', '一致源', 'sha-same', true, { kw: { status: 'usable' }, kg: { status: 'usable' } })
-  mk('a2', '对方全挂', 'sha-theirdead', true, { kw: { status: 'usable' }, kg: { status: 'usable' } })
-  mk('a3', '对方单平台失败', 'sha-theirfail1', true, { kw: { status: 'usable' }, kg: { status: 'usable' } })
-  mk('a4', '我们未过', 'sha-ourdead', false, { kw: { status: 'failed' } })
-
-  resetCrosscheckCache()
-  const rep = await cc.runCrosscheck(store)
-  assert.strictEqual(rep.ok, true)
-  assert.strictEqual(rep.theirTotal, 4)
-  assert.strictEqual(rep.matchedCount, 4)
-  assert.strictEqual(rep.theirTestedAt, SNAP.testedAt, '报告要带对方的 testedAt 供判新鲜度')
-  const byId = {}
-  for (const m of rep.matched) byId[m.theirId] = m
-  assert.strictEqual(byId.same.drift, null, '两边一致 → 无漂移')
-  assert.strictEqual(byId.theirdead.drift, 'dead', '我们可用、对方全挂 → 强漂移')
-  assert.strictEqual(byId.theirfail1.drift, 'platform', '对方单平台实测失败 → 平台漂移')
-  assert.strictEqual(byId.ourdead.drift, 'platform', '对方仍通过、我们未过 → 平台漂移（提示可复测）')
-  assert.strictEqual(rep.summary.deadDrift, 1)
-  assert.strictEqual(rep.summary.platformDrift, 2)
-  assert.strictEqual(rep.summary.agree, 1)
-  ok('对照报告：强漂移/平台漂移/一致 分类正确，summary 计数正确')
-
-  // 只读红线：跑完对照库内条目不得被改写
-  assert.strictEqual(store.db.sources.a2.usable, true)
-  assert.strictEqual(store.db.sources.a4.usable, false)
-  assert.strictEqual(store.db.sources.a2.validTier, undefined)
-  ok('对照不写库：usable/validTier 等库内状态零改动')
-
-  // 缓存：第二次调用不重新拉取
-  let pulls = 0
-  net.crawlFetch = async () => { pulls++; return { res: { status: 200, text: async () => JSON.stringify(SNAP) }, url: '', mirror: 'x', attempts: [] } }
-  delete require.cache[require.resolve('../src/core/crosscheck')]
-  const cc2 = require('../src/core/crosscheck')
-  await cc2.runCrosscheck(store)
-  const pullsAfterFirst = pulls
-  await cc2.runCrosscheck(store)
-  assert.strictEqual(pulls, pullsAfterFirst, '10 分钟内存缓存内不重复拉取')
-  ok('报告带内存缓存（10 分钟 TTL），不反复打对方仓库')
-
-  net.crawlFetch = origFetch
-}
-
 // ---------------- 跑异步用例 ----------------
 gateScenario()
   .then(() => pipelineFilterCase())
-  .then(() => crosscheckCase())
   .then(() => console.log('\n=== quality-gate 测试通过：' + pass + ' 项 ==='))
   .catch(e => { console.error('\n[FAIL] ' + ((e && e.stack) || e)); process.exit(1) })

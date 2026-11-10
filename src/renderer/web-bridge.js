@@ -197,7 +197,6 @@
     externalsUpdate: (url, patch) => call('/api/externals/update', { url, patch }),
     externalsRemove: url => call('/api/externals/remove', { url }),
     // 第三方探针对照（v1.12.0，报告层只读）
-    crosscheck: () => call('/api/quality/crosscheck'),
     checkStart: (ids, opts) => call('/api/check', { ids, opts }),
     hashStart: ids => call('/api/hash', { ids }),
     importStart: ids => call('/api/import', { ids }),

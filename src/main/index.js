@@ -447,8 +447,6 @@ ipcMain.handle('externals:update', guard((e, payload) => {
 }))
 ipcMain.handle('externals:remove', guard((e, url) => ({ ok: true, sources: hunter.removeExternalSource(String(url || '')) })))
 
-// 第三方探针对照（v1.12.0）：与 Web 版 GET /api/quality/crosscheck 对应（报告层只读）
-ipcMain.handle('quality:crosscheck', guard(async () => await hunter.runCrosscheck()))
 
 ipcMain.handle('crawl:start', guard(async (e, opts) => {
   // v1.10.6：opts.only 非空时定向主动采集（清单页每行「采集」按钮）

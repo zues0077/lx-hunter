@@ -131,15 +131,6 @@
         <div class="prog-head"><span id="progStep">准备中…</span><span id="progNum"></span></div>
         <div class="prog-track"><div class="prog-fill" id="progFill"></div></div>
       </div>
-
-      <div class="card" id="crosscheckCard">
-        <h3 class="card-title">第三方探针对照</h3>
-        <div class="field-row">
-          <button class="btn ghost" id="btnCrosscheck" title="拉取 shellsec/lx-music-source 的探针结论（五平台 128k 抽测），按内容指纹对齐库内音源，报告「我们判可用 vs 对方实测」的差异。纯只读报告，不影响任何自动判断">跑一次对照</button>
-          <span class="hint" id="crosscheckInfo" style="width:auto;margin:0">对照对象：shellsec/lx-music-source 的 tests/latest-probe.json（对方仓库无 LICENSE，只读取探针结论，不下载脚本）。结果只在本卡片内展示——对方的平台覆盖与检测时机和我们不同，漂移≠我们的音源有问题，仅作参考，不影响本地检测结论、灌入与巡检</span>
-        </div>
-        <div id="crosscheckResult" hidden></div>
-      </div>
     </section>
 
     <!-- ===== 灌入 ===== -->
@@ -698,6 +689,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=57"></script>
-<script src="app.js?v=65"></script>
+<script src="app.js?v=66"></script>
 </body>
 </html>

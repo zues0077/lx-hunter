@@ -2402,46 +2402,6 @@ $('btnFullPlat').addEventListener('click', async () => {
   } else toast('检测失败: ' + r.error, 'err')
 })
 
-// 第三方探针对照（v1.12.0，报告层只读）：拉对方探针 JSON、按 sha256 对齐、渲染差异
-$('btnCrosscheck').addEventListener('click', async () => {
-  const btn = $('btnCrosscheck')
-  btn.disabled = true
-  $('crosscheckInfo').textContent = '正在拉取对方探针快照并对齐库内音源…'
-  try {
-    const r = await api.crosscheck()
-    if (!r.ok) { $('crosscheckInfo').textContent = '对照失败: ' + (r.error || '未知错误'); return }
-    renderCrosscheck(r.data || r)
-  } finally {
-    btn.disabled = false
-  }
-})
-
-function renderCrosscheck(rep) {
-  const s = rep.summary || {}
-  $('crosscheckInfo').textContent = `对方快照 ${rep.theirTestedAt ? new Date(rep.theirTestedAt).toLocaleString() : '时间未知'}：` +
-    `${rep.theirTotal} 条，对上 ${rep.matchedCount} 条，未对上 ${rep.unmatchedCount} 条；` +
-    `强漂移 ${s.deadDrift} / 平台漂移 ${s.platformDrift} / 一致 ${s.agree}` +
-    (rep.via ? `（经 ${rep.via} 通道）` : '') +
-    '。结论只在本卡片内展示（平台覆盖与检测时机不同，漂移≠我们的音源有问题），仅辅助参考，不影响检测与灌入'
-  const rows = (rep.matched || []).map(m => {
-    const drift = m.drift === 'dead' ? '<span class="badge fail" title="' + esc(m.driftNote || '') + '">强漂移</span>'
-      : m.drift === 'platform' ? '<span class="badge warn" title="' + esc(m.driftNote || '') + '">平台漂移</span>'
-      : '<span class="badge gray">一致</span>'
-    // v1.12.1：以库内名字为主（用户要在列表里找得到这条），对方名字不同时括注
-    const nm = esc(m.ourName || m.theirName) +
-      (m.theirName && m.ourName && m.theirName !== m.ourName ? ` <span class="muted">（对方名：${esc(m.theirName)}）</span>` : '')
-    return '<tr><td>' + nm + '</td>' +
-      '<td>' + (m.ourUsable ? '<span class="badge ok">可用</span> [' + esc((m.ourPassed || []).join('/')) + ']' : '<span class="badge gray">未通过</span>') + '</td>' +
-      '<td>[' + esc((m.theirPassed || []).join('/') || '—') + '] 失败[' + esc((m.theirFailed || []).join('/') || '—') + ']</td>' +
-      '<td>' + drift + '</td></tr>'
-  }).join('')
-  $('crosscheckResult').innerHTML = rows
-    ? '<div class="table-wrap"><table class="table"><thead><tr><th>音源</th><th>我们（库内）</th><th>对方探针</th><th>对照</th></tr></thead><tbody>' +
-      rows + '</tbody></table></div>'
-    : '<div class="empty">对方快照里没有能和库内对上指纹的音源</div>'
-  $('crosscheckResult').hidden = false
-  toast(`对照完成：对上 ${rep.matchedCount} 条（漂移 ${(s.deadDrift || 0) + (s.platformDrift || 0)}）`, 'ok')
-}
 
 async function startCheck(ids) {
   setBusy(true)

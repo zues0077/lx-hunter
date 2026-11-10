@@ -735,22 +735,6 @@ class Hunter {
   }
 
   /**
-   * 第三方探针对照（v1.12.0，报告层只读）：拉 shellsec/lx-music-source 的
-   * latest-probe.json，按 sha256 对齐库内 contentHash，产出「我们 vs 对方」的差异报告。
-   * 纯报告，不改库内任何状态（红线：无 LICENSE 只取结论、证据弱不进决策链）。
-   */
-  async runCrosscheck(opts) {
-    const { runCrosscheck } = require('./crosscheck')
-    const cfg = this.store.config || {}
-    return runCrosscheck(this.store, {
-      timeoutMs: cfg.timeoutMs || 20000,
-      mirror: cfg.mirror,
-      mirrorPref: this.mirrorPref,
-      log: (m, lv) => this.log(m, '对照', lv)
-    })
-  }
-
-  /**
    * 定时任务全链路（v1.9.0）：增量爬取 → 检测新增/内容变化的音源 → 灌入可用音源。
    *
    * 为什么把三步串成一个方法，而不是在定时器里连着调三次：
