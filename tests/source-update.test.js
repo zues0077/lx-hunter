@@ -39,15 +39,21 @@ console.log('\n== 基础纯函数 ==')
   ok('nameBody 去掉 @name 里的版本号尾巴，版本升级仍可配对')
 
   assert.ok(U.versionNum('1.2.3') > U.versionNum('1.2.0'))
-  assert.strictEqual(U.versionNum('没有版本号'), 0)
-  ok('versionNum 可比较、不可解析返回 0')
+  assert.strictEqual(U.versionNum('没有版本号'), '')
+  ok('versionNum 可比较、不可解析返回空串（调用点 || 兜底仍有效）')
 
   // 2026-11-10 实机：v4.0.0（3 段）曾算出 4,000,000，小于 v3.1.1.1（4 段）的
-  // 3,001,001,001 → 把降级误判成「候选版本更高」。必须补齐到固定 4 段。
+  // 3,001,001,001 → 把降级误判成「候选版本更高」。数值累加已改为逐段零填充键。
   assert.ok(U.versionNum('v4.0.0') > U.versionNum('v3.1.1.1'))
   assert.ok(U.versionNum('1.10') > U.versionNum('1.9.9.9'))
   assert.strictEqual(U.versionNum('v2.0'), U.versionNum('v2.0.0'))
   ok('versionNum 补齐段数：跨段数比较不反转，2.0 == 2.0.0')
+
+  // 逻辑复核：数值累加会碰撞 / 丢段，字符串逐段键必须消除
+  assert.notStrictEqual(U.versionNum('1.0.0.1000'), U.versionNum('1.0.1.0'))
+  assert.ok(U.versionNum('1.0.1.0') > U.versionNum('1.0.0.1000'))
+  assert.ok(U.versionNum('1.2.3.4.5') > U.versionNum('1.2.3.4'))
+  ok('versionNum 无段值碰撞、5 段版本号不被截断')
 
   assert.strictEqual(U.repoKey({ repository: 'https://github.com/Foo/Bar/tree/main' }), 'gh:foo/bar')
   // raw.github.com 也归到同一个 GitHub 仓库键：A 反查常拿 raw 直链当 repository
@@ -55,10 +61,18 @@ console.log('\n== 基础纯函数 ==')
   assert.strictEqual(U.repoKey({}), '')
   ok('repoKey 归一 GitHub 仓库（含 raw 链接）、缺信息返回空（不猜）')
 
+  // 逻辑复核：最常见 A 反查形态 raw.githubusercontent.com 必须与 github.com 同源
+  assert.strictEqual(
+    U.repoKey({ url: 'https://raw.githubusercontent.com/zues0077/lx-hunter/main/x.js' }),
+    U.repoKey({ repository: 'https://github.com/zues0077/lx-hunter' }))
+  assert.notStrictEqual(U.repoKey({ repository: 'https://gitee.com/foo/bar' }), 'gh:foo/bar')
+  ok('raw.githubusercontent 与 github 同源；非 GitHub 主机不混键')
+
   assert.strictEqual(U.repoKey({ repository: 'https://github.com/your-repo/StellarWave' }), '')
+  assert.strictEqual(U.repoKey({ repository: 'your-repo/StellarWave' }), '')
   assert.strictEqual(U.repoKey({ repository: 'https://github.com/example/demo' }), '')
-  assert.notStrictEqual(U.repoKey({ repository: 'https://github.com/zues0077/lx-hunter' }), '')
-  ok('占位/模板仓库地址不算同源证据（防「两边都填 your-repo」假同源）')
+  assert.notStrictEqual(U.repoKey({ repository: 'https://github.com/user/repo' }), '')
+  ok('占位/模板仓库不算同源（URL 与简写口径一致），合法用户名不被误拒')
 }
 
 console.log('\n== B 信号：只抽取、不判定 ==')
@@ -168,6 +182,23 @@ console.log('\n== 四个护栏 ==')
   items = U.pairSources([srv({ supportedSources: ['kw', 'kg', 'wy'] })], [cand()], {})
   assert.strictEqual(items[0].verdict, 'unsafe')
   ok('服务端支持平台更多 → 保留服务端')
+
+  // 逻辑复核：快速模式 untested ≠ 不可用，不能拿它跟服务端声明的全量平台比长度
+  const fast = { checkedAt: Date.now(), platforms: {
+    kw: { status: 'usable' }, kg: { status: 'untested' }, wy: { status: 'untested' }
+  } }
+  items = U.pairSources([srv({ supportedSources: ['kw', 'kg', 'wy'] })], [cand({ deep: fast })], {})
+  assert.strictEqual(items[0].verdict, 'unmatched')
+  assert.strictEqual(items[0].applyAllowed, false)
+  assert.ok(/未实测/.test(items[0].reason))
+  ok('快速模式有未测平台 → 证据不足只报告，不误判「平台更少」')
+
+  const full = { checkedAt: Date.now(), platforms: {
+    kw: { status: 'usable' }, kg: { status: 'failed' }, wy: { status: 'failed' }
+  } }
+  items = U.pairSources([srv({ supportedSources: ['kw', 'kg', 'wy'] })], [cand({ deep: full })], {})
+  assert.strictEqual(items[0].verdict, 'unsafe')
+  ok('全平台已测且确实更少 → 仍按原规则保留服务端')
 }
 
 console.log('\n== dry-run 报告与 apply 准入 ==')

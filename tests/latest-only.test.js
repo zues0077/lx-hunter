@@ -2,12 +2,24 @@
 /** v1.10.0「只收最新版」过滤（crawler.filterLatestOnly）+ 网址仓库规范化测试 */
 const assert = require('assert')
 const { filterLatestOnly, latestBaseName, versionNumOf, normalizeRepo } = require('../src/core/crawler')
+const { cmpVersion } = require('../src/core/version')
 
-// 版本号解析
-assert.strictEqual(versionNumOf('xinghai-music-sourcev2.3.17.js'), 2 * 1000000 + 3 * 1000 + 17)
-assert.strictEqual(versionNumOf('HYWmusic_.V1.2.0'), 1002000)
-assert.strictEqual(versionNumOf('no-version-here'), 0)
-assert.strictEqual(versionNumOf('源2'), 0)
+// 版本号解析：2026-11-10 起统一为逐段零填充字符串键（src/core/version.js）。
+// 旧断言是数值累加（v*1000 逐段），会碰撞 / 丢段，已按新口径改写。
+assert.strictEqual(versionNumOf('xinghai-music-sourcev2.3.17.js'), '00000002.00000003.00000017.00000000')
+assert.strictEqual(versionNumOf('HYWmusic_.V1.2.0'), '00000001.00000002.00000000.00000000')
+assert.strictEqual(versionNumOf('no-version-here'), '')
+assert.strictEqual(versionNumOf('源2'), '')
+
+// S1 科学性复核：数值累加方案的三个已知缺陷必须在统一算法里消失
+assert.ok(cmpVersion('v2.0', 'v1.9.9') > 0, 'v2.0 必须高于 v1.9.9（旧算法会反过来）')
+assert.ok(cmpVersion('1.2.3.4.5', '1.2.3.4') > 0, '5 段版本号不能被截断')
+assert.ok(cmpVersion('1.0.1.0', '1.0.0.1000') > 0, '段值 >=1000 不能与相邻段碰撞')
+assert.strictEqual(cmpVersion('v2.0', 'v2.0.0'), 0, '补零段等价')
+const f0 = filterLatestOnly([{ name: 'demo-v1.9.9.js' }, { name: 'demo-v2.0.js' }])
+assert.strictEqual(f0.kept.length, 1)
+assert.strictEqual(f0.kept[0].name, 'demo-v2.0.js', '只收最新版不能把 v2.0 丢掉、留 v1.9.9')
+console.log('  ✓ S1：统一版本算法消除碰撞 / 丢段 / v2.0 被误判旧版')
 
 // 组名归一化
 assert.strictEqual(latestBaseName('xinghai-music-sourcev2.3.17.js'), 'xinghai-music-source')

@@ -111,8 +111,17 @@ ck('UTF-8 entry 名但未置 bit-11 仍不被 GBK 误伤', decodeZipName(Buffer.
 ck('纯 ASCII entry 名不受影响', decodeZipName(Buffer.from('music/source.js', 'utf8'), 0) === 'music/source.js')
 ck('打包工具乱置 bit-11 但塞 GBK 也能兜底', decodeZipName(GBK_HELLO, 0x0800) === HELLO_UTF8, decodeZipName(GBK_HELLO, 0x0800))
 ck('脚本正文本是 UTF-8 时不被改动', decodeScriptText(Buffer.from(FAKE_LX, 'utf8')) === FAKE_LX)
-ck('脚本正文 GBK 也能解回中文', decodeScriptText(Buffer.from([210, 244, 212, 180])).trim() === '音源',
-  JSON.stringify(decodeScriptText(Buffer.from([210, 244, 212, 180]))))
+// 逻辑复核：合法非中文 UTF-8 不得被编码猜测改坏（旧版 looksGarbled 会误判）
+for (const [tag, txt] of [
+  ['俄文注释', '/* @name Source\n * автор: Иван, статус: ОК */\nlx.on("musicUrl",()=>{})'],
+  ['希伯来注释', '/* @name Source\n * בדיקה */\nlx.on("musicUrl",()=>{})'],
+  ['亚美尼亚注释', '/* @name Source\n * փորձարկում */\nlx.on("musicUrl",()=>{})']
+]) {
+  ck('合法 ' + tag + ' 的 UTF-8 脚本原样返回', decodeScriptText(Buffer.from(txt, 'utf8')) === txt)
+}
+ck('含 U+FFFD 的 GBK 正文仍回退解出中文',
+  decodeScriptText(GBK_HELLO).indexOf('HelloWorld音源(公益版)') >= 0,
+  JSON.stringify(decodeScriptText(GBK_HELLO).slice(0, 50)))
 
 // 端到端：真实 unzip 走 GBK entry 名
 const gbkZip = buildZip([[GBK_HELLO, Buffer.from(FAKE_LX, 'utf8'), 0, 0]])

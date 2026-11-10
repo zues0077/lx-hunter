@@ -14,6 +14,7 @@
  *  下载统一走 crawlFetch（直连 → 前缀镜像链）：raw.githubusercontent.com 直连不通的
  *  网络环境下（用户实测），裸 fetch 会把所有压缩包音源漏掉，镜像链是刚需。 */
 const { fetchWithTimeout, crawlFetch, readText, sleep } = require('./net')
+const { versionKey, cmpVersion } = require('./version')
 const { unzip, isArchivePath, decodeScriptText } = require('./zip')
 const { scoreEntry, classifyEntry, sha256Str, isHostAdapterScript } = require('./checker')
 
@@ -107,14 +108,11 @@ function normalizeRepo(input) {
 // （xinghai-music-sourcev2.3.1.js … v2.3.17.js、xxx-v1.8.js、HYWmusic_.V1.2.0.js）
 // 只保留版本号最高的一个，旧版本不下载不入库，省下载也省库位。
 // 归一化组名：小写、去扩展名、循环剥掉结尾的版本号与分隔符。
-// 版本号比较与 hunter.js 的 versionNum 同算法（重大版本*1e9 级编码，最多 4 段）。
+// 版本号比较与 hunter.js / sourceUpdate.js 共用 src/core/version.js 的逐段零填充键。
+// 历史（本文件与 hunter.js 各一份 v=v*1000+part）在段值 >=1000 时会碰撞、>4 段会丢段，
+// 实测把 v2.0 判旧于 v1.9.9 —— 「只收最新版」反而只留了旧版。2026-11-10 统一。
 function versionNumOf(s) {
-  const m = String(s || '').match(/[vV]?(\d+(?:\.\d+)+)/)
-  if (!m) return 0
-  const parts = m[1].split('.')
-  let v = 0
-  for (let i = 0; i < Math.min(parts.length, 4); i++) v = v * 1000 + (parseInt(parts[i], 10) || 0)
-  return v
+  return versionKey(s)
 }
 
 function latestBaseName(name) {
@@ -155,12 +153,13 @@ function filterLatestOnly(items) {
   for (const [base, list] of Object.entries(groups)) {
     if (list.length < 2) { kept.push(list[0]); continue }
     const withV = list.map(it => ({ it, v: vOf(it), at: Number(it && it.updatedAt) || 0 }))
-    const hasVersion = withV.some(x => x.v > 0)
+    // v 是字符串键（无版本为 ''），必须用 cmpVersion 比，不能做减法（NaN）
+    const hasVersion = withV.some(x => x.v !== '')
     const hasTime = withV.some(x => x.at > 0)
     if (!hasVersion && !hasTime) { for (const x of withV) kept.push(x.it); continue }
     groupCount++
     // 版本号高的赢；都无版本号时比更新时间（网页站表格列）；再同按名字稳定序
-    withV.sort((a, b) => b.v - a.v || b.at - a.at ||
+    withV.sort((a, b) => cmpVersion(b.v, a.v) || b.at - a.at ||
       String(a.it.name || '').localeCompare(String(b.it.name || '')))
     kept.push(withV[0].it)
     for (let i = 1; i < withV.length; i++) dropped.push(withV[i].it)

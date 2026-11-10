@@ -247,6 +247,9 @@ route('POST', '/api/config', guard(async (req, res, ctx) => {
   // 换了代理地址或策略，旧的失败计数/冷却不该继承
   if (store.config.crawlProxy !== prevProxy || store.config.proxyPolicy !== prevPolicy) netmod.resetProxyHealth()
   netmod.applyConfig(store.config) // 网络设置改动即时生效
+  // S7：账号地址/凭据/启用态可能刚被改过，旧 updater 实例会继续打到旧服务端 —— 必须清缓存
+  updater = null
+  updaterKey = ''
   return store.config
 }))
 
@@ -723,12 +726,16 @@ function getUpdater(platformId) {
   if (platformId) {
     const acct = (store.config.platforms || []).find(p => String(p.id) === String(platformId))
     if (!acct) throw new Error('服务平台账号不存在：' + platformId)
+    if (acct.enabled === false) throw new Error('服务平台账号已停用：' + platformId + '（设置里启用后再扫描）')
     svc = { adapter: getService(acct.type), acct, type: acct.type, preview: false }
   } else {
     svc = getActiveService(store.config)
   }
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
-  const key = String(svc.acct.id || svc.acct.url || '') + '|' + svc.type
+  // S7：缓存键必须含 url / 凭据 / 目标身份，否则同 id 改了地址仍复用旧 adapter
+  const a = svc.acct || {}
+  const key = [a.id, a.url, a.username, a.password, svc.type]
+    .map(x => String(x == null ? '' : x)).join('|')
   if (updater && updaterKey === key) return updater
   updater = createUpdater({
     adapter: svc.adapter,
@@ -786,10 +793,17 @@ route('GET', '/api/source-update/last', guard((req) => {
 
 route('POST', '/api/source-update/apply', guard(async (req, res, ctx) => {
   const b = ctx.body || {}
-  // 默认 dry-run：不给 apply+confirm 时 core 层直接抛错，不产生任何写操作
+  // 2026-11-10 21:01 定调：检测与灌入归 lx-hunter 主链路（runImport）；
+  // 本模块从服务端列表反查，服务端不回传脚本正文/hash，天然证据不足 → 只读巡检/报告层。
+  // 真要删旧灌新请走「灌入」；确需在此实验执行，必须显式三重确认。
+  if (b.experimental !== true) {
+    throw new Error('只读巡检模式：本接口默认只出报告，未执行任何写操作。真实删旧灌新请走「灌入」；确需在此实验执行请显式传 experimental:true + apply:true + confirm:true')
+  }
+  // S6：maxAgeMs 不接受外部传值（core 层固定钳到 10 分钟），防止旧报告被复活
   return await getUpdater(b.platformId).apply(b.ids, {
     apply: b.apply === true, confirm: b.confirm === true,
-    owner: b.owner || null, maxAgeMs: b.maxAgeMs
+    owner: b.owner || null,
+    allowNoStateMigration: b.allowNoStateMigration === true
   })
 }))
 

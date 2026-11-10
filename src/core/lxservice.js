@@ -238,6 +238,31 @@ async function remove(cfg, id, opts) {
   return { success: true }
 }
 
+/**
+ * 回收站（2026-11-10，S3 原子性配套）：
+ * lxserver 的 delete 默认把脚本移进 .trash/，配 /api/custom-source/trash(list) 与
+ * /trash/restore。删旧灌新若 upload 最终失败，可用它把旧脚本自动放回去，
+ * 避免留下「已删未装」的空窗；旧脚本正文服务端不回传，这是唯一可靠的回滚来源。
+ */
+async function listTrash(cfg, owner) {
+  const username = (owner && owner !== 'open' && owner !== '_open' && owner !== 'default')
+    ? owner : targetUsername(cfg)
+  const r = await req(cfg, 'GET', `/api/custom-source/trash?username=${encodeURIComponent(username)}`)
+  if (!r.ok) return []
+  const d = r.data || {}
+  return Array.isArray(d.items) ? d.items : []
+}
+
+async function restoreTrash(cfg, owner, file) {
+  if (!file) return { success: false, message: '缺回收站文件名' }
+  const username = (owner && owner !== 'open' && owner !== '_open' && owner !== 'default')
+    ? owner : targetUsername(cfg)
+  const r = await req(cfg, 'POST', '/api/custom-source/trash/restore', { username, file }, 120000)
+  if (!r.ok) return { success: false, message: (r.data && r.data.error) || `HTTP ${r.status}` }
+  if (r.data && r.data.success === false) return { success: false, message: (r.data && (r.data.error || r.data.message)) || '恢复失败' }
+  return { success: true }
+}
+
 // ================= 公共音源清理（v1.7.4） =================
 // PC 版实践发现的问题：lxserver 的音源分两套存储——
 //  公开源（owner=open，落在 _open 目录）：所有账号可用、LX 网页端音源管理页可见可管，
@@ -343,4 +368,4 @@ async function removePublicBatch(cfg, ids, onProgress) {
   return out
 }
 
-module.exports = { verify, list, importUrl, upload, toggle, remove, setPlatforms, validate, baseUrl, listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername }
+module.exports = { verify, list, importUrl, upload, toggle, remove, setPlatforms, validate, baseUrl, listTrash, restoreTrash, listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername }

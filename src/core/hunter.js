@@ -8,10 +8,14 @@ const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, i
 const { crawlFetch, readText, sleep } = require('./net')
 const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
 const { Store } = require('./store')
+// 2026-11-10 科学性复核：版本算法 / 身份键 / 质量判据统一到单一来源，
+// 不再各写一份（详见 src/core/version.js 顶部说明）。
+const { versionKey: versionNum, cmpVersion } = require('./version')
+const { normName, candidateRepo, serverRepo } = require('./identity')
+const { compareQuality, describeQuality } = require('./quality')
 
-function normName(s) {
-  return String(s || '').toLowerCase().replace(/[\[\]【】（）()|｜:：、,，.。\s_\-·•]+/g, '')
-}
+// normName 已统一到 src/core/identity.js（hunter / sourceUpdate 必须完全同口径），
+// 这里通过顶部 require 引入；module.exports 继续导出同名符号，外部调用不受影响。
 
 /**
  * 构建本次爬取的仓库种子列表（v1.9.12，纯函数便于测试）。
@@ -57,14 +61,9 @@ function isWeakBaseName(nm) {
   if (nm.length <= 2) return true        // 过短：kw.js / kg.js
   return WEAK_BASE_NAMES.has(nm)
 }
-function versionNum(s) {
-  const m = String(s || '').match(/[vV]?(\d+(?:\.\d+)+)/)
-  if (!m) return 0
-  const parts = m[1].split('.')
-  let v = 0
-  for (let i = 0; i < Math.min(parts.length, 4); i++) v = v * 1000 + (parseInt(parts[i], 10) || 0)
-  return v
-}
+// versionNum 已统一到 src/core/version.js 的逐段零填充键（versionKey）。
+// 返回字符串而不是数字：调用点一律用 cmpVersion() 比较，禁止做减法。
+// 顶部 require 以别名 versionNum 引入，module.exports 继续导出同名符号。
 
 /**
  * 把「间隔小时数」说成人话（定时任务的日志用）：48 → 「2 天（48 小时）」。
@@ -1016,7 +1015,8 @@ class Hunter {
     if (!keep || !drop || !keep.repo || keep.repo !== drop.repo) return false
     const vk = versionNum(keep.scriptVersion || keep.scriptName || keep.name)
     if (!vk) return false
-    return vk > versionNum(drop.scriptVersion || drop.scriptName || drop.name)
+    return cmpVersion(keep.scriptVersion || keep.scriptName || keep.name,
+                      drop.scriptVersion || drop.scriptName || drop.name) > 0
   }
 
   _isNewerIteration(keep, drop) {
@@ -1060,9 +1060,9 @@ class Hunter {
     if (!!a.updated !== !!b.updated) return !!a.updated
     const la = a.lastModified || 0, lb = b.lastModified || 0
     if (la !== lb) return la > lb
-    const va = versionNum(a.scriptVersion || a.scriptName || a.name)
-    const vb = versionNum(b.scriptVersion || b.scriptName || b.name)
-    if (va !== vb) return va > vb
+    const vc = cmpVersion(a.scriptVersion || a.scriptName || a.name,
+                          b.scriptVersion || b.scriptName || b.name)
+    if (vc !== 0) return vc > 0
     return String(a.id) < String(b.id)
   }
 
@@ -2064,6 +2064,8 @@ class Hunter {
     }
     try {
       let r = null
+      // S3 / 原子性：删旧灌新过程的状态存档与回滚信息（写入本轮灌入结果，便于审计）
+      let replaceInfo = null
       if (item.sameContentServer) {
         // 服务端已有一份内容相同的音源（同名命中，或按脚本内容指纹比对命中）：不重复上传，
         // 直接把本地这条挂到服务端那一条上，标记为「已灌入」。
@@ -2079,12 +2081,21 @@ class Hunter {
         // 删除会触发服务端全量脚本重载，等 2.5s 再传，规避「已存在」。
         const srv = item.replaceServer
         const code = codeCache[e.id]
+        // S3：lxserver 按 @name 生成 id，版本写进名字时删旧灌新必然换 id，
+        // states.json（平台开关）/ order.json（排序）按 id 存会全丢 → 删前先存档。
+        const oldState = {
+          id: srv.id, name: srv.name || name, owner: srv.owner,
+          enabled: srv.enabled !== false,
+          disabledSources: Array.isArray(srv.disabledSources) ? srv.disabledSources.slice() : []
+        }
+        replaceInfo = { oldState, deleted: false, migration: null, trash: null, restored: null }
         const rm = await svc.adapter.remove(svc.acct, srv.id, { owner: srv.owner })
         if (!rm.success) {
           this.log(tag + `替换失败：服务端旧版「${srv.name || name}」删除失败（${rm.message}），退回改名上传`, '灌入', 'warn')
           r = await this._uploadRenamed(svc, code, item.baseName, p.serverByName, p.usedRename)
           if (r && r.success) r.replacedFallback = 'renamed'
         } else {
+          replaceInfo.deleted = true
           this.log(tag + `已删除服务端旧版「${srv.name || name}」（id=${srv.id}），等待服务端重载后上传新版本…`, '灌入')
           await sleep(2500)
           r = await svc.adapter.upload(svc.acct, code, name)
@@ -2100,12 +2111,61 @@ class Hunter {
           }
         }
         if (r && r.success) {
+          // S3-B：按新 id 重建平台开关与启用态（lxserver 零改动，状态也由 lx-hunter 主导）
+          const ad = svc.adapter
+          const canMigrate = typeof ad.setPlatforms === 'function' || typeof ad.toggle === 'function'
+          if (canMigrate && r.id && r.id !== srv.id) {
+            const mig = {}
+            try {
+              if (oldState.disabledSources.length && typeof ad.setPlatforms === 'function') {
+                const m = await ad.setPlatforms(svc.acct, r.id, oldState.disabledSources, { owner: r.owner || srv.owner })
+                mig.platforms = !!(m && m.success !== false)
+              }
+              if (oldState.enabled === false && typeof ad.toggle === 'function') {
+                const t = await ad.toggle(svc.acct, r.id, false, { owner: r.owner || srv.owner })
+                mig.enabled = !!(t && t.success !== false)
+              }
+              this.log(tag + `已按新 id=${r.id} 重建旧状态（禁用平台 ${oldState.disabledSources.join('/') || '无'}，启用态 ${oldState.enabled}）`, '灌入', 'info')
+            } catch (me) {
+              mig.error = String((me && me.message) || me)
+              this.log(tag + '状态重建失败（新版已装上，请手动恢复平台开关）：' + mig.error, '灌入', 'warn')
+            }
+            replaceInfo.migration = mig
+          } else if (!canMigrate) {
+            // S3-C：适配器不支持迁移时只提示，不阻断已成功的灌入（sourceUpdate.apply 则直接拒绝）
+            replaceInfo.migration = { unsupported: true }
+            this.log(tag + '当前平台不支持状态迁移：新版已装上，平台开关/排序可能按新 id 重置', '灌入', 'warn')
+          }
           // 清理本地「已灌入」里指向被替换音源的旧记录（服务端那份已不存在）
           let purged = 0
           for (const [k, rec] of Object.entries(this.store.imported)) {
             if (rec && rec.lxId === srv.id) { this._dropPlatformFromImported(k, svc.acct.id); purged++ }
           }
           if (purged) { this.store.saveImported(); this.log(tag + `已清理 ${purged} 条指向被替换音源的本地灌入记录`, '灌入', 'info') }
+        } else if (replaceInfo.deleted) {
+          // 原子性：已删未装 → 自动从服务端回收站恢复旧脚本；并把 trash 定位信息写进结果
+          replaceInfo.trash = {
+            owner: oldState.owner, id: oldState.id, name: oldState.name,
+            at: new Date().toISOString()
+          }
+          const ad = svc.adapter
+          if (typeof ad.listTrash === 'function' && typeof ad.restoreTrash === 'function') {
+            try {
+              const items = await ad.listTrash(svc.acct, oldState.owner)
+              const hit = (items || []).find(t => String(t.id) === String(oldState.id))
+              if (hit) {
+                replaceInfo.trash.file = hit.file
+                const rr = await ad.restoreTrash(svc.acct, oldState.owner, hit.file)
+                replaceInfo.restored = !!(rr && rr.success !== false)
+              } else replaceInfo.restored = false
+            } catch (re) {
+              replaceInfo.restored = false
+              replaceInfo.trash.error = String((re && re.message) || re)
+            }
+          }
+          this.log(tag + (replaceInfo.restored
+            ? '灌入失败，已自动从服务端回收站恢复旧脚本（避免已删未装空窗）'
+            : '灌入失败且旧脚本已删除：请先到服务端回收站恢复，trash 定位信息见本轮结果'), '灌入', 'warn')
         }
       } else if (item.renameServer) {
         // 同名 + 内容不同 + 用户关闭了自动替换：改名后上传，规避服务端「已存在」
@@ -2130,10 +2190,17 @@ class Hunter {
             : (item.why ? '（' + item.why + '）' : '')
         const st = item.replaceServer && r.replacedFallback !== 'renamed' ? 'replaced' : 'success'
         this.log(tag + `已灌入：${name}${note}（id=${r.id}）`, '灌入')
-        return Object.assign(base(), { status: st, lxId: r.id, message: (r.message || '') + note, platforms: r.platforms || [] })
+        return Object.assign(base(), {
+          status: st, lxId: r.id, message: (r.message || '') + note, platforms: r.platforms || [],
+          stateMigration: replaceInfo ? replaceInfo.migration : null
+        })
       }
       this.log(tag + '灌入失败：' + name + ' — ' + ((r && r.message) || '导入失败'), '灌入', 'warn')
-      return Object.assign(base(), { status: 'failed', message: (r && r.message) || '导入失败', requireUnsafe: !!(r && r.requireUnsafe) })
+      return Object.assign(base(), {
+        status: 'failed', message: (r && r.message) || '导入失败', requireUnsafe: !!(r && r.requireUnsafe),
+        trash: replaceInfo ? replaceInfo.trash : null,
+        restored: replaceInfo ? replaceInfo.restored : null
+      })
     } catch (err) {
       const msg = String((err && err.message) || err)
       this.log(tag + '灌入失败：' + name + ' — ' + msg, '灌入', 'warn')
@@ -2250,31 +2317,49 @@ class Hunter {
   }
 
   /**
-   * 同名音源的裁决规则（纯函数，v1.8.0 抽出并把口径写死在这里，便于单测和排错）。
+   * 同名音源的裁决规则（纯函数，v1.8.0 抽出；2026-11-10 按用户 1/2/3 口径重排）。
    *
    * 先明确一件事：**「已灌入」不是一个终态，而是「本地账本」**。用户会在网页端手动删源、
    * 会换内容重新发布、会遇到两个不同作者用了同一个名字。所以本地记录只能用来「提示」，
    * 不能用来「拦」，真正的依据必须是服务端此刻的实际列表（见 _planImportQueue 传入的 serverIds）。
    *
-   * 判定顺序（越靠前越硬）：
-   *  1. 字节长度相同            → synced  同名同内容，服务端就是它，标记已灌入即可，不重传
-   *  2. 服务端声明平台数 > 本地实测 → skip    哪个可用平台多用哪个（v1.7.0 用户要求）
-   *  3. 两边版本号都可解析       → 高的赢   本地更高 → replace（删旧装新）；否则 skip（服务端不旧）
-   *  4. 两边都有平台信息但完全无交集 → rename 明显是两个无关脚本撞了名 → 改名并存，不删旧的
-   *  5. 其余（信息不足）         → 按设置    默认 replace（先删后传），设置里关掉则 rename
+   * 用户 21:01 拍板的三条口径：
+   *  1) 不同名 → 直接灌入（本函数只处理同名）
+   *  2) 同名 + 同仓库 + 版本有别 → 留新删旧（版本高的赢）；但本地实测 0 平台、
+   *     或可用平台少于服务端声明时不做「质量降级式」替换
+   *  3) 同名 + 不同仓库 → 由 lx-hunter 实测质量裁决（见 quality.js）：明显更优才
+   *     留优删差，平手 / 证据不足一律不删，改名并存
    *
-   * 注意 2/4 都要求「两边都拿得到数」：服务端没声明平台、或本地没深检过，就跳过该条规则，
-   * 绝不拿半个信息去猜 —— 猜错要么删掉能用的源，要么把无关脚本覆盖掉，都不可逆。
+   * 关键取舍：只有**两边都能拿出仓库同源键**时才分流到 2/3。17950 实测 38 条里
+   * homepage 非空仅 11 条，缺证据时一律沿用 v1.7.0 的保守旧规则，绝不猜仓库归属。
+   *
+   * 判定顺序（越靠前越硬）：
+   *  1. 同名同内容（hash / 字节长度）  → synced
+   *  2. 本地实测 0 个可用平台          → skip（绝不越换越差）
+   *  2.5 同源证据齐备                  → 按口径 2 / 3 分流
+   *  3. 服务端声明平台数 > 本地实测    → skip（仅无同源证据时的旧保护）
+   *  4. 两边版本号都可解析            → 高的赢（仅无同源证据时）
+   *  5. 平台零交集 → rename；有交集 → replace（跨仓库撞名保护）
+   *  6. 信息不足   → 按设置（默认 replace，关掉则 rename）
    *
    * @returns {{act:'synced'|'skip'|'replace'|'rename', why:string}}
    */
   sameNameVerdict(e, srv, code, cfg) {
     const c = cfg || {}
+    const nameForCmp = e.scriptName || e.lxName || e.name
     // 1) 同名同内容 → 服务端就是它，标记已灌入即可，不重传。
-    //    平台能回传脚本内容时（srv.hash）按内容指纹比，最准；不能回传的平台退回比字节长度。
+    //    精确证据：内容 sha256 / 服务端回传的脚本正文全文。
+    //    弱证据：字节长度相同 —— 只在「版本号不可比或版本相同」时才允许采信。
+    //    2026-11-10 17960 实机：v1.0.0 → v1.1.0 只改了等长字符，服务端又不回传
+    //    hash / 正文（17950 实测 38 条中均为 0），靠 size 判 synced 会把用户口径 2
+    //    的「留新删旧」直接卡死。等长不等于同内容，版本号明确不同时强证据优先。
     const sameHash = !!(e.contentHash && srv.hash && e.contentHash === srv.hash)
+    const srvCode = srv.script || srv.code || ''
+    const sameCode = !!(code && srvCode && String(code) === String(srvCode))
     const sameSize = !!(code && srv.size && Buffer.byteLength(code, 'utf-8') === srv.size)
-    if (sameHash || (!srv.hash && sameSize)) {
+    const versionConflict = !!(versionNum(nameForCmp) && versionNum(srv.name) &&
+                               cmpVersion(nameForCmp, srv.name) !== 0)
+    if (sameHash || sameCode || (!srv.hash && !srvCode && sameSize && !versionConflict)) {
       return { act: 'synced', why: '同名同内容，服务端已有（未重复上传）' }
     }
 
@@ -2289,23 +2374,49 @@ class Hunter {
     if (checked && newN === 0) {
       return { act: 'skip', why: '本地实测 0 个可用平台 → 不替换（保留服务端现条目，避免越换越差）' }
     }
-    // 3) 服务端现条目可用平台更多 → 保留服务端
+
+    // 2.5) 用户口径 2/3：同源代码齐备才分流；缺证据不猜，落到下面的旧规则
+    const ck = candidateRepo(e), sk = serverRepo(srv)
+    const provenSame = !!(ck && sk && ck === sk)
+    const provenDifferent = !!(ck && sk && ck !== sk)
+    const localName = nameForCmp
+    const lv = versionNum(localName), sv = versionNum(srv.name)
+    const vc = cmpVersion(localName, srv.name)
+
+    if (provenSame && lv && sv) {
+      if (vc > 0) {
+        if (srvN > 0 && newN >= 0 && newN < srvN) {
+          return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
+        }
+        return { act: 'replace', why: `同仓库同名，本地版本更高（${localName} > ${srv.name}）→ 留新删旧（删旧装新）` }
+      }
+      return { act: 'skip', why: `同仓库同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
+    }
+    if (provenDifferent) {
+      if (!checked) {
+        return { act: 'rename', why: '跨仓库同名但本地未实测 → 无法按质量裁决，改名并存（请先做全平台检测）' }
+      }
+      const note = `本地 ${describeQuality(e)} vs 服务端 ${describeQuality(srv)}`
+      const q = compareQuality(e, srv)
+      if (q > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 实测质量更优（${note}）→ 留优删差（删旧装新）` }
+      if (q < 0) return { act: 'skip', why: `跨仓库同名：服务端现条目质量更优（${note}）→ 保留服务端，本地不灌` }
+      return { act: 'rename', why: `跨仓库同名但质量判据平手（${note}）→ 不删任何一方，改名并存` }
+    }
+
+    // 3) 服务端现条目可用平台更多 → 保留服务端（无同源证据时的保守保护）
     if (srvN > 0 && newN >= 0 && newN < srvN) {
       return { act: 'skip', why: `服务端现条目支持 ${srvN} 个平台、多于本地实测可用的 ${newN} 个 → 保留服务端（哪个可用多用哪个）` }
     }
 
-    // 3) 版本号可比 → 版本高的赢
-    const localName = e.scriptName || e.lxName || e.name
-    const lv = versionNum(localName)
-    const sv = versionNum(srv.name)
+    // 4) 版本号可比 → 版本高的赢（versionKey 是字符串键，必须走 cmpVersion）
     if (lv && sv) {
-      if (lv > sv) {
+      if (vc > 0) {
         return { act: 'replace', why: `同名，本地版本更高（${localName} > ${srv.name}）→ 更新（删旧装新）` }
       }
       return { act: 'skip', why: `同名，服务端版本不低于本地（${srv.name} ≥ ${localName}）→ 保留服务端` }
     }
 
-    // 4) 平台重叠：有交集 → 同一音源的新版本；完全无交集 → 明显无关，改名并存
+    // 5) 平台重叠：有交集 → 同一音源的新版本；完全无交集 → 明显无关，改名并存
     if (srvN > 0 && newN > 0) {
       const overlap = srvPlats.filter(p => localPlats.indexOf(p) >= 0)
       if (!overlap.length) {
@@ -2317,7 +2428,7 @@ class Hunter {
       return { act: 'replace', why: `同名且平台有重叠（${overlap.join('/')}）→ 视作同一音源的新版本，更新（删旧装新）` }
     }
 
-    // 5) 信息不足 → 按设置（默认更新，避免用户升级后同名新版灌不进去）
+    // 6) 信息不足 → 按设置（默认更新，避免用户升级后同名新版灌不进去）
     if (c.replaceSameNameOnImport === false) {
       return { act: 'rename', why: '同名不同内容；设置里关闭了自动替换 → 改名上传（保留服务端旧版）' }
     }

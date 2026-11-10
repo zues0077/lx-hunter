@@ -31,6 +31,9 @@ function remove(acct, id, opts) { return L.remove(toCfg(acct), id, opts) }
 function setPlatforms(acct, id, disabledSources, opts) { return L.setPlatforms(toCfg(acct), id, disabledSources, opts) }
 function validate(acct, code) { return L.validate(toCfg(acct), code) }
 function baseUrl(acct) { return L.baseUrl(toCfg(acct)) }
+// S3 原子性：删旧灌新失败时从服务端回收站自动恢复旧脚本
+function listTrash(acct, owner) { return L.listTrash(toCfg(acct), owner) }
+function restoreTrash(acct, owner, file) { return L.restoreTrash(toCfg(acct), owner, file) }
 
 // ---- lxserver 专属：公共音源清理（v1.7.4），其余平台不支持 ----
 function listPublic(acct) { return L.listPublic(toCfg(acct)) }
@@ -45,5 +48,6 @@ module.exports = {
   // 名字即 key：服务端按脚本 @name 生成 id，重名会被拒（README「灌入提示已存在」即此）。
   uniqueName: true,
   verify, list, upload, importUrl, toggle, remove, setPlatforms, validate, baseUrl,
+  listTrash, restoreTrash,
   listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername
 }

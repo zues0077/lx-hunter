@@ -70,18 +70,21 @@ function decodeZipName(nameBuf, flags) {
 }
 
 /**
- * 脚本正文解码：绝大多数是 UTF-8，保持原样（避免误伤）；只有明确出现替换符或
- * 「伪中文」时才用 GBK 重解。ZIP 内文件名用 decodeZipName，不要用这个。
+ * 脚本正文解码：只在明确出现 U+FFFD 时才尝试 GBK 重解。
+ * 逻辑复核（2026-11-10）：上一版用 looksGarbled（罕见 Unicode 区块）做判据，
+ * 会把含合法俄文/希伯来/亚美尼亚注释的 UTF-8 脚本误判成乱码并改坏，实测已复现。
+ * 取舍：宁可放过「GBK 双字节恰好构成合法 UTF-8 序列」的极少数脚本正文，
+ * 也不能改坏合法 UTF-8；ZIP entry 名的乱码由 decodeZipName 按 bit-11 精确处理。
  */
 function decodeScriptText(buf) {
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ''))
   if (!b.length) return ''
-  const utf8 = b.toString('utf8')
-  if (!looksGarbled(utf8)) return utf8.replace(/^\uFEFF/, '')
+  const utf8 = b.toString('utf8').replace(/^\uFEFF/, '')
+  if (countReplacement(utf8) === 0) return utf8
   const dec = gbkDecoder()
-  const gbk = dec ? dec.decode(b) : null
-  if (gbk && !looksGarbled(gbk)) return gbk.replace(/^\uFEFF/, '')
-  return utf8.replace(/^\uFEFF/, '')
+  const gbk = dec ? dec.decode(b).replace(/^\uFEFF/, '') : null
+  if (gbk && countReplacement(gbk) < countReplacement(utf8)) return gbk
+  return utf8
 }
 
 /** 在文件末尾向前找 EOCD（End Of Central Directory）签名 */
