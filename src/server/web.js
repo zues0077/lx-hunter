@@ -18,7 +18,7 @@ const path = require('path')
 const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours, patrolSchedule } = require('../core/hunter')
 const { getActiveService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
-const { createSourceUpdater } = require('../core/sourceUpdate')
+const { createUpdater } = require('../core/sourceUpdate')
 const { DEFAULT_REPOS } = require('../core/crawler')
 const { Auth, SESSION_TTL_MS } = require('../core/auth')
 
@@ -721,7 +721,7 @@ function getUpdater() {
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
   const key = String(svc.acct.id || svc.acct.url || '') + '|' + svc.type
   if (updater && updaterKey === key) return updater
-  updater = createSourceUpdater({
+  updater = createUpdater({
     adapter: svc.adapter,
     acct: svc.acct,
     getCandidates: async (opts) => {
