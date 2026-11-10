@@ -42,11 +42,23 @@ console.log('\n== 基础纯函数 ==')
   assert.strictEqual(U.versionNum('没有版本号'), 0)
   ok('versionNum 可比较、不可解析返回 0')
 
+  // 2026-11-10 实机：v4.0.0（3 段）曾算出 4,000,000，小于 v3.1.1.1（4 段）的
+  // 3,001,001,001 → 把降级误判成「候选版本更高」。必须补齐到固定 4 段。
+  assert.ok(U.versionNum('v4.0.0') > U.versionNum('v3.1.1.1'))
+  assert.ok(U.versionNum('1.10') > U.versionNum('1.9.9.9'))
+  assert.strictEqual(U.versionNum('v2.0'), U.versionNum('v2.0.0'))
+  ok('versionNum 补齐段数：跨段数比较不反转，2.0 == 2.0.0')
+
   assert.strictEqual(U.repoKey({ repository: 'https://github.com/Foo/Bar/tree/main' }), 'gh:foo/bar')
   // raw.github.com 也归到同一个 GitHub 仓库键：A 反查常拿 raw 直链当 repository
   assert.strictEqual(U.repoKey({ url: 'https://raw.github.com/foo/bar/main/x.js' }), 'gh:foo/bar')
   assert.strictEqual(U.repoKey({}), '')
   ok('repoKey 归一 GitHub 仓库（含 raw 链接）、缺信息返回空（不猜）')
+
+  assert.strictEqual(U.repoKey({ repository: 'https://github.com/your-repo/StellarWave' }), '')
+  assert.strictEqual(U.repoKey({ repository: 'https://github.com/example/demo' }), '')
+  assert.notStrictEqual(U.repoKey({ repository: 'https://github.com/zues0077/lx-hunter' }), '')
+  ok('占位/模板仓库地址不算同源证据（防「两边都填 your-repo」假同源）')
 }
 
 console.log('\n== B 信号：只抽取、不判定 ==')
@@ -78,6 +90,22 @@ console.log('\n== A 配对主口径 ==')
   items = U.pairSources([srv({ version: '1.9', name: '测试源 v1.9' })], [cand()], {})
   assert.strictEqual(items[0].verdict, 'current')
   ok('服务端版本不低于候选 → current，不更新')
+
+  // 246 实机踩到：服务端 v4.0.0、候选 v3.1.1.1、@repository 还是 your-repo 占位符。
+  // 修复前会被判 updatable 并放行一次「降级更新」。
+  items = U.pairSources(
+    [srv({ version: 'v4.0.0', repository: 'https://github.com/your-repo/StellarWave' })],
+    [cand({ scriptVersion: 'v3.1.1.1', repository: 'https://github.com/your-repo/StellarWave' })], {})
+  assert.strictEqual(items[0].verdict, 'current')
+  assert.strictEqual(items[0].applyAllowed, false)
+  ok('跨段数版本 + 占位仓库：服务端更高 → current，绝不放行降级')
+
+  items = U.pairSources(
+    [srv({ version: '1.0', repository: 'https://github.com/your-repo/x' })],
+    [cand({ scriptVersion: '9.9', repository: 'https://github.com/your-repo/x' })], {})
+  assert.strictEqual(items[0].verdict, 'unmatched')
+  assert.strictEqual(items[0].applyAllowed, false)
+  ok('两边都填占位仓库不构成同源证据 → 只报告不自动更新')
 
   items = U.pairSources([srv({ hash: U.sha256('new-code') })], [cand()], {})
   assert.strictEqual(items[0].verdict, 'current')

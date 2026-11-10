@@ -37,7 +37,9 @@ function versionNum(s) {
   if (!m) return 0
   const parts = m[1].split('.')
   let v = 0
-  for (let i = 0; i < Math.min(parts.length, 4); i++) v = v * 1000 + (parseInt(parts[i], 10) || 0)
+  // 必须补齐到固定 4 段再累加：旧版按实际段数循环，v4.0.0 只有 3 段算出 4,000,000，
+  // 反而小于 4 段的 v3.1.1.1 (3,001,001,001) → 把「降级」误判成「候选版本更高」。
+  for (let i = 0; i < 4; i++) v = v * 1000 + (parseInt(parts[i], 10) || 0)
   return v
 }
 
@@ -62,6 +64,10 @@ function extractUpdateHints(input) {
  * 同源键：把 repository / homepage / url 归一到 owner/repo 或 host/path 前两段。
  * 拿不到就返回 ''，交回上层按「缺同源证据」处理，绝不猜。
  */
+/** 明显的模板/占位仓库地址不算同源证据：作者常把 @repository 写成
+ *  https://github.com/your-repo/xxx 交模板，两边都填占位值会「假同源」而误放行更新。 */
+const PLACEHOLDER_REPO = /^(your[-_]?repo|your[-_]?name|yourname|your[-_]?org|example|placeholder|dummy|owner|username|user|repo|xxx+|todo|tbd|none|null|undefined)$/i
+
 function repoKey(meta) {
   const raw = String((meta && (meta.repository || meta.homepage || meta.url || meta.repo)) || '').trim()
   if (!raw) return ''
@@ -69,8 +75,12 @@ function repoKey(meta) {
     const u = new URL(raw.replace(/^github:/, 'https://github.com/'))
     const seg = u.pathname.split('/').filter(Boolean)
     if (/github\.com$/i.test(u.hostname) && seg.length >= 2) {
-      return 'gh:' + seg[0].toLowerCase() + '/' + seg[1].toLowerCase().replace(/\.git$/, '')
+      const owner = seg[0].toLowerCase()
+      const repo = seg[1].toLowerCase().replace(/\.git$/, '')
+      if (PLACEHOLDER_REPO.test(owner) || PLACEHOLDER_REPO.test(repo)) return ''
+      return 'gh:' + owner + '/' + repo
     }
+    if (seg.length && (PLACEHOLDER_REPO.test(seg[0]) || PLACEHOLDER_REPO.test(seg[1] || ''))) return ''
     return u.hostname.toLowerCase().replace(/^www\./, '') + '/' + seg.slice(0, 2).join('/').toLowerCase()
   } catch (e) {
     const m = raw.match(/^([\w.-]+)\/([\w.-]+)/)
