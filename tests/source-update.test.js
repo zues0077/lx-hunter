@@ -119,6 +119,20 @@ console.log('\n== 四个护栏 ==')
   assert.strictEqual(items[0].verdict, 'unsafe')
   ok('沿用同名裁决：候选实测 0 平台 → 不替换')
 
+  // 2026-11-10 实机：checker.js 写的是 status:'usable'，旧版只认 ok/passed →
+  // 已深检且全平台可用的候选 usablePlatforms 恒为 0，A 覆盖率永远上不去。
+  const realDeep = { checkedAt: Date.now(), platforms: {
+    kw: { status: 'usable' }, tx: { status: 'usable' }, wy: { status: 'usable' },
+    mg: { status: 'failed' }, kg: { status: 'untested' }
+  } }
+  assert.deepStrictEqual(U.candidateMeta(cand({ deep: realDeep })).usablePlatforms.sort(), ['kw', 'tx', 'wy'])
+  ok("深检状态 'usable' 被识别（failed / untested 不计入）")
+
+  items = U.pairSources([srv()], [cand({ deep: realDeep })], {})
+  assert.notStrictEqual(items[0].verdict, 'unsafe', items[0].reason)
+  assert.ok(!/0 个可用平台/.test(items[0].reason))
+  ok("真实深检平台可用时不再误判「候选实测 0 平台」")
+
   items = U.pairSources([srv({ supportedSources: ['wy', 'mg'] })], [cand()], {})
   assert.strictEqual(items[0].verdict, 'unsafe')
   ok('平台零交集 → 疑似无关脚本撞名，改名并存不删旧')

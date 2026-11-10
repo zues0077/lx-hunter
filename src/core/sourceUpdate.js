@@ -105,7 +105,11 @@ function candidateMeta(e) {
   const platforms = deep.platforms || {}
   const usablePlatforms = Object.keys(platforms).filter(k => {
     const p = platforms[k] || {}
-    return p.status === 'ok' || p.status === 'passed' || p.ok === true || p.pass === true
+    // 实测状态以 checker.js 写入的 'usable' 为准（还有历史值 ok / passed）；
+    // 旧版漏了 'usable' → 已深检过的候选 usablePlatforms 恒为 0，
+    // 导致 pairSources 一律判「候选本地实测 0 个可用平台」，A 覆盖率上不去。
+    return p.status === 'usable' || p.status === 'ok' || p.status === 'passed' ||
+      p.ok === true || p.pass === true
   })
   return {
     id: String(e.id || ''),
