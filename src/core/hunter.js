@@ -2007,9 +2007,10 @@ class Hunter {
       }
       p.importedRecs = this._importedRecsFor(p.svc.acct.id, activeId)
       p.serverScore = this._scoreByServerId(p.svc.acct.id, activeId)
+      p.ledger = this._ledgerByEntry(p.svc.acct.id, activeId)
       p.queue = this._planImportQueue(targets, {
         cfg, serverByName: p.serverByName, serverIds: p.serverIds, serverList: p.serverList,
-        codeCache, importedRecs: p.importedRecs, serverScore: p.serverScore,
+        codeCache, importedRecs: p.importedRecs, serverScore: p.serverScore, ledger: p.ledger,
         // 该平台名字是不是 key：不是（MusicSync）则同名不需要改名，直接新增为独立条目
         uniqueName: p.svc.adapter.uniqueName !== false
       })
@@ -2363,6 +2364,37 @@ class Hunter {
   }
 
   /**
+   * 「本地条目 id → 上次灌入时的正文 hash」账本。
+   *
+   * 为什么需要它：`srv.hash` 与 `srv.script` 在 lxserver/Songloft 上**恒为空**
+   * （17950 实测 38 条全无 hash、无正文），于是同名判定只剩 `srv.size` 这一条弱证据：
+   * 版本号相同时（作者改了 bug 没升版本），只要字节长度没变就会被判 `synced`，
+   * 「留新删旧」直接卡死 —— 2026-11-10 在 17960 上真实复现过（v1.0.0→v1.1.0 等长）。
+   *
+   * 账本记的是「这份正文当初确实灌进去了」，所以：
+   *   账本 hash == 本地 hash  → 真的没变（强证据，比 size 可靠）
+   *   账本 hash != 本地 hash  → 内容变了（强证据，必须让 size 判据失效）
+   * 只有在 `e.id` 不变时才能命中 —— 这点不是缺陷而是互补：
+   * 改了 @name（带版本号）的更新必然换 id，那条路已由版本号比较覆盖。
+   *
+   * 已知残留风险：若用户在网页端手工改过脚本且 id 未变，账本会误判「没变」。
+   * 这种情况服务端不回任何内容字段，任何本地算法都无从察觉；概率低且不会造成数据丢失
+   * （后果只是「这次没重灌」，下次深检内容再变时 hash 不同就会正常更新）。
+   */
+  _ledgerByEntry(platformId, activeId) {
+    const out = {}
+    for (const [eid, rec] of Object.entries(this.store.imported || {})) {
+      if (!rec || !rec.contentHash) continue
+      const pid = rec.platformId == null ? activeId : rec.platformId
+      const hit = pid === platformId ||
+        (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === platformId && x.lxId != null))
+      if (!hit) continue
+      out[eid] = { hash: rec.contentHash, lxId: rec.lxId, name: rec.name || '' }
+    }
+    return out
+  }
+
+  /**
    * 某平台账号「已灌入过的内容」指纹表（用于跨批次去重）。
    * 多平台下必须按账号过滤：只灌过 A 的源，灌 B 时不该被判为「已灌入」而跳过。
    * 老记录（platformId 为 null，v1.8.0 之前）归入当前选中账号。
@@ -2413,8 +2445,9 @@ class Hunter {
    *
    * @returns {{act:'synced'|'skip'|'replace'|'rename', why:string}}
    */
-  sameNameVerdict(e, srv, code, cfg) {
+  sameNameVerdict(e, srv, code, cfg, opt) {
     const c = cfg || {}
+    const led = (opt && opt.ledger) || null
     const nameForCmp = e.scriptName || e.lxName || e.name
     // 1) 同名同内容 → 服务端就是它，标记已灌入即可，不重传。
     //    精确证据：内容 sha256 / 服务端回传的脚本正文全文。
@@ -2428,8 +2461,33 @@ class Hunter {
     const sameSize = !!(code && srv.size && Buffer.byteLength(code, 'utf-8') === srv.size)
     const versionConflict = !!(versionNum(nameForCmp) && versionNum(srv.name) &&
                                cmpVersion(nameForCmp, srv.name) !== 0)
-    if (sameHash || sameCode || (!srv.hash && !srvCode && sameSize && !versionConflict)) {
-      return { act: 'synced', why: '同名同内容，服务端已有（未重复上传）' }
+    // 本地账本（上次真正灌进去的那份正文 hash）——服务端不回 hash/正文时唯一可靠的强证据。
+    //   相等 → 内容确实没变；不等 → 内容确实变了，此时 size 判据必须失效（等长改动）
+    // `ledSame` 额外要求「服务端这条就是我们当初灌的那条」（lxId 对得上）：
+    // 用户手工在网页端加过同名脚本时 srv.id 会变，这时不能凭账本断定「服务端已有同内容」。
+    const ledHash = (led && led.hash) || ''
+    const ledIdOk = !!(led && (led.lxId == null || srv.id == null || String(led.lxId) === String(srv.id)))
+    // 服务端能自证（回传 hash）时以服务端为准：账本只反映「我们上次灌了什么」，
+    // 没法知道别人后来有没有在网页端改过。服务端没 hash 才让账本说话。
+    // 还要排除「版本号对不上」：账本说上次灌的是这份内容，服务端显示的却是另一个版本号，
+    // 说明服务端那条已被换过（或账本对应的不是它），此时不能凭账本断言「已同步」。
+    const ledSame = !!(ledHash && e.contentHash && ledHash === e.contentHash &&
+                       ledIdOk && !srv.hash && !versionConflict)
+    const ledChanged = !!(ledHash && e.contentHash && ledHash !== e.contentHash)
+    // 账本存在但指向的服务端条目已不存在/已被换掉（lxId 对不上）时，
+    // 也不能用 size 兜底判「已同步」——那条已经不是我们灌的了。
+    const ledForeign = !!(led && !ledIdOk)
+    // 账本在、但本地这次没算出 hash（下载异常/未计算）→ 无法确认内容是否相同。
+    // 此时也不能用 size 兜底判 synced：字节数一样不代表内容是同一份。
+    const ledNoLocalHash = !!(led && ledHash && !e.contentHash)
+    if (sameHash || sameCode || ledSame ||
+        (!ledChanged && !ledForeign && !ledNoLocalHash && !srv.hash && !srvCode && sameSize && !versionConflict)) {
+      return {
+        act: 'synced',
+        why: ledSame && !sameHash && !sameCode
+          ? '同名同内容（本地账本 hash 一致），服务端已有（未重复上传）'
+          : '同名同内容，服务端已有（未重复上传）'
+      }
     }
 
     const checked = !!(e.deep && e.deep.checkedAt) && !e.stale
@@ -2464,6 +2522,23 @@ class Hunter {
       const st = String((p || {}).status || '')
       return st === 'untested' || st === 'pending'
     }).length
+
+    // 2.4) 版本号相同但**内容确实变了**（本地账本强证据）→ 本地这份是后抓到的更新。
+    //      版本号分不出新旧时，账本可以：服务端那份正是我们上次灌进去的旧正文，
+    //      现在本地 hash 不同 ⇒ 作者改了东西（常见于「修了 bug 没升版本号」）。
+    //      没有这条的话，等长改动会被判 synced 卡死（v1.0.0→v1.1.0 只在 17960 复现过），
+    //      不等长的改动会被判 skip 卡住（版本相同 → 保留服务端），两种都更新不了。
+    // `!ledForeign`：账本指向的服务端条目已被换掉时，账本描述的不是眼前这条，
+    // 拿它当「内容变了」的依据去删服务端现存条目，等于删别人加的东西 —— 不做。
+    if (ledChanged && !ledForeign && lv && sv && vc === 0) {
+      if (!checked || newN <= 0) {
+        return { act: 'skip', why: '同名同版本但内容已变（本地账本 hash 与本地正文不一致），本地尚未实测出可用平台 → 先保留服务端，做完深度检测再更新' }
+      }
+      if (srvN > 0 && newN < srvN) {
+        return { act: 'skip', why: `同名同版本但内容已变，本地可用平台更少（${newN} < ${srvN}）→ 不做降级替换` }
+      }
+      return { act: 'replace', why: `同名同版本但内容已更新（账本记的是上次灌入的旧正文，本地正文 hash 已变）→ 留新删旧` }
+    }
 
     if (provenSame && lv && sv) {
       if (vc > 0) {
@@ -2543,11 +2618,18 @@ class Hunter {
    *  - 服务端侧有打分快照（账本回放）→ 这次是真比较，可能翻成「留优删差 / 保留服务端」；
    *  - 服务端侧没有 → 决策不变（仍改名并存），但分数随灌入写进账本，
    *    下次同一个脚本再被别的仓库同名覆盖时就有可比的一侧了（打破「永远没证据」的死循环）。
-   * 成本：每条 1 次沙箱初始化 + 最多 2 档探测，约 10~20s；因此每次灌入最多补测 `MAX_PROBES` 条。
+   * 成本：每条 1 次沙箱初始化 + 最多 2 档探测，约 10~20s；
+   * 因此用「整轮 3 分钟 / 20 条」双重预算截断，而不是原先硬写死的 5 条。
    */
   async _probeTierForConflicts(plans, codeCache, cfg) {
-    const MAX_PROBES = 5
+    // 预算是「时间」而不是「条数」：原先写死最多 5 条，同名冲突一多，
+    // 第 6 条之后永远轮不到补测，同一批里有的比音质、有的只能改名并存，行为不一致。
+    // 改成整轮 3 分钟（单条 20s，约 9 条）+ 绝对上限 20 条兜底：
+    // 冲突少就全测，冲突多按时间截断，且不会把一次灌入拖成几十分钟。
     const BUDGET_MS = 20000
+    const TOTAL_BUDGET_MS = 3 * 60 * 1000
+    const MAX_PROBES = 20
+    const startedAt = Date.now()
     let probes = 0
     for (const p of plans) {
       for (const item of (p.queue || [])) {
@@ -2567,8 +2649,9 @@ class Hunter {
           continue
         }
         if (this.cancelRequested) return
-        if (probes >= MAX_PROBES) {
-          this.log(`同名冲突超过 ${MAX_PROBES} 条，本轮不再补测音质档（保持改名并存）`, '灌入', 'warn')
+        if (probes >= MAX_PROBES || Date.now() - startedAt > TOTAL_BUDGET_MS) {
+          const why = probes >= MAX_PROBES ? `已达条数上限 ${MAX_PROBES}` : `已用 ${Math.round((Date.now() - startedAt) / 1000)}s 超预算`
+          this.log(`音质补测停止（${why}，共补测 ${probes} 条），其余同名冲突保持改名并存`, '灌入', 'warn')
           return
         }
         probes++
@@ -2585,7 +2668,7 @@ class Hunter {
         e.deep.metrics.tierProbedAt = Date.now()
         e.deep.metrics.tierProbedPlatform = pr.platform
         this.log(`音质档补测：${pr.platform} 可播 ${pr.tier}`, '灌入', 'info')
-        const v = this.sameNameVerdict(e, item.renameServer, code, cfg)
+        const v = this.sameNameVerdict(e, item.renameServer, code, cfg, { ledger: (p.ledger && p.ledger[e.id]) || null })
         item.why = `同名裁决：${v.why}（已补测音质档 ${pr.tier}@${pr.platform}）`
         if (v.act === 'replace') {
           this.log(`补测后改判：留本地（删旧装新）—— ${v.why}`, '灌入', 'info')
@@ -2623,6 +2706,9 @@ class Hunter {
     for (const s of serverList) if (s && s.hash) serverByHash[s.hash] = s
     const codeCache = ctx.codeCache || {}
     // 兼容旧的调用口径：没有 serverIds 时退回「本地账本说了算」
+    // 「本地条目 id → 上次灌入的正文 hash」账本，用来判定「同名同内容」
+    // （服务端不回 hash/正文，size 在等长改动时会漏判，见 _ledgerByEntry 注释）
+    const ledger = ctx.ledger || {}
     const importedRecs = ctx.importedRecs || (ctx.importedHashes
       ? Object.keys(ctx.importedHashes).reduce((o, h) => { o[h] = { name: ctx.importedHashes[h], lxId: null }; return o }, {})
       : {})
@@ -2675,7 +2761,7 @@ class Hunter {
         // 同名音源一律走同一套裁决（含 MusicSync）—— 同名/同内容该怎么处理与平台无关，
         // 区别只有「要不要改名」：名字不是 key 的平台（MusicSync）根本不需要改，
         // 把本地这份作为独立条目加上去即可（改名不但没用，还会破坏脚本自检）。
-        const v = this.sameNameVerdict(e, srv, code, cfg)
+        const v = this.sameNameVerdict(e, srv, code, cfg, { ledger: ledger[e.id] || null })
         const baseName = e.lxName || e.scriptName || e.name
         if (v.act === 'synced') queue.push({ e, sameContentServer: srv, why: v.why })
         else if (v.act === 'skip') queue.push({ e, skip: `与服务端同名「${srv.name}」：${v.why}` })
