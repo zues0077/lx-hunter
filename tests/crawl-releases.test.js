@@ -438,3 +438,21 @@ ck('缓存戳不低于 v54（v1.10.7 基线）', /app\.js\?v=(5[4-9]|[6-9]\d)/.t
 // ---------- 汇总 ----------
 console.log(`\n${bad ? 'FAIL' : 'ALL PASS'}（失败 ${bad} 项）`)
 process.exit(bad ? 1 : 0)
+
+// ---------- ⑦ v1.12.3 废弃条目的树内换版复活（豆包定制[聚合音源] 滞留旧版实测） ----------
+console.log('\n== 废弃条目 blobSha 换版复活（v1.12.3） ==')
+{
+  const st = tmpStore()
+  const mkTreeE = (sha, extra) => Object.assign({
+    id: 'o/r::x.js', repo: 'o/r', path: 'x.js', url: 'u', name: 'x', blobSha: sha,
+    contentHash: 'h-' + sha, status: 'ok', suspected: true, usable: false, size: 1, addedAt: 1, lastCheck: 0, deep: null
+  }, extra || {})
+  st.mergeSources([mkTreeE('aaa')], { incremental: true })
+  const e0 = st.getSources()[0]
+  e0.deprecated = true; e0.dupOf = 'keeper'; e0.dupReason = '同名旧版本'
+  const m = st.mergeSources([mkTreeE('bbb')], { incremental: true })
+  const e1 = st.getSources()[0]
+  ck('废弃条目 blobSha 变化 → 标 stale 且复活为候选', m.updated === 1 && e1.stale === true && e1.deprecated === false && !e1.dupOf)
+  const m2 = st.mergeSources([mkTreeE('bbb')], { incremental: true })
+  ck('同 sha 再爬 → skipped 不抖动', m2.skipped === 1 && e1.stale === true)
+}

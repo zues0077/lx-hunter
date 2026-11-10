@@ -306,6 +306,10 @@ class Store {
         cur.blobSha = it.blobSha
         cur.stale = true
         cur.staleAt = Date.now()
+        // v1.12.3：树内 .js 换版必须同步撤销废弃标记 —— stale 的废弃条目永远不会被
+        // 指纹 pass 重下（_hashPass 过滤 deprecated），旧内容会永久滞留库内
+        // （豆包定制[聚合音源] 2026-11-10 实测：上游已更新、库内滞留旧版且无人复活）。
+        if (cur.deprecated) { cur.deprecated = false; cur.dupOf = null; cur.dupReason = null }
         changed = true
       } else if (it.blobSha && !cur.blobSha) {
         cur.blobSha = it.blobSha
