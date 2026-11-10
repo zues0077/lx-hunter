@@ -112,7 +112,7 @@ ok(/dbDeletedList/.test(bridge) && /dbDeletedClear/.test(bridge), 'Web 桥接也
 const bar = html.slice(html.indexOf('id="selInfo"'), html.indexOf('id="btnClearSel"'))
 ok(/id="btnDeleteSel"/.test(bar), '「删除选中」按钮就在音源库批量工具栏里')
 ok(/id="btnFullPlat"/.test(bar) && bar.indexOf('btnFullPlat') < bar.indexOf('btnDeleteSel'),
-  '位置在「补全平台覆盖」之后、「清空选择」之前')
+  '位置在「深度检测（打分）」之后、「清空选择」之前')
 ok(/class="btn danger-ghost" id="btnDeleteSel"/.test(html), '危险操作用 danger-ghost 醒目样式')
 ok(/title="[^"]*不影响服务端已灌入的脚本/.test(html), '按钮说明写清不影响服务端已灌入脚本')
 const delFn = app.slice(app.indexOf('async function deleteSelected'), app.indexOf("$('btnDeleteSel').addEventListener"))

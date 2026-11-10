@@ -4,7 +4,7 @@ const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoH
 const { crawlWebSite, isWebRepo, probeExternalSource, normalizeExternalUrl } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
-const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict, passedPlatforms, regressionJudge } = require('./checker')
+const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict, passedPlatforms, regressionJudge, probeTopTier } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
 const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
 const { Store } = require('./store')
@@ -12,7 +12,7 @@ const { Store } = require('./store')
 // 不再各写一份（详见 src/core/version.js 顶部说明）。
 const { versionKey: versionNum, cmpVersion } = require('./version')
 const { normName, candidateRepo, serverRepo } = require('./identity')
-const { compareQuality, optsFromConfig, scoreVerdict } = require('./quality')
+const { compareVerdict, describeQuality, profile: qualityProfile } = require('./quality')
 
 // normName 已统一到 src/core/identity.js（hunter / sourceUpdate 必须完全同口径），
 // 这里通过顶部 require 引入；module.exports 继续导出同名符号，外部调用不受影响。
@@ -1038,18 +1038,35 @@ class Hunter {
    *  - 都没检测过 → 按「有更新 > 时间 > 版本号 > id」兜底（检测前先临时占位，
    *    检测完成后 runCheck 的同名即时去重会按上面三条重新裁决）
    */
+  /**
+   * 非打分档检测（初筛 / 定时巡检）不得抹掉已有的打分结果。
+   *
+   * 背景：`e.deep` 是整体替换。用户点过一次「深度检测（打分）」后，
+   * 再点普通「检测」或第二天巡检跑一轮，就会把带 p50 的完整 metrics 覆盖成
+   * 快速模式的 1 个样本 ⇒ 分数凭空消失、排序表退回「未打分」，用户只会以为功能坏了。
+   * 做法：保留上一轮 `depth==='full'` 的 metrics 并留痕 `carriedFrom`（那次深度检测时间），
+   * 平台徽章仍以本轮结果为准（检测结论本身必须更新，不能因为要保分数就不更新可用性）。
+   */
+  _keepScoredMetrics(prevDeep, d) {
+    const prevM = prevDeep && prevDeep.metrics
+    if (d && d.metrics && d.metrics.depth !== 'full' && prevM && prevM.depth === 'full') {
+      d.metrics = Object.assign({}, prevM, { carriedFrom: prevM.carriedFrom || prevDeep.checkedAt || null })
+    }
+    return d
+  }
+
   betterKeeper(a, b) {
     const da = a && a.deep && a.deep.checkedAt ? a.deep : null
     const db = b && b.deep && b.deep.checkedAt ? b.deep : null
     if (da && db) {
-      // 2026-11-10 22:0x 拍板：本地同名去重改用「平台数 + 取链成功率 + p50 延迟 + 音质档」
-      // 综合评分选优（双方都有 lx-hunter 实测证据，正是综合评分能生效的场景）。
-      // 科学护栏：分差落入噪声带 / 任一侧证据不足 → compareQuality 返回 0，
-      // 此时绝不靠 0.001 分差删条目，退回下面的原有硬判据与兜底顺序。
+      // 2026-11-10 23:28 用户口径修正：本地同名去重只在「同名」时比优劣，
+      // 且用**字典序**（可用平台数 → 最高可播档 → p50 延迟），不做加权综合分。
+      // 平台数少一个是「质」的损失（该平台所有歌都取不到链），不允许被延迟快补偿。
+      // 字典序判平手（cmp=0）时绝不靠微小差异删条目，退回下面的原有硬判据。
       // 私人音源（用户手动导入）不参与自动质量淘汰，保持原来的可用性口径。
       if (!a.private && !b.private) {
-        const q = compareQuality(a, b, optsFromConfig(this.store && this.store.config))
-        if (q !== 0) return q > 0
+        const v = compareVerdict(a, b)
+        if (v.cmp !== 0) return v.cmp > 0
       }
       const na = usableCount({ deep: da }), nb = usableCount({ deep: db })
       if (na !== nb) return na > nb
@@ -1483,7 +1500,8 @@ class Hunter {
   async runCheck(ids, opts) {
     this.jobGate('检测', (ids && ids.length ? ids.length + ' 条' : '全部候选'))
     const opt = opts || {}
-    // full=true：全平台完整检测（关掉快速模式并强制重测），用于「补全平台覆盖」
+    // full=true：深度检测（打分）—— 关掉快速模式、全平台逐个真取链并强制重测，
+    // 只有这条路径产出的 metrics 才带 depth='full'，才是可参与比较/排序的分数。
     const cfg = opt.full ? Object.assign({}, this.store.config, { quickCheck: false }) : this.store.config
     // 单条手动检测 = 强制重测；批量时默认跳过「已检测且脚本内容未变」的条目。
     // v1.9.16：UI 的「检测选中 / 检测并灌入」带 opts.force=true —— 手动勾选就是明确要重测，
@@ -1621,7 +1639,7 @@ class Hunter {
                 // 取消：绝不覆盖旧的好结果；旧结果不存在但部分平台已可用时才采用部分结果
                 if (!e.deep && usableCount(d) > 0) e.deep = d
               } else {
-                e.deep = d
+                e.deep = this._keepScoredMetrics(e.deep, d)
               }
               if (rec) { rec.deep = e.deep || d; if (rec.resolve) { rec.resolve(rec.deep); rec.resolve = null } }
               e.usable = usableCount(e) > 0
@@ -2000,15 +2018,19 @@ class Hunter {
         if (rc.changed) this.log(`「${p.label}」账本对账：摘除 ${rc.dropped} 条服务端已不存在的灌入记录`, '灌入', 'info')
       }
       p.importedRecs = this._importedRecsFor(p.svc.acct.id, activeId)
+      p.serverScore = this._scoreByServerId(p.svc.acct.id, activeId)
       p.queue = this._planImportQueue(targets, {
         cfg, serverByName: p.serverByName, serverIds: p.serverIds, serverList: p.serverList,
-        codeCache, importedRecs: p.importedRecs,
+        codeCache, importedRecs: p.importedRecs, serverScore: p.serverScore,
         // 该平台名字是不是 key：不是（MusicSync）则同名不需要改名，直接新增为独立条目
         uniqueName: p.svc.adapter.uniqueName !== false
       })
       p.usedRename = new Set()
       total += p.queue.length
     }
+    // 同名冲突第三层：平台数、p50 都打平且本地还没有音质档证据时，为**这一条**补测最高可播档。
+    // 放在规划之后、执行之前：补测结果可能把「改名并存」翻成「留优删差 / 保留服务端」。
+    await this._probeTierForConflicts(plans, codeCache, cfg)
     this.job.progress.total = total
 
     const results = []
@@ -2231,7 +2253,25 @@ class Hunter {
       serverUrl: svc.adapter.baseUrl(svc.acct), importedAt: Date.now(),
       platforms: platforms || [], serverSynced: !!synced,
       platformId: svc.acct.id, platformType: svc.type, accountName: svc.acct.name || svc.acct.url,
-      importedTo: list
+      importedTo: list,
+      // 打分快照：服务端不回传脚本正文/hash/metrics（17950 实测 38 条全无），
+      // 下次同名冲突时「服务端那条」本该拿不出任何实测证据 ⇒ 只能一律改名并存。
+      // 这是我们自己刚灌进去的脚本，本地有它的实测画像，按服务端 id 存一份最小快照，
+      // 下次就能回放成 qualityProxy，让「同名留优」真正能比，而不是靠声明值猜。
+      // 只存打分档（depth==='full'）的结果：初筛的 1 样本 p50 不值得存。
+      score: (e.deep && e.deep.metrics && e.deep.metrics.depth === 'full') ? {
+        at: Date.now(),
+        checkedAt: e.deep.checkedAt || null,
+        platforms: e.deep.platforms || {},
+        metrics: {
+          depth: 'full',
+          p50LatencyMs: e.deep.metrics.p50LatencyMs,
+          samples: e.deep.metrics.samples,
+          playableRate: e.deep.metrics.playableRate,
+          successRate: e.deep.metrics.successRate,
+          qualityMax: e.deep.metrics.qualityMax || null
+        }
+      } : (prev && prev.score) || null
     }
     this.store.saveImported()
   }
@@ -2300,6 +2340,38 @@ class Hunter {
     if (to) return to.lxId == null ? null : to.lxId
     const top = rec.platformId == null ? activeId : rec.platformId
     return top === pid ? (rec.lxId == null ? null : rec.lxId) : null
+  }
+
+  /**
+   * 「服务端条目 id → 本地打分快照」。同名裁决时把快照回放成 srv.qualityProxy，
+   * 让服务端侧也能有实测证据（否则服务端 list 只有声明值，第三层音质永远比不了）。
+   * 只认 30 天内的快照：太久远的实测不能代表现在（音源接口随时会变资质/限流）。
+   */
+  _scoreByServerId(platformId, activeId) {
+    const MAX_AGE_MS = 30 * 24 * 3600 * 1000
+    const out = {}
+    for (const rec of Object.values(this.store.imported || {})) {
+      if (!rec || !rec.score || !rec.score.metrics) continue
+      const pid = rec.platformId == null ? activeId : rec.platformId
+      const hit = pid === platformId ||
+        (Array.isArray(rec.importedTo) && rec.importedTo.some(x => x && x.platformId === platformId && x.lxId != null))
+      if (!hit) continue
+      const ids = []
+      if (rec.lxId != null) ids.push(rec.lxId)
+      for (const x of (Array.isArray(rec.importedTo) ? rec.importedTo : [])) {
+        if (x && x.platformId === platformId && x.lxId != null) ids.push(x.lxId)
+      }
+      const at = Number(rec.score.at) || 0
+      const stale = !at || (Date.now() - at > MAX_AGE_MS)
+      for (const id of ids) {
+        out[id] = stale ? { stale: true } : {
+          checkedAt: rec.score.checkedAt || at,
+          platforms: rec.score.platforms || {},
+          metrics: rec.score.metrics
+        }
+      }
+    }
+    return out
   }
 
   /**
@@ -2391,7 +2463,6 @@ class Hunter {
     const localName = nameForCmp
     const lv = versionNum(localName), sv = versionNum(srv.name)
     const vc = cmpVersion(localName, srv.name)
-    const qopts = optsFromConfig(c)
     // 服务端 list 不回传脚本正文/deep（17950 实测 38 条全无），因此默认没有实测证据。
     // 若调用方注入了 lx-hunter 本地留存的质量代理（srv.qualityProxy = 旧版脚本的 deep），
     // 综合评分才真正参与；否则明确降级为分层硬判据，绝不假装两边都测过。
@@ -2410,11 +2481,11 @@ class Hunter {
       if (vc > 0) {
         // 口径 2「质量不劣」：服务端有实测证据时按综合评分判；无证据时退回平台数保护
         if (srvDeep) {
-          const qd = scoreVerdict(e, qTarget, qopts)
+          const qd = compareVerdict(e, qTarget)
           if (qd.cmp < 0) {
-            return { act: 'skip', why: `同仓库同名且本地版本更高，但综合质量更差（${qd.a.desc} vs ${qd.b.desc}）→ 不做质量降级替换` }
+            return { act: 'skip', why: `同仓库同名且本地版本更高，但质量更差（${qd.reason}）→ 不做质量降级替换` }
           }
-          return { act: 'replace', why: `同仓库同名，本地版本更高且质量不劣（${qd.mode}，分差 ${qd.a.score !== null && qd.b.score !== null ? Math.abs(qd.a.score - qd.b.score).toFixed(3) : 'n/a'}）→ 留新删旧（删旧装新）` }
+          return { act: 'replace', why: `同仓库同名，本地版本更高且质量不劣（${qd.by}：${qd.reason}）→ 留新删旧（删旧装新）` }
         }
         if (srvN > 0 && newN >= 0 && newN < srvN) {
           return { act: 'skip', why: `同仓库同名但本地可用平台少于服务端声明（${newN} < ${srvN}；${srvQualitySrc}）→ 不做质量降级替换（口径 2 要求质量不劣）` }
@@ -2434,11 +2505,11 @@ class Hunter {
           why: `跨仓库同名但本地证据不足（${!checked ? '未实测/未做深检' : untestedN + ' 个平台未实测（快速模式）'}）→ 不按综合评分删任何一方，改名并存（请先做全平台检测）`
         }
       }
-      const vd = scoreVerdict(e, qTarget, qopts)
-      const note = `本地 [${vd.a.desc}] vs 服务端 [${vd.b.desc}]｜模式 ${vd.mode}｜${srvQualitySrc}`
-      if (vd.cmp > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 综合质量更优（${note}）→ 留优删差（删旧装新）` }
+      const vd = compareVerdict(e, qTarget)
+      const note = `本地 [${vd.aDesc}] vs 服务端 [${vd.bDesc}]｜判据 ${vd.by}：${vd.reason}`
+      if (vd.cmp > 0) return { act: 'replace', why: `跨仓库同名：lx-hunter 实测质量更优（${note}）→ 留优删差（删旧装新）` }
       if (vd.cmp < 0) return { act: 'skip', why: `跨仓库同名：服务端现条目质量更优（${note}）→ 保留服务端，本地不灌` }
-      return { act: 'rename', why: `跨仓库同名但质量判据平手（${note}）→ 不删任何一方，改名并存` }
+      return { act: 'rename', why: `跨仓库同名但质量平手或证据不足（${note}）→ 不删任何一方，改名并存` }
     }
 
     // 3) 服务端现条目可用平台更多 → 保留服务端（无同源证据时的保守保护）
@@ -2471,6 +2542,77 @@ class Hunter {
       return { act: 'rename', why: '同名不同内容；设置里关闭了自动替换 → 改名上传（保留服务端旧版）' }
     }
     return { act: 'replace', why: '同名不同内容；信息不足以判定为无关脚本 → 按更新处理（删旧装新）' }
+  }
+
+  /**
+   * 同名冲突的音质专项补测（字典序第三层）。
+   *
+   * 触发条件（全部满足才动手，避免无谓的沙箱开销）：
+   *  - 该条目被判「改名并存」（说明前两层——平台数、p50——已经打平或无证据）；
+   *  - 本地已做过深度检测（`metrics.depth==='full'`）：连平台数都没测过就比音质是瞎比；
+   *  - 本地还没有音质档证据（`tier === null`）。
+   * 结果写进 `deep.metrics.qualityMax` 并**重新裁决一次**：
+   *  - 服务端侧有打分快照（账本回放）→ 这次是真比较，可能翻成「留优删差 / 保留服务端」；
+   *  - 服务端侧没有 → 决策不变（仍改名并存），但分数随灌入写进账本，
+   *    下次同一个脚本再被别的仓库同名覆盖时就有可比的一侧了（打破「永远没证据」的死循环）。
+   * 成本：每条 1 次沙箱初始化 + 最多 2 档探测，约 10~20s；因此每次灌入最多补测 `MAX_PROBES` 条。
+   */
+  async _probeTierForConflicts(plans, codeCache, cfg) {
+    const MAX_PROBES = 5
+    const BUDGET_MS = 20000
+    let probes = 0
+    for (const p of plans) {
+      for (const item of (p.queue || [])) {
+        if (!item || !item.renameServer || !item.e) continue
+        const e = item.e
+        // 顺序很重要：先判「有没有分」，再判「有没有正文」。
+        // 反过来写的话，没下载正文的条目会被静默跳过，用户看不到「你还没跑深度检测」这句提示。
+        const mine = qualityProfile(e)
+        if (!mine.scored) {
+          item.why += '；未做深度检测，音质档未补测（先跑「深度检测（打分）」）'
+          continue
+        }
+        if (mine.tier !== null) continue
+        const code = codeCache[e.id] || (typeof e.code === 'string' && e.code ? e.code : '')
+        if (!code) {
+          item.why += '；没有脚本正文，音质档无法补测'
+          continue
+        }
+        if (this.cancelRequested) return
+        if (probes >= MAX_PROBES) {
+          this.log(`同名冲突超过 ${MAX_PROBES} 条，本轮不再补测音质档（保持改名并存）`, '灌入', 'warn')
+          return
+        }
+        probes++
+        this.log(`同名冲突进入第三层：补测「${e.scriptName || e.lxName || e.name}」的最高可播档…`, '灌入')
+        const pr = await probeTopTier(e, code, cfg, { platforms: usableKeys(e), budgetMs: BUDGET_MS })
+        if (!pr.ok) {
+          this.log(`音质档补测未得出结论（${pr.reason}）→ 维持原裁决`, '灌入', 'warn')
+          item.why += `；音质档补测未得出结论：${pr.reason}`
+          continue
+        }
+        e.deep = e.deep || {}
+        e.deep.metrics = e.deep.metrics || {}
+        e.deep.metrics.qualityMax = pr.tier
+        e.deep.metrics.tierProbedAt = Date.now()
+        e.deep.metrics.tierProbedPlatform = pr.platform
+        this.log(`音质档补测：${pr.platform} 可播 ${pr.tier}`, '灌入', 'info')
+        const v = this.sameNameVerdict(e, item.renameServer, code, cfg)
+        item.why = `同名裁决：${v.why}（已补测音质档 ${pr.tier}@${pr.platform}）`
+        if (v.act === 'replace') {
+          this.log(`补测后改判：留本地（删旧装新）—— ${v.why}`, '灌入', 'info')
+          item.replaceServer = item.renameServer
+          delete item.renameServer
+        } else if (v.act === 'skip') {
+          this.log(`补测后改判：保留服务端 —— ${v.why}`, '灌入', 'info')
+          item.skip = `与服务端同名「${item.renameServer.name}」：${v.why}（已补测音质档 ${pr.tier}@${pr.platform}）`
+          delete item.renameServer
+        } else if (v.act === 'synced') {
+          item.sameContentServer = item.renameServer
+          delete item.renameServer
+        }
+      }
+    }
   }
 
   /**
@@ -2536,7 +2678,11 @@ class Hunter {
         queue.push({ e, skip: `与本次所选的「${nbest[nm].scriptName || nbest[nm].name}」同名（视为同一音源新旧版本），跳过` })
       } else if (nm && serverByName[nm]) {
         // 同名音源：交给 sameNameVerdict 统一裁决（规则与理由都写在那个函数上）
-        const srv = serverByName[nm]
+        // 服务端 list 只有声明值，回放本地账本里「当年灌进去时那份」的打分快照，
+        // 否则第三层（音质档）永远没有可比的另一侧。
+        const srvRaw = serverByName[nm]
+        const snap = (ctx.serverScore && srvRaw && srvRaw.id != null) ? ctx.serverScore[srvRaw.id] : null
+        const srv = (snap && !snap.stale) ? Object.assign({}, srvRaw, { qualityProxy: snap }) : srvRaw
         const code = codeCache[e.id]
         // 同名音源一律走同一套裁决（含 MusicSync）—— 同名/同内容该怎么处理与平台无关，
         // 区别只有「要不要改名」：名字不是 key 的平台（MusicSync）根本不需要改，
@@ -2777,7 +2923,7 @@ class Hunter {
             // 保留主检结果，免得一次限流就把库里的「可用」翻成「不可用」（服务端动作由 streak 把关）。
             const keepPrevUsable = !contentChanged && prevUsable && (j.verdict === 'suspect' || (j.verdict === 'unknown' && !d.cancelled))
             if (!keepPrevUsable && !d.cancelled) {
-              e.deep = d
+              e.deep = this._keepScoredMetrics(d0, d)
               e.usable = usableCount(d) > 0
             }
             if (keepPrevUsable) note += '；库内保留主检的可用结果'

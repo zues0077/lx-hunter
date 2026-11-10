@@ -1692,7 +1692,7 @@ function platCells(e) {
       : (st === 'failed' ? 'failed' : (st === 'untested' ? 'untested' : (st ? 'skipped' : '')))
     let title
     if (!cell) title = x.t + '：未检测'
-    else if (st === 'untested') title = x.t + '：未测（快速模式命中即停，非不支持）—— 点「补全平台覆盖」可实测'
+    else if (st === 'untested') title = x.t + '：未测（快速模式命中即停，非不支持）—— 点「深度检测（打分）」可实测'
     else if (st === 'usable' && cell.verified === false) {
       title = x.t + '：可用 —— 脚本已解析出播放链接，本机未下载校验（常见于需 Referer / 有地域或时效限制的 CDN，导入洛雪后通常可正常播放）\n' + (cell.message || '')
     } else title = x.t + '：' + (cell.message || st)
@@ -1804,7 +1804,7 @@ function rowHtml(e) {
     <td class="c-chk"><input type="checkbox" data-id="${esc(e.id)}" ${state.selected.has(e.id) ? 'checked' : ''}></td>
     <td><span class="nm">${esc(nm)}</span>${priv}
         <span class="nm-sub">${esc([e.scriptVersion, e.author].filter(Boolean).join(' · ') || nm)}</span>${vt}${al}</td>
-    <td class="c-plat"><div class="plats">${platCells(e)}</div></td>
+    <td class="c-plat"><div class="plats">${platCells(e)}</div>${LXSort.qualityBriefHtml(e)}</td>
     <td class="c-repo"><span class="repo">${esc(e.repo)}</span>${snap}</td>
     <td class="c-status">${statusCell(e)}</td>
     <td class="c-op">
@@ -1872,6 +1872,8 @@ function patchRow(e) {
   tr.replaceWith(fresh)
   // 按「状态 / 平台可用性」排序时，一次检测完成会改变行的排序位置（如变成「可用」）：
   // 行内替换只更新内容，位置交给节流全表刷新重排
+  // plat 列现在按「平台数 → p50 → 档位」排，检测完成会同时改平台数与 p50，
+  // 光替换行内容不重排会让列表看起来「分变了但顺序没变」。
   if (state.sort.key === 'status' || state.sort.key === 'plat') scheduleTableRefresh()
 }
 
@@ -2398,23 +2400,27 @@ $('btnUndedupe').addEventListener('click', async () => {
   else toast(scoped ? '勾选的条目里没有已废弃的重复项' : '当前没有已废弃的重复项', 'info')
 })
 
-// 补全平台覆盖：只对「已可用」的条目跑全平台完整检测（关闭快速模式，逐个平台真取链）
+// 深度检测（打分）：只对「已可用」的条目跑全平台完整检测（关闭快速模式，逐个平台真取链）。
+// 这是**唯一**会产出综合排序依据的入口：初筛（普通检测）用快速模式，首个平台可用即停、
+// 不打分；只有这里跑完，平台可用性列才会显示「N平台 · XXms」并按质量排序。
 $('btnFullPlat').addEventListener('click', async () => {
   if (state.busy) return toast('已有任务在运行', 'warn')
   const pool = state.sources.filter(e => !e.deprecated && e.usable)
   const picked = pool.filter(e => state.selected.has(e.id))
   const targets = (picked.length ? picked : pool).map(e => e.id)
   if (!targets.length) return toast('还没有已可用的音源，先跑一次检测', 'warn')
-  if (!confirm(`将对 ${targets.length} 条已可用音源跑全平台完整检测：\n` +
-    '五平台逐个真实取链（关闭快速模式），把「未测(?)」的平台补齐为「实测可用/实测失败」，\n' +
-    '并对「已取链未校验(~)」的平台重新尝试本机下载校验。\n\n' +
+  if (!confirm(`将对 ${targets.length} 条已可用音源跑「深度检测（打分）」：\n\n` +
+    '· 五平台逐个真实取链（关闭快速模式），把「未测(?)」补齐为「实测可用/实测失败」\n' +
+    '· 对「已取链未校验(~)」的平台重新尝试本机下载校验\n' +
+    '· 产出「可用平台数 + p50 延迟」作为综合排序依据，跑完点「平台可用性」列即可按质量高低排序\n' +
+    '· 不测音质档（按需才补，常规全面检测不测）\n\n' +
     `耗时约 ${Math.ceil(targets.length * 5 * 3 / 60)} 分钟内（并发取链），确定继续？`)) return
   setBusy(true)
-  $('progStep').textContent = '开始全平台完整检测…'
+  $('progStep').textContent = '开始深度检测（打分）…'
   const r = await api.checkStart(targets, { full: true })
   setBusy(false)
   if (r.ok) {
-    toast(`平台覆盖已补全：可用 ${r.data.usable} / ${r.data.total}`, 'ok')
+    toast(`深度检测完成：可用 ${r.data.usable} / ${r.data.total}（已生成综合排序依据）`, 'ok')
     loadSources()
   } else toast('检测失败: ' + r.error, 'err')
 })

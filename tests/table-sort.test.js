@@ -7,6 +7,7 @@
 const assert = require('assert')
 const {
   SORT_KEYS, SORT_DEFS, statusRank, platScore, sortSources,
+  qualitySortKey, bestTierValue, qualityBriefHtml,
   isDeepDead, isCheckedNoSource
 } = require('../src/renderer/sorters.js')
 
@@ -84,6 +85,93 @@ ck('空列表不炸', sortSources([], { key: 'name', dir: 'asc' }).length === 0)
 // 排序键相等时按名称兜底，顺序稳定可预期
 const tie = [mk({ id: 't2', scriptName: 'b 源' }), mk({ id: 't1', scriptName: 'a 源' })]
 ck('同分按名称兜底', sortSources(tie, { key: 'status', dir: 'asc' }, {}).map(e => e.id).join('') === 't1t2')
+
+// ---- 平台可用性列 = 综合质量字典序（2026-11-10：平台数 → p50 → 音质档） ----
+// 用户口径：「按综合分高低排序后，方便我手动灌入综合评分高的音源」。
+// 排序键不带 300ms 噪声带（噪声带只用于「删不删」，排序要顺序可复现）。
+{
+  const q = (n, p50, tier, id) => {
+    const platforms = {}
+    ;['wy', 'tx', 'kw', 'kg', 'mg'].forEach((k, i) => { platforms[k] = i < n ? { status: 'usable' } : { status: 'failed' } })
+    const metrics = { depth: 'full', p50LatencyMs: p50 }
+    if (tier) metrics.qualityMax = tier
+    return { id, scriptName: id, deep: { checkedAt: 1, platforms, metrics } }
+  }
+  const pool = [q(4, 1200, '320k', 'A'), q(4, 600, '128k', 'B'), q(5, 2900, null, 'C'), q(3, 100, null, 'D')]
+  const desc = sortSources(pool, { key: 'plat', dir: 'desc' }).map(e => e.id).join('')
+  ck('平台列降序 = 综合质量从高到低：5平台 → 4平台600ms → 4平台1200ms → 3平台', desc === 'CBAD')
+  ck('再点反向 = 质量从低到高', sortSources(pool, { key: 'plat', dir: 'asc' }).map(e => e.id).join('') === 'DABC')
+  ck('同平台数时延迟决定先后（600ms 在 1200ms 前）', desc.indexOf('B') < desc.indexOf('A'))
+  const noMetrics = { id: 'E', scriptName: 'E', deep: { checkedAt: 1, platforms: { wy: { status: 'usable' }, tx: { status: 'usable' } } } }
+  const withMetrics = q(2, 900, null, 'F')
+  ck('无延迟证据的排在同平台数实测之后', sortSources([noMetrics, withMetrics], { key: 'plat', dir: 'desc' }).map(e => e.id).join('') === 'FE')
+  ck('qualitySortKey 返回纯数字三位（可直接比较、无 NaN）', qualitySortKey(pool[0]).every(v => typeof v === 'number' && !Number.isNaN(v)))
+  ck('qualitySortKey 与 core/quality.sortKey 口径一致（同一数据逐位相同）', (() => {
+    const Q = require('../src/core/quality')
+    return pool.concat([noMetrics, withMetrics]).every(e => JSON.stringify(qualitySortKey(e)) === JSON.stringify(Q.sortKey(e)))
+  })())
+  // 注意方向语义：core.compareSortKey 的键是「小者优先」，升序即「质量高在前」；
+  // sortSources 的 cmp 约定是升序比较器、dir=desc 取反，所以对齐的是 dir='desc'。
+  ck('两份实现排序结果逐位一致（sorters desc ↔ core 升序）', (() => {
+    const Q = require('../src/core/quality')
+    const a = sortSources(pool, { key: 'plat', dir: 'desc' }).map(e => e.id).join('')
+    const b = pool.slice().sort(Q.compareSortKey).map(e => e.id).join('')
+    return a === b && a === 'CBAD'
+  })())
+  ck('音质档：单值 qualityMax 可读，flac 胜过 128k', bestTierValue('flac') > bestTierValue('128k') && bestTierValue(['128k', 'flac']) === 0.85)
+  ck('音质档：没有 qualityMax 时为 null（qualityUsed 不冒充）', bestTierValue(undefined) === null)
+}
+
+// ---- 质量摘要展示（与排序键同源，杜绝「排一套、显示另一套」） ----
+{
+  const b = qualityBriefHtml({ deep: { platforms: { wy: { status: 'usable' }, tx: { status: 'usable' }, kw: { status: 'failed' } }, metrics: { depth: 'full', p50LatencyMs: 321.6 } } })
+  ck('质量摘要显示「2平台 · 322ms」（四舍五入）', /2平台 · 322ms/.test(b), b)
+  ck('摘要带 title 说明排序依据', /排序依据：可用平台 2 个/.test(b))
+  ck('无 deep 时不出摘要（不显示假数据）', qualityBriefHtml({ deep: null }) === '' && qualityBriefHtml({}) === '')
+  ck('0 个可用平台不出摘要', qualityBriefHtml({ deep: { platforms: { wy: { status: 'failed' } }, metrics: { depth: 'full', p50LatencyMs: 300 } } }) === '')
+  // 口径变更（2026-11-10 00:1x）：有可用平台但没打分 → 显示「未打分」，不再什么都不显示。
+  // 什么都不显示会让人以为这条没有质量信息，实际是「还没测」，必须区分开。
+  ck('未打分的可用源显示「未打分」而不是编造延迟', /未打分/.test(qualityBriefHtml({ deep: { platforms: { wy: { status: 'usable' } } } })))
+  ck('深度检测过但没有成功计时样本 → 「无延迟样本」', /无延迟样本/.test(qualityBriefHtml({
+    deep: { platforms: { wy: { status: 'usable' } }, metrics: { depth: 'full', p50LatencyMs: null } }
+  })))
+  ck('初筛（quick）的 p50 不显示（1 样本不算能力）', /未打分/.test(qualityBriefHtml({
+    deep: { platforms: { wy: { status: 'usable' } }, metrics: { depth: 'quick', p50LatencyMs: 180 } }
+  })))
+  ck('升级前的老记录（无 depth）按未打分处理', /未打分/.test(qualityBriefHtml({
+    deep: { platforms: { wy: { status: 'usable' } }, metrics: { p50LatencyMs: 180 } }
+  })))
+  ck('摘要内容只有数字，无 HTML 注入面', /^<span class="qbrief" title="[^<]*">\d+平台 · \d+ms<\/span>$/.test(b), b)
+  ck('摘要的平台数与排序键第一位一致', (() => {
+    const e = { deep: { platforms: { wy: { status: 'usable' }, tx: { status: 'usable' } }, metrics: { depth: 'full', p50LatencyMs: 200 } } }
+    return qualitySortKey(e)[0] === -2 && /2平台/.test(qualityBriefHtml(e))
+  })())
+}
+
+// ---- 渲染层引用完整性（防「页面用到未导出的方法」运行时 undefined） ----
+{
+  const fs = require('fs')
+  const path = require('path')
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8')
+  const used = new Set()
+  const re = /LXSort\.([A-Za-z_$][\w$]*)/g
+  let m
+  while ((m = re.exec(appSrc))) used.add(m[1])
+  const api = require('../src/renderer/sorters.js')
+  const missing = [...used].filter(k => typeof api[k] === 'undefined')
+  ck('app.js 引用的 LXSort 方法全部已导出', missing.length === 0, missing.join(','))
+  // 反向：qualityBriefHtml 必须真的被页面用上（否则排序依据看不见）
+  ck('app.js 确实在平台列调用 qualityBriefHtml', /LXSort\.qualityBriefHtml\(e\)/.test(appSrc))
+  // 表头排序 key 与 SORT_DEFS 一一对应（点了没反应的列不要出现在 sortable 上）
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8')
+  const keys = []
+  const kre = /id="srcTable"[\s\S]*?<\/thead>/.exec(html)
+  const tre = /data-k="([^"]+)"/g
+  let km
+  const scope = kre ? kre[0] : ''
+  while ((km = tre.exec(scope))) keys.push(km[1])
+  ck('srcTable 可排序列都有对应 SORT_DEFS 定义', keys.length > 0 && keys.every(k => !!SORT_DEFS[k]), keys.join(','))
+}
 
 // ---- 谓词（与状态徽章口径一致） ----
 ck('isCheckedNoSource：已检测+ok+无疑似+无深检', isCheckedNoSource(mk({ lastCheck: 1, status: 'ok' })) && !isCheckedNoSource(mk({ lastCheck: 1, status: 'ok', deep: {} })))

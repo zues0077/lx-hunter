@@ -1,35 +1,42 @@
 'use strict'
 /**
- * 「质量更优」判据（2026-11-10 两轮拍板）
+ * 同名音源「留优删差」判据
  *
- * 21:01 第一轮：把判据从「只有 usableCount 一个数」写成可测、可解释的分层
- *   （usable > verified > tested），并明确「证据不对称」时绝不擅自删。
- * 22:0x 第二轮（用户追加）：给公共音源做**综合性检测**，按
- *   「平台数 - 取链成功率 - p50 延迟 - 音质档」不同权重算综合分，选分高者为「质量更优」。
+ * 2026-11-10 23:28 用户口径（这一版据此重写）：
+ *   「lx-hunter 是采集音源的容器，本身能正确检验音源能用就 ok，对于同名类的音源才需要打分检测」
+ *   ⇒ 检测层只回答「能不能用」；比较层只在**同名冲突**时回答「留哪个」。
+ *   所以这里不提供「综合质量分」，只提供**同名两项之间的优劣裁决**。
  *
- * === 科学性原则（改动前先读，别把评分写成拍脑袋） ===
- * 1. **每个维度都要有原始样本**。成功率的分母是真实发出的取链请求数（deep.metrics.attempts），
- *    不是平台数；p50 来自真实耗时数组。没有样本就是 UNKNOWN，不能填 0 也不能填猜测值。
- * 2. **缺证据的维度不参与加权**，按剩余有效权重重归一化；有效权重低于 minCoverage
- *    直接判 score=null（证据不足），绝不因为「有分」就比「没分」的更优。
- *    服务端 list 只有 supportedSources 声明值、没有 deep/metrics/hash/正文，
- *    因此它最多拿到「平台数」一个弱维度 → 必然判证据不足 → 平手不删。
- * 3. **分差阈值**：score 差在 scoreMargin 以内一律平手。评分是估计量，0.001 分差
- *    不构成删除一个可用音源的理由。
- * 4. **声明值打折**：声明平台数 w 折半、声明音质档 raw×0.9，实测成功档位优先。
- *    声明值来自脚本自己写的数组，天然虚高，不能与实测值等权。
- * 5. **回落分层**：任一侧证据不足时，退回 usable > verified > tested 的硬判据，
- *    且「未测」不等于「不可用」（沿用 S4 口径）。
+ * === 为什么是字典序，不是加权求和 ===
+ * 上一版用「平台数 0.35 + 成功率 0.25 + p50 0.25 + 音质档 0.15」加权求和，问题有三：
+ *  1. **维度可互相补偿**：少 1 个可用平台（该平台所有歌都取不到链，是「质」的损失）
+ *     可以被「延迟快 200ms」抵消，算出更高分后去删掉更可用的源 —— 这是错的。
+ *  2. **权重没有客观依据**：按区分度（标准差）定权重只是把拍脑袋换成另一种拍脑袋，
+ *     且权重一变，历史裁决全部翻案，无法复盘。
+ *  3. **分差噪声带是补丁**：先加权求和再拿 0.08 当噪声带，本质是掩盖「分不可比」。
+ * 字典序把「先比什么」显式写死：平台数不同就到此为止，根本不需要延迟/音质参与，
+ * 既不会被补偿，也没有权重可调，每一条裁决都能一句话解释清楚。
+ * 比较顺序（用户 2026-11-10 23:31 定）：
+ *   ① 可用平台数  ② p50 延迟（噪声带 300ms）  ③ 最高可播音质档  ④ 全相同 = 平手不删
+ *   注意：② ③ 的数据**只在「深度检测（打分）」里才作数**（metrics.depth==='full'）。
+ *   初筛（快速模式）只回答「有没有可用平台」，不打分 —— 它的 p50 只来自 1 次请求。
+ *   ③ 的数据**只在同名冲突、①②都打平时专项补测才产生**（qualityMax）。
+ *   采集阶段按用户口径「全面检测不测音质」不产出该字段，故常规情况下比较到 ② 或 ③ 即平手不删。
  *
- * 返回：>0 a 更优，<0 b 更优，0 平手或证据不足。平手一律不动。
+ * === 证据规则（沿用前几轮已确认的护栏）===
+ *  - 声明值不能当实测证据：服务端 list 只有 supportedSources 声明值、没有正文/hash/metrics，
+ *    因此它「无法与本地实测值比较」→ 判证据不足，不删任何一方。
+ *  - 未测 ≠ 不可用：untested/pending 只是没测，不参与「平台更少」的判定。
+ *  - 平手一律不动。删源不可逆，含糊就不删。
  */
-const UNKNOWN = -1
-const PLATFORM_COUNT = 5 // wy/tx/kw/kg/mg
 
-/** 音质档 → 能力分。命中顺序即优先级；自定义档位给保底分但标记 unknownTier。 */
+/** 延迟噪声带：差值小于该值视为同档（17952 四轮 A/B：p50 200~264ms、p90 447~596ms，属网络抖动）。 */
+const LATENCY_MARGIN_MS = 300
+
+/** 音质档 → 能力分。命中顺序即优先级；自定义档位给保底分。 */
 const TIERS = [
   [/hires|hi-?res|dsd|dolby|atmos|master|jymaster|sq|无损|母带/i, 1.00],
-  [/flac|ape|wav|96k|192k|lossless/i, 0.85],
+  [/flac|ape|wav|96k|192k|lossless|24bit/i, 0.85],
   [/320k|320|exhigh|极高/i, 0.70],
   [/192k|192|high|高品/i, 0.55],
   [/128k|128|standard|标准/i, 0.40]
@@ -43,252 +50,203 @@ function tierScore(q) {
 }
 
 function bestTier(list) {
+  // 兼容两种形态：聚合后的数组（deep.metrics.qualityMax）与单值字符串（专项补测写入）。
+  // 旧实现只接受数组，导致「补测拿到 flac」写进去也读不出来，第三层永远是死代码。
+  const arr = Array.isArray(list) ? list : (list ? [list] : [])
   let best = null
-  for (const q of (Array.isArray(list) ? list : [])) {
+  for (const q of arr) {
     const t = tierScore(q)
     if (t && (!best || t.score > best.score)) best = t
   }
   return best
 }
 
-const DEFAULT_WEIGHTS = { platforms: 0.40, success: 0.25, latency: 0.15, quality: 0.20 }
-const DEFAULT_OPTS = {
-  weights: DEFAULT_WEIGHTS,
-  minSamples: 3,        // 少于 3 个请求样本，成功率/p50 不作为证据
-  // 依据 lx-music 17952 A/B 四轮实测：取链 p50 200~264ms、p90 447~596ms、
-  // max 可达 12s 但 >8s 仅 1/800 周期。取 p90 的约 5 倍作上限，
-  // 让 200ms 与 1000ms 能拉开差距；用 8000ms 会让所有源都接近满分、失去区分度。
-  latencyCapMs: 3000,
-  scoreMargin: 0.08,    // 分差噪声带
-  minCoverage: 0.5      // 有效权重低于此判证据不足
-}
-
-function resolveOpts(opts) {
-  const src = opts || {}
-  // 关键（22:21 审计）：**undefined 不能覆盖默认值**。
-  // 旧写法 Object.assign({}, DEFAULT_OPTS, src) 会把 optsFromConfig 里没设置的
-  // minCoverage/scoreMargin/latencyCapMs 覆盖成 undefined，再被下面的 `|| 兜底`
-  // 改成 0 / 0 / 8000 —— 于是生产路径下「覆盖度门槛」「分差噪声带」全部失效，
-  // 服务端只有声明值也算得出综合分并参与删源，而单测（不传 opts）却全绿。
-  // 现在：只接受「显式提供且是有限数字」的覆盖，其余一律保留 DEFAULT_OPTS。
-  const o = Object.assign({}, DEFAULT_OPTS)
-  for (const k of ['minSamples', 'latencyCapMs', 'scoreMargin', 'minCoverage']) {
-    if (src[k] === undefined || src[k] === null || src[k] === '') continue
-    const v = Number(src[k])
-    if (Number.isFinite(v)) o[k] = v
-  }
-  const rawW = (src.weights && typeof src.weights === 'object' && !Array.isArray(src.weights)) ? src.weights : {}
-  const w = Object.assign({}, DEFAULT_WEIGHTS, rawW)
-  // 只接受有限非负权重；全 0 时退回默认，避免除零把所有条目判成一样
-  let sum = 0
-  for (const k of Object.keys(DEFAULT_WEIGHTS)) {
-    const v = Number(w[k])
-    w[k] = Number.isFinite(v) && v >= 0 ? v : DEFAULT_WEIGHTS[k]
-    sum += w[k]
-  }
-  if (sum <= 0) return resolveOpts({})
-  for (const k of Object.keys(DEFAULT_WEIGHTS)) w[k] = w[k] / sum
-  o.weights = w
-  o.minSamples = Math.max(1, o.minSamples)
-  o.latencyCapMs = Math.max(500, o.latencyCapMs)
-  o.scoreMargin = Math.max(0, Math.min(0.5, o.scoreMargin))
-  o.minCoverage = Math.max(0, Math.min(1, o.minCoverage))
-  return o
-}
-
-/** 把 store.config 的扁平设置项转成 opts（缺项走默认）。 */
-function optsFromConfig(cfg) {
-  const c = cfg || {}
-  return resolveOpts({
-    weights: c.qualityWeights,
-    minSamples: c.qualityMinSamples,
-    latencyCapMs: c.qualityLatencyCapMs,
-    scoreMargin: c.qualityScoreMargin,
-    minCoverage: c.qualityMinCoverage
-  })
-}
-
-function qualityProfile(entry) {
+/**
+ * 提取「可比三元组」。
+ * declared=true 表示该侧**没有任何实测证据**，只有脚本自己写的声明值 —— 此时
+ * usable/tier/p50 都不能拿去与别人的实测值比大小。
+ */
+function profile(entry) {
   const e = entry || {}
-  // 已是 profile 对象则原样返回（外部可直接传 qualityProfile 的结果）。
-  // 真实条目虽有 e.usable 布尔，但不会同时有 verified 字段，故不会误命中。
-  if (e.usable !== undefined && e.verified !== undefined) return e
   const deep = e.deep || null
   const plats = deep && deep.platforms ? deep.platforms : null
   const metrics = (deep && deep.metrics) || e.metrics || null
-  if (!plats) {
+
+  // 空平台集＝一个平台都没测过（脚本未注册平台 / 深检中断），不是「0 个可用」。
+  // 若当成 0 去参与裁决，会把一个完好的服务端源判劣删掉 —— 未测永远不等于不可用。
+  if (!plats || !Object.keys(plats).length) {
     const arr = Array.isArray(e.supportedSources) ? e.supportedSources : []
     return {
-      usable: arr.length, verified: UNKNOWN, tested: UNKNOWN, untested: UNKNOWN,
-      checkedAt: 0, declared: true, metrics, __profile: true
+      usable: arr.length, verified: null, tested: null, untested: null, skipped: null,
+      tier: null, tierLabel: '', p50: null, declared: true, scored: false, metrics,
+      checkedAt: 0
     }
   }
-  let usable = 0, verified = 0, tested = 0, untested = 0
+
+  let usable = 0, verified = 0, tested = 0, untested = 0, skipped = 0
   for (const p of Object.values(plats)) {
     const o = p || {}
     const st = String(o.status || '')
     if (st === 'usable' || st === 'ok' || st === 'passed' || o.ok === true || o.pass === true) {
       usable++
       tested++
+      // verified 只认「真把音频拉下来过」（魔数/content-type 校验通过），
+      // 「已解析链接但本机没校验」不算 —— 这是 lx-music 播放侧的已知坑。
       if (o.verified === true) verified++
-    } else if (st === 'untested' || st === 'skipped' || st === 'pending') untested++
-    else if (st === 'failed') tested++
+    } else if (st === 'untested' || st === 'pending') {
+      untested++
+    } else if (st === 'skipped') {
+      // skipped = 脚本压根没注册该平台（已知事实），不是「没测过」的证据缺口。
+      skipped++
+    } else if (st === 'failed') {
+      tested++
+    }
   }
-  return { usable, verified, tested, untested, checkedAt: Number(deep.checkedAt) || 0, declared: false, metrics, __profile: true }
-}
 
-const clamp01 = x => Math.max(0, Math.min(1, Number(x) || 0))
+  // 「有没有打分」的唯一判据：这次检测是不是**深度检测（全平台真取链）**。
+  // 2026-11-10 00:1x 用户口径：初筛（快速模式）只回答「有没有可用平台」，不打分；
+  // 只有用户主动跑「深度检测（打分）」才产出可用于排序/比较的数据。
+  // 没有 depth 标记的老记录（升级前的快速模式产物）一律视为「未打分」——
+  // 它们同样只有 1 个平台样本，拿它的 p50 排序等于用一个样本冒充能力。
+  const scored = !!(metrics && metrics.depth === 'full')
+
+  // 最高可播档位：**只认 qualityMax**（同名冲突时的专项补测产物）。
+  // 绝不用 qualityUsed 兜底 —— 它是「脚本声明的档位顺序里第一个成功的那个」，
+  // 取决于作者把 128k 还是 flac 写在前面，不代表真实能力：
+  // 一个 qualitys 写 [128k, flac] 的强源会记成 128k，与真正的 128k 源同档，
+  // 拿它做第三层裁决等于按作者的书写顺序删源。
+  // 采集阶段（含全平台深检）按用户 2026-11-10 口径「全面检测不测音质」，不产出该字段，
+  // 所以没有补测记录时 tier=null → 第三层自动跳过、判平手不删。
+  const tier = (scored && bestTier(metrics && metrics.qualityMax)) || null
+
+  // p50 只在打分档里才作数：初筛模式下「1 次成功请求的耗时」不是能力指标。
+  const p50 = scored && metrics && Number.isFinite(Number(metrics.p50LatencyMs)) && Number(metrics.p50LatencyMs) > 0
+    ? Number(metrics.p50LatencyMs) : null
+
+  return {
+    usable, verified, tested, untested, skipped,
+    tier: tier ? tier.score : null,
+    tierLabel: tier ? tier.label : '',
+    tierFromMax: !!(metrics && metrics.qualityMax && [].concat(metrics.qualityMax).length),
+    p50,
+    declared: false,
+    scored,
+    metrics,
+    checkedAt: Number(deep.checkedAt) || 0
+  }
+}
 
 /**
- * 综合评分。返回 { score|null, coverage, parts, reasons, unknown }。
- * score=null 表示证据不足，调用方必须判平手，不得当成 0 分。
+ * 字典序比较。返回 { cmp, by, reason, a, b }
+ *  cmp: 1 = a 更优，-1 = b 更优，0 = 平手或证据不足（调用方必须按「不删」处理）
+ *  by : platforms | tier | latency | tie | insufficient
  */
-function qualityScore(entry, opts) {
-  const o = resolveOpts(opts)
-  const p = qualityProfile(entry)
-  const m = p.metrics || {}
-  const w = o.weights
-  const parts = {}
-  const reasons = []
+function compareVerdict(a, b) {
+  const pa = profile(a), pb = profile(b)
+  const wrap = (o) => Object.assign(o, { aDesc: describeQuality(a), bDesc: describeQuality(b) })
 
-  // ① 平台数：实测 usable 用满权重；服务端声明值折半（弱证据）
-  const platformRaw = clamp01(p.usable / PLATFORM_COUNT)
-  parts.platforms = {
-    raw: platformRaw, w: p.declared ? w.platforms * 0.5 : w.platforms,
-    valid: true, weak: !!p.declared,
-    detail: p.declared ? `声明 ${p.usable} 个平台（弱证据）` : `实测可用 ${p.usable} 个平台`
+  // 任一侧没有实测证据 → 不比较。声明值不能拿去压实测值。
+  if (pa.declared || pb.declared) {
+    return wrap({
+      cmp: 0, by: 'insufficient',
+      reason: (pa.declared ? 'A' : 'B') + ' 侧无实测证据（只有声明值），不能与实测值比优劣',
+      a: pa, b: pb
+    })
   }
 
-  // ② 取链成功率：必须有足够请求样本。
-  //    lx-music 播放侧经验（A/B 四轮 + P-1387）：「脚本返回了 http 链接」不等于「能播」，
-  //    已知噪声带有 HEAD 校验重定向失败 / content-type 非音频 / 试听片段拒绝 /
-  //    1500ms·3000ms 超时；但 verifyUrl 失败也可能只是本机代理/CDN 403，不代表源坏。
-  //    因此用 0.7×可播率 + 0.3×链接率 折中，既不把假可播当满分，也不因本机网络全盘否定。
-  //    旧数据没有 playable 字段时退回原来的链接率，保持向后兼容。
-  const attempts = Number(m.attempts) || 0
-  const successes = Number(m.successes) || 0
-  const hasPlayable = m.playable !== undefined || m.playableRate !== undefined
-  // 兼容只落 playableRate（没有逐次计数）的历史/外部数据：按 attempts 反推个数，
-  // 绝不把「有比率」当成「可播 0 次」。
-  const playable = m.playable !== undefined && m.playable !== null
-    ? Number(m.playable)
-    : (typeof m.playableRate === 'number' ? m.playableRate * attempts : 0)
-  const linkRate = attempts > 0 ? successes / attempts : (typeof m.successRate === 'number' ? m.successRate : null)
-  const sr = hasPlayable && linkRate !== null
-    ? 0.7 * (playable / attempts) + 0.3 * linkRate
-    : linkRate
-  const srOk = !p.declared && sr !== null && attempts >= o.minSamples
-  parts.success = {
-    raw: srOk ? clamp01(sr) : null, w: w.success, valid: srOk,
-    detail: srOk
-      ? (hasPlayable
-          ? `取链 可播 ${Number(playable).toFixed(0)}/${attempts}、链接 ${successes}/${attempts} → ${(sr * 100).toFixed(0)}%`
-          : `取链链接 ${successes}/${attempts} = ${(sr * 100).toFixed(0)}%（旧数据无可播计数）`)
-      : `样本不足（${attempts}/${o.minSamples}）`
+  // ① 可用平台数：硬门槛。少一个平台 = 该平台所有歌曲都取不到链，
+  //    这是「质」的损失，不允许被音质或延迟补偿。
+  if (pa.usable !== pb.usable) {
+    const win = pa.usable > pb.usable ? 'A' : 'B'
+    return wrap({
+      cmp: pa.usable > pb.usable ? 1 : -1, by: 'platforms',
+      reason: `可用平台数 ${pa.usable} vs ${pb.usable} → ${win} 侧更多`,
+      a: pa, b: pb
+    })
   }
-  if (!srOk) reasons.push('取链成功率：样本不足')
 
-  // ③ p50 延迟：只认成功请求耗时数组聚合出的 p50
-  const p50 = Number(m.p50LatencyMs)
-  const latOk = !p.declared && Number.isFinite(p50) && p50 > 0 && Number(m.samples || 0) >= o.minSamples
-  parts.latency = {
-    raw: latOk ? clamp01(1 - p50 / o.latencyCapMs) : null, w: w.latency, valid: latOk,
-    detail: latOk ? `p50 ${p50}ms（上限 ${o.latencyCapMs}ms）` : '无延迟样本'
+  // ② p50 延迟：平台数相同才看这个。延迟是每次播放都要付的体验成本，
+  //    优先级高于音质档（用户 2026-11-10 23:31 明确：平台数 → 延迟 → 音质档）。
+  //    差距按 A/B 实测噪声带处理 —— 17952 四轮数据 p50 200~264ms、p90 447~596ms，
+  //    同档源之间差 300ms 以内属于网络抖动，不能据此删源。
+  if (pa.p50 !== null && pb.p50 !== null && Math.abs(pa.p50 - pb.p50) >= LATENCY_MARGIN_MS) {
+    const win = pa.p50 < pb.p50 ? 'A' : 'B'
+    return wrap({
+      cmp: pa.p50 < pb.p50 ? 1 : -1, by: 'latency',
+      reason: `p50 ${pa.p50}ms vs ${pb.p50}ms → ${win} 侧更快（差 ${Math.abs(pa.p50 - pb.p50)}ms ≥ ${LATENCY_MARGIN_MS}ms）`,
+      a: pa, b: pb
+    })
   }
-  if (!latOk) reasons.push('p50 延迟：无样本')
 
-  // ④ 音质档：实测成功档位优先；只有声明时打 7 折。
-  //    lx-music 实测过「脚本声明 flac 但取链全败、只能靠服务端兜底解密」，
-  //    声明档位天然虚高，尤其是从未成功取到任何档位时，折扣必须更重。
-  const used = bestTier(Array.isArray(m.qualityUsed) ? m.qualityUsed : (m.qualityUsed ? [m.qualityUsed] : []))
-  const declared = bestTier(m.qualityDeclared)
-  const qScore = used ? used.score : (declared ? declared.score * 0.7 : null)
-  parts.quality = {
-    raw: qScore === null ? null : clamp01(qScore), w: w.quality, valid: qScore !== null,
-    weak: !used,
-    detail: used ? `实测档位 ${used.label}` : (declared ? `仅声明 ${declared.label}（×0.7，未实测成功）` : '无音质档信息')
+  // ③ 最高可播音质档：平台数与延迟都相同才看这个。
+  if (pa.tier !== null && pb.tier !== null && Math.abs(pa.tier - pb.tier) > 1e-9) {
+    const win = pa.tier > pb.tier ? 'A' : 'B'
+    return wrap({
+      cmp: pa.tier > pb.tier ? 1 : -1, by: 'tier',
+      reason: `最高可播档位 ${pa.tierLabel || '?'} vs ${pb.tierLabel || '?'} → ${win} 侧更高`,
+      a: pa, b: pb
+    })
   }
-  if (qScore === null) reasons.push('音质档：无信息')
 
-  let effective = 0, weighted = 0
-  for (const k of Object.keys(parts)) {
-    const d = parts[k]
-    if (!d.valid || d.raw === null) continue
-    effective += d.w
-    weighted += d.raw * d.w
-  }
-  const coverage = clamp01(effective) // 总权重已归一化为 1
-  const unknown = coverage < o.minCoverage
-  return {
-    score: unknown || effective <= 0 ? null : weighted / effective,
-    coverage, parts, reasons, unknown,
-    weights: w, opts: o
-  }
+  return wrap({
+    cmp: 0, by: 'tie',
+    reason: `平台数同为 ${pa.usable}` +
+      (pa.p50 !== null ? `、p50 ${pa.p50}/${pb.p50}ms 差在噪声带内` : '') +
+      (pa.tier !== null ? `、档位 ${pa.tierLabel || '?'}` : '') + ' → 平手，不删任何一方',
+    a: pa, b: pb
+  })
 }
 
-/** 硬判据回落：只在两侧证据不对称或综合分都不可用时用，且「未测 ≠ 不可用」。 */
-function layeredCompare(a, b) {
-  const pa = qualityProfile(a), pb = qualityProfile(b)
-  if (pa.usable !== pb.usable) return pa.usable > pb.usable ? 1 : -1
-  if (pa.verified !== UNKNOWN && pb.verified !== UNKNOWN && pa.verified !== pb.verified) {
-    return pa.verified > pb.verified ? 1 : -1
-  }
-  // tested 只代表「证据覆盖度」，不是质量优势：一个源测了 5 个平台全挂，
-  // 不比另一个只测 1 个但确实可用的更优。过去拿它当次级判据会误删好源，
-  // 因此这里一律判平手，交给「平手不删」兜底。
+function compareQuality(a, b) {
+  return compareVerdict(a, b).cmp
+}
+
+function isClearlyBetter(a, b) {
+  return compareVerdict(a, b).cmp > 0
+}
+
+/**
+ * 排序视图专用：显式排序键（**不含噪声带**）。
+ *
+ * 为什么不能拿 compareVerdict 当 sort comparator：噪声带会让
+ * 「a≈b（差 200ms）、b≈c（差 200ms）」两个都判平手，而 a 与 c 差 400ms 又按延迟/档位分出胜负，
+ * 一旦第三层（音质档）介入就会出现 a>b>c>a 的循环 → sort 结果依赖初始顺序，表每刷一次顺序就变。
+ * 所以分工写死：
+ *   - **删不删**（二元裁决）→ compareVerdict：带噪声带，宁可判平手也不删；
+ *   - **谁排前面**（全库排序）→ sortKey：完整字典序元组，天然全序、可复现。
+ * 两者维度顺序一致（平台数 → p50 → 档位），所以排序结果与裁决方向不会互相打脸。
+ */
+function sortKey(entry) {
+  const p = profile(entry)
+  return [
+    -p.usable,                                        // 平台数多的在前
+    p.p50 === null ? Number.MAX_SAFE_INTEGER : p.p50,  // 没有延迟证据的排在实测之后
+    p.tier === null ? -1 : -p.tier                    // 档位高的在前（取负统一成「小者优先」）
+  ]
+}
+
+function compareSortKey(a, b) {
+  const ka = sortKey(a), kb = sortKey(b)
+  for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1
   return 0
 }
 
-/**
- * 比较入口（保持旧签名兼容）：两侧都有综合分时按分差+噪声带裁决；
- * 任一侧证据不足则回落分层硬判据，绝不因为「一侧有分」就判它赢。
- */
-function compareQuality(a, b, opts) {
-  const o = resolveOpts(opts)
-  const sa = qualityScore(a, o), sb = qualityScore(b, o)
-  if (sa.score !== null && sb.score !== null) {
-    const d = sa.score - sb.score
-    if (Math.abs(d) <= o.scoreMargin) return 0
-    return d > 0 ? 1 : -1
-  }
-  return layeredCompare(a, b)
-}
-
-function isClearlyBetter(a, b, opts) {
-  return compareQuality(a, b, opts) > 0
-}
-
-/** 给报告/日志用的可解释输出。 */
-function describeQuality(entry, opts) {
-  const p = qualityProfile(entry)
-  const s = qualityScore(entry, opts)
-  const base = p.declared
-    ? `声明 ${p.usable} 个支持平台（无实测证据）`
-    : `实测可用 ${p.usable} 个平台` +
-      (p.verified >= 0 ? ` / 真校验通过 ${p.verified} 个` : '') +
-      (p.tested >= 0 ? ` / 已测 ${p.tested} 个` : '') +
-      (p.untested > 0 ? ` / 未测 ${p.untested} 个` : '')
-  if (s.score === null) return `${base}；综合分：证据不足（覆盖度 ${(s.coverage * 100).toFixed(0)}%）`
-  const seg = Object.keys(s.parts).filter(k => s.parts[k].valid)
-    .map(k => `${k} ${(s.parts[k].raw * 100).toFixed(0)}×${s.parts[k].w.toFixed(2)}`).join(' + ')
-  return `${base}；综合分 ${s.score.toFixed(3)}（覆盖度 ${(s.coverage * 100).toFixed(0)}%｜${seg}）`
-}
-
-/** 裁决明细，供 17960 实机报告逐条打印，避免「按分拍脑袋」无法复盘。 */
-function scoreVerdict(a, b, opts) {
-  const o = resolveOpts(opts)
-  const sa = qualityScore(a, o), sb = qualityScore(b, o)
-  const cmp = compareQuality(a, b, o)
-  return {
-    cmp, margin: o.scoreMargin,
-    a: { score: sa.score, coverage: sa.coverage, reasons: sa.reasons, desc: describeQuality(a, o) },
-    b: { score: sb.score, coverage: sb.coverage, reasons: sb.reasons, desc: describeQuality(b, o) },
-    mode: sa.score !== null && sb.score !== null ? 'composite' : 'layered-fallback'
-  }
+/** 给报告/日志用的一句话描述。 */
+function describeQuality(entry) {
+  const p = profile(entry)
+  if (p.declared) return `仅声明支持 ${p.usable} 个平台（无实测证据，不参与优劣裁决）`
+  const parts = [`实测可用 ${p.usable} 个平台`]
+  if (!p.scored) parts.push('未打分（初筛模式，需跑深度检测才能比较延迟/音质）')
+  if (p.verified !== null && p.verified > 0) parts.push(`真校验 ${p.verified} 个`)
+  if (p.tierLabel) parts.push(`最高可播 ${p.tierLabel}`)
+  if (p.p50 !== null) parts.push(`p50 ${p.p50}ms`)
+  if (p.untested > 0) parts.push(`未测 ${p.untested} 个`)
+  return parts.join(' / ')
 }
 
 module.exports = {
-  qualityProfile, qualityScore, compareQuality, isClearlyBetter, describeQuality,
-  scoreVerdict, optsFromConfig, resolveOpts, tierScore, bestTier,
-  DEFAULT_WEIGHTS, DEFAULT_OPTS, UNKNOWN
+  profile, tierScore, bestTier,
+  compareVerdict, compareQuality, isClearlyBetter, describeQuality,
+  sortKey, compareSortKey,
+  LATENCY_MARGIN_MS
 }

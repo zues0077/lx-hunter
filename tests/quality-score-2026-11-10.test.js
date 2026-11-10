@@ -1,7 +1,17 @@
 'use strict'
 /**
- * 综合评分专项回归（2026-11-10 22:0x 拍板）
- * 重点不是「能算出分」，而是「证据不足/噪声带/声明值虚高时不会误删一个可用音源」。
+ * 同名「留优删差」判据回归（2026-11-10 23:5x 用户口径定稿版）
+ *
+ * 口径（用户原话）：
+ *   「lx-hunter 是采集音源的容器，本身能正确检验音源能用就 ok，对于同名类的音源才需要打分检测」
+ *   「平台数 → 延迟 → 音质档」
+ *   「只有同名-同平台数-同 p50 才能走到测音质，这很难了。如果是全面检测，我觉得没必要测音源音质」
+ * ⇒ 比较必须是**字典序**，不是加权求和；音质档只在专项补测（qualityMax）后才有值。
+ *
+ * 本文件守三件事，缺一条都算没落地：
+ *   1. 高优先级维度不能被低优先级补偿（旧加权求和会犯的错）；
+ *   2. 没有证据时绝不裁决（声明值 ≠ 实测值，未测 ≠ 不可用）；
+ *   3. qualityUsed 这种「看作者书写顺序」的字段永远不能当音质证据。
  */
 const assert = require('assert')
 const Q = require('../src/core/quality')
@@ -16,30 +26,36 @@ function ok(name, cond, extra) {
 }
 
 const KEYS = ['wy', 'tx', 'kw', 'kg', 'mg']
-function mk(opts) {
-  const o = opts || {}
-  const usable = o.usable === undefined ? 3 : o.usable
+/** 造一条「本地实测」条目：usable 个平台可用（真校验通过），其余为 failed/untested。 */
+function mk(o) {
+  const opt = o || {}
+  const usable = opt.usable === undefined ? 3 : opt.usable
+  const untested = opt.untested || 0
   const platforms = {}
   for (let i = 0; i < KEYS.length; i++) {
     const k = KEYS[i]
     if (i < usable) platforms[k] = { status: 'usable', verified: true, metrics: { attempts: 2, successes: 2, latencies: [120, 180], attemptLatencies: [120, 180] } }
-    else if (o.untested && i < usable + o.untested) platforms[k] = { status: 'untested' }
+    else if (i < usable + untested) platforms[k] = { status: 'untested' }
     else platforms[k] = { status: 'failed' }
   }
   const m = Object.assign({
-    attempts: 6, successes: 5, successRate: 5 / 6,
-    p50LatencyMs: 300, p90LatencyMs: null, samples: 5, okSamples: 5,
-    qualityUsed: o.qualityUsed || ['320k'],
-    qualityDeclared: o.qualityDeclared || ['128k', '320k']
-  }, o.metrics || {})
-  if (o.noMetrics) return { deep: { checkedAt: Date.now(), platforms } }
-  return { deep: { checkedAt: Date.now(), platforms, metrics: m } }
+    // 默认造「深度检测（打分）」结果：2026-11-10 00:1x 起只有 depth==='full' 的
+    // metrics 才参与比较/排序（初筛不打分）。要测初筛口径请显式传 depth:'quick'。
+    depth: 'full',
+    attempts: 6, successes: 6, playable: 6,
+    successRate: 1, playableRate: 1,
+    p50LatencyMs: 300, p90LatencyMs: 500, samples: 6, okSamples: 6,
+    qualityUsed: ['128k'], qualityDeclared: ['128k', '320k', 'flac']
+  }, opt.metrics || {})
+  const deep = { checkedAt: Date.now(), platforms }
+  if (!opt.noMetrics) deep.metrics = m
+  return { deep }
 }
 
-console.log('=== A. checker 采样聚合（原始证据） ===')
+console.log('=== A. 采集层只聚合原始证据（不打分） ===')
 {
   const plats = {
-    wy: { status: 'usable', metrics: { attempts: 3, successes: 2, latencies: [100, 300], attemptLatencies: [100, 300, 250], qualityUsed: '320k', qualityDeclared: ['128k', '320k'] } },
+    wy: { status: 'usable', metrics: { attempts: 3, successes: 2, playable: 2, latencies: [100, 300], attemptLatencies: [100, 300, 250], qualityUsed: '320k', qualityDeclared: ['128k', '320k'] } },
     tx: { status: 'failed', metrics: { attempts: 2, successes: 0, latencies: [], attemptLatencies: [500, 700], qualityUsed: null, qualityDeclared: ['flac'] } },
     kw: { status: 'untested' }
   }
@@ -47,169 +63,217 @@ console.log('=== A. checker 采样聚合（原始证据） ===')
   ok('attempts 累加所有真实请求', m.attempts === 5, JSON.stringify(m))
   ok('successes 只算拿到有效链接的请求', m.successes === 2)
   ok('p50 只取成功请求耗时 [100,300] → 200', m.p50LatencyMs === 200, 'got ' + m.p50LatencyMs)
-  ok('音质档聚合实测 320k + 声明 flac', m.qualityUsed.includes('320k') && m.qualityDeclared.includes('flac'))
-  ok('没有 metrics 的平台不产生样本', C.aggregateMetrics({ kw: { status: 'untested' } }, {}).attempts === 0)
+  ok('p90 不再是死字段', m.p90LatencyMs === 280, 'got ' + m.p90LatencyMs)
+  ok('可播数与链接数分开留档（拿到链接≠能播）', m.playableRate === 2 / 5)
+  ok('聚合结果里没有任何 score 字段', !('score' in m) && !('weights' in m))
+  ok('无 metrics 的平台不产生样本', C.aggregateMetrics({ kw: { status: 'untested' } }, {}).attempts === 0)
+  ok('声明档位不会因每平台重复而膨胀', (() => {
+    const d = { wy: { qualitys: ['128k', '320k'] }, tx: { qualitys: ['128k'] } }
+    const mm = C.aggregateMetrics({
+      wy: { status: 'usable', metrics: { qualityDeclared: ['128k', '320k'] } },
+      tx: { status: 'usable', metrics: { qualityDeclared: ['128k'] } }
+    }, d)
+    return mm.qualityDeclared.length === 2
+  })())
 }
 
-console.log('=== B. 权重与档位映射 ===')
+console.log('=== B. 档位映射只做字典序（不为求和服务） ===')
 {
-  const o = Q.resolveOpts({ weights: { platforms: 2, success: 1, latency: 1, quality: 0 } })
-  ok('权重归一化后总和为 1', Math.abs(Object.values(o.weights).reduce((a, b) => a + b, 0) - 1) < 1e-9)
-  const z = Q.resolveOpts({ weights: { platforms: 0, success: 0, latency: 0, quality: 0 } })
-  ok('全 0 权重回退默认，不除零', z.weights.platforms === Q.DEFAULT_WEIGHTS.platforms)
-  ok('flac 档位分 > 320k > 128k', Q.tierScore('flac').score > Q.tierScore('320k').score && Q.tierScore('320k').score > Q.tierScore('128k').score)
+  ok('flac > 320k > 128k', Q.tierScore('flac').score > Q.tierScore('320k').score && Q.tierScore('320k').score > Q.tierScore('128k').score)
+  ok('hires 高于 flac', Q.tierScore('hires').score > Q.tierScore('flac').score)
   ok('自定义未知档位给保底分且标 known=false', Q.tierScore('myq').known === false && Q.tierScore('myq').score > 0)
+  ok('空值不产生档位', Q.tierScore('') === null && Q.tierScore(null) === null)
+  ok('没有加权评分 API 残留', !Q.qualityScore && !Q.resolveOpts && !Q.optsFromConfig && !Q.DEFAULT_WEIGHTS && !Q.scoreVerdict)
 }
 
-console.log('=== C. 综合分与证据门槛（核心） ===')
+console.log('=== C. 第一层：平台数不可被延迟补偿（推翻加权求和的关键） ===')
 {
-  const strong = mk({ usable: 5, metrics: { p50LatencyMs: 100 } })
-  const weak = mk({ usable: 1, metrics: { attempts: 6, successes: 2, successRate: 2 / 6, p50LatencyMs: 7000, samples: 5 } })
-  const s1 = Q.qualityScore(strong), s2 = Q.qualityScore(weak)
-  ok('证据齐全时算出 0..1 的分', s1.score !== null && s1.score > 0 && s1.score <= 1, JSON.stringify(s1.score))
-  ok('覆盖度 = 1（四维全有效）', Math.abs(s1.coverage - 1) < 1e-9)
-  ok('5 平台 + 快 + 高成功率 > 1 平台 + 慢 + 低成功率', s1.score > s2.score)
-  ok('compareQuality 判强者为优', Q.compareQuality(strong, weak) === 1)
-  ok('isClearlyBetter 同向', Q.isClearlyBetter(strong, weak) === true && Q.isClearlyBetter(weak, strong) === false)
-
-  const few = mk({ usable: 3, metrics: { attempts: 2, successes: 2, successRate: 1, p50LatencyMs: 300, samples: 2 } })
-  const fs = Q.qualityScore(few)
-  ok('样本 < minSamples 时成功率维度失效', fs.parts.success.valid === false)
-  ok('样本 < minSamples 时延迟维度失效', fs.parts.latency.valid === false)
-  ok('两个维度失效但覆盖度仍达标时只按剩余维度重归一化', fs.score !== null && fs.coverage < 1)
-
-  const srv = { supportedSources: ['wy', 'tx', 'kw'] }  // lxserver list：无 deep、无 hash、无正文
-  const ss = Q.qualityScore(srv)
-  ok('服务端声明条目平台权重折半（弱证据）', ss.parts.platforms.weak === true && ss.parts.platforms.w < Q.DEFAULT_WEIGHTS.platforms)
-  ok('服务端声明条目判证据不足 score=null', ss.score === null, 'score=' + ss.score + ' coverage=' + ss.coverage)
-  ok('本地实测 vs 服务端声明：证据不对称不得判本地赢（回落分层）', Q.compareQuality(mk({ usable: 3 }), srv) === 0)
-  ok('服务端声明 3 平台 vs 本地实测 3 平台 → 平手不删', Q.compareQuality(srv, mk({ usable: 3 })) === 0)
+  // 旧加权实现会算出「4 平台但慢 2s」≈ 或 > 「3 平台但快 200ms」，于是删掉更可用的源。
+  const fewFast = mk({ usable: 3, metrics: { p50LatencyMs: 200 } })
+  const manySlow = mk({ usable: 4, metrics: { p50LatencyMs: 2000 } })
+  const v = Q.compareVerdict(fewFast, manySlow)
+  ok('平台少的即使快 1800ms 也判劣', v.cmp === -1 && v.by === 'platforms', v.by + ' | ' + v.reason)
+  ok('反向一致（对称）', Q.compareVerdict(manySlow, fewFast).cmp === 1)
+  ok('理由写出双方平台数', /3 vs 4/.test(v.reason), v.reason)
+  // 排序视图（用户要的「按综合分高低排序」）走 sortKey 全序元组，
+  // 不能拿带噪声带的 compareVerdict 当 comparator（会出现 a>b>c>a 的循环，顺序不可复现）。
+  const order = [fewFast, manySlow].sort(Q.compareSortKey)
+  ok('排序视图：平台多的排在前', order[0] === manySlow)
 }
 
-console.log('=== D. 分差噪声带（不许 0.001 分差就删源） ===')
+console.log('=== C2. 排序视图：sortKey 是全序（顺序可复现） ===')
+{
+  const pool = [
+    mk({ usable: 4, metrics: { p50LatencyMs: 1250, qualityMax: '128k' } }),
+    mk({ usable: 4, metrics: { p50LatencyMs: 600, qualityMax: '128k' } }),
+    mk({ usable: 5, metrics: { p50LatencyMs: 2900 } }),
+    mk({ usable: 3, metrics: { p50LatencyMs: 100 } }),
+    mk({ usable: 4, noMetrics: true })
+  ]
+  const sorted = pool.slice().sort(Q.compareSortKey)
+  ok('平台数优先：5 平台排第一', Q.profile(sorted[0]).usable === 5)
+  ok('同平台数内按 p50 升序', Q.profile(sorted[1]).p50 === 600 && Q.profile(sorted[2]).p50 === 1250)
+  ok('无延迟证据的排在同平台数实测之后', Q.profile(sorted[3]).p50 === null && Q.profile(sorted[3]).usable === 4)
+  ok('最后是 3 平台', Q.profile(sorted[4]).usable === 3)
+  ok('sortKey 反对称', Q.compareSortKey(pool[0], pool[1]) === -Q.compareSortKey(pool[1], pool[0]))
+  ok('sortKey 与噪声带无关：差 299ms 也严格分先后', Q.compareSortKey(
+    mk({ usable: 4, metrics: { p50LatencyMs: 1000 } }),
+    mk({ usable: 4, metrics: { p50LatencyMs: 1299 } })) === -1)
+  ok('sortKey 不返回 NaN（无 null 参与比较）', pool.every(x => Q.sortKey(x).every(v => typeof v === 'number' && !Number.isNaN(v))))
+}
+
+console.log('=== D. 第二层：p50 噪声带 300ms（差 1ms 不足以删源） ===')
 {
   const a = mk({ usable: 4, metrics: { p50LatencyMs: 1000 } })
-  const b = mk({ usable: 4, metrics: { p50LatencyMs: 1050 } })
-  const sa = Q.qualityScore(a).score, sb = Q.qualityScore(b).score
-  ok('两个近似音源都算出分', sa !== null && sb !== null)
-  ok('微小分差判平手', Q.compareQuality(a, b) === 0, 'diff=' + (sa - sb))
-  const wide = Q.resolveOpts({ scoreMargin: 0 })
-  ok('把 margin 设为 0 时才按分差裁决', Q.compareQuality(a, b, wide) !== 0)
-  ok('scoreVerdict 给出可解释模式与明细', Q.scoreVerdict(a, b).mode === 'composite' && /综合分/.test(Q.scoreVerdict(a, b).a.desc))
+  const bIn = mk({ usable: 4, metrics: { p50LatencyMs: 1299 } })
+  const bOut = mk({ usable: 4, metrics: { p50LatencyMs: 1300 } })
+  ok('差 299ms 在噪声带内 → 平手', Q.compareVerdict(a, bIn).cmp === 0 && Q.compareVerdict(a, bIn).by === 'tie')
+  ok('差 300ms 刚好达到阈值 → 按延迟裁决', Q.compareVerdict(a, bOut).cmp === 1 && Q.compareVerdict(a, bOut).by === 'latency')
+  ok('噪声带常量可读为 300', Q.LATENCY_MARGIN_MS === 300)
+  const noLat = mk({ usable: 4, noMetrics: true })
+  ok('一侧没有延迟证据 → 不按延迟裁决（平手）', Q.compareVerdict(a, noLat).cmp === 0, Q.compareVerdict(a, noLat).by)
 }
 
-console.log('=== E2. lx-music 播放侧经验：可播率、延迟上限、声明档位虚高 ===')
+console.log('=== E. 第三层：只有 qualityMax 才算音质证据 ===')
 {
-  // 同样「拿到 6 个链接」，但一个 6 个都真可播、一个只有 1 个真可播
-  const playableOK = mk({ usable: 3, metrics: { attempts: 6, successes: 6, playable: 6, p50LatencyMs: 200, samples: 6 } })
-  const linkOnly = mk({ usable: 3, metrics: { attempts: 6, successes: 6, playable: 1, p50LatencyMs: 200, samples: 6 } })
-  ok('拿到链接≠能播：可播率低的综合分更低',
-    Q.qualityScore(playableOK).score > Q.qualityScore(linkOnly).score)
-  ok('理由里同时写出可播数与链接数', /可播/.test(Q.qualityScore(linkOnly).parts.success.detail) && /链接/.test(Q.qualityScore(linkOnly).parts.success.detail))
-  const legacy = mk({ usable: 3, metrics: { attempts: 6, successes: 6, p50LatencyMs: 200, samples: 6 } })
-  ok('旧数据无 playable 字段时退回链接率，不误判为 0', Q.qualityScore(legacy).score !== null && Q.qualityScore(legacy).score > 0)
+  const hi = mk({ usable: 4, metrics: { p50LatencyMs: 1000, qualityMax: 'flac', qualityUsed: '128k' } })
+  const lo = mk({ usable: 4, metrics: { p50LatencyMs: 1000, qualityMax: '128k', qualityUsed: '128k' } })
+  ok('同为 4 平台、p50 相同 → 由最高可播档裁决', Q.compareVerdict(hi, lo).cmp === 1 && Q.compareVerdict(hi, lo).by === 'tier', Q.compareVerdict(hi, lo).by)
+  ok('档位理由写出实测档名', /flac/.test(Q.compareVerdict(hi, lo).reason), Q.compareVerdict(hi, lo).reason)
 
-  // A/B 实测 p90 447~596ms：200ms 应接近满分，3000ms 应归零
-  const fast = mk({ usable: 3, metrics: { p50LatencyMs: 200, samples: 6 } })
-  const slow = mk({ usable: 3, metrics: { p50LatencyMs: 3000, samples: 6 } })
-  ok('p50 200ms 延迟分接近满分', Q.qualityScore(fast).parts.latency.raw > 0.9)
-  ok('p50 3000ms 延迟分归零（上限取 A/B p90 的约 5 倍）', Q.qualityScore(slow).parts.latency.raw === 0)
-  ok('默认上限 3000ms', Q.DEFAULT_OPTS.latencyCapMs === 3000)
+  // 关键：qualityUsed 是「作者把哪档写在前面」，不能当能力
+  const used320 = mk({ usable: 4, metrics: { p50LatencyMs: 1000, qualityUsed: '320k' } })
+  const used128 = mk({ usable: 4, metrics: { p50LatencyMs: 1000, qualityUsed: '128k' } })
+  const vu = Q.compareVerdict(used320, used128)
+  ok('只有 qualityUsed 时不得据此裁决（平手不删）', vu.cmp === 0 && vu.by === 'tie', vu.by + ' | ' + vu.reason)
+  ok('profile 不把 qualityUsed 当 tier', Q.profile(used320).tier === null)
 
-  // 声明 flac 但从未实测成功（lx-music 实测 flac 脚本全败需服务端兜底）
-  const declaredFlac = mk({ usable: 3, qualityUsed: [], metrics: { qualityDeclared: ['flac'], p50LatencyMs: 200, samples: 6 } })
-  ok('仅声明高档位标 weak 且折扣可解释', Q.qualityScore(declaredFlac).parts.quality.weak === true && /×0\.7/.test(Q.qualityScore(declaredFlac).parts.quality.detail))
-  ok('声明 flac 的分数低于实测 320k', Q.qualityScore(declaredFlac).parts.quality.raw < Q.tierScore('320k').score)
+  const same = mk({ usable: 4, metrics: { p50LatencyMs: 1000, qualityMax: 'flac' } })
+  ok('档位相同 → 平手不删', Q.compareVerdict(hi, same).cmp === 0)
+  const noTier = mk({ usable: 4, metrics: { p50LatencyMs: 1000 } })
+  ok('缺档位证据 → 跳过第三层（不猜测）', Q.compareVerdict(hi, noTier).cmp === 0, Q.compareVerdict(hi, noTier).by)
 }
 
-console.log('=== E. 声明值打折与四维独立影响 ===')
+console.log('=== F. 证据不足：声明值不能拿去压实测值 ===')
 {
-  const declaredOnly = mk({ usable: 3, qualityUsed: [], metrics: { qualityDeclared: ['flac'] } })
-  const usedLow = mk({ usable: 3, qualityUsed: ['128k'], metrics: { qualityDeclared: ['flac'] } })
-  ok('实测成功档位优先于声明最高档', Q.qualityScore(declaredOnly).score > Q.qualityScore(usedLow).score)
-  ok('只有声明档位时该维度标 weak', Q.qualityScore(declaredOnly).parts.quality.weak === true)
-
-  const base = mk({ usable: 3, metrics: { attempts: 6, successes: 6, successRate: 1, p50LatencyMs: 200, samples: 6 } })
-  const slow = mk({ usable: 3, metrics: { attempts: 6, successes: 6, successRate: 1, p50LatencyMs: 7000, samples: 6 } })
-  const lowSr = mk({ usable: 3, metrics: { attempts: 6, successes: 1, successRate: 1 / 6, p50LatencyMs: 200, samples: 6 } })
-  ok('只改 p50：慢的分数更低', Q.qualityScore(base).score > Q.qualityScore(slow).score)
-  ok('只改成功率：低的分数更低', Q.qualityScore(base).score > Q.qualityScore(lowSr).score)
-  const morePlats = mk({ usable: 5, metrics: { attempts: 6, successes: 6, successRate: 1, p50LatencyMs: 200, samples: 6 } })
-  ok('只改平台数：多的分数更高', Q.qualityScore(morePlats).score > Q.qualityScore(base).score)
+  const srv = { supportedSources: ['wy', 'tx', 'kw'] }
+  const local = mk({ usable: 5 })
+  const v = Q.compareVerdict(local, srv)
+  ok('服务端只有声明值 → 判证据不足', v.cmp === 0 && v.by === 'insufficient', v.by + ' | ' + v.reason)
+  ok('反向同样不裁决', Q.compareVerdict(srv, local).cmp === 0)
+  ok('两侧都只有声明值 → 也不裁决', Q.compareVerdict(srv, { supportedSources: ['wy'] }).cmp === 0)
+  ok('describeQuality 明确写出「仅声明」', /仅声明/.test(Q.describeQuality(srv)))
+  ok('profile 标 declared=true 且 usable 来自声明', Q.profile(srv).declared === true && Q.profile(srv).usable === 3)
 }
 
-console.log('=== F. 快速模式「未测 ≠ 不可用」与旧分层兼容 ===')
+console.log('=== G. 未测 ≠ 不可用；skipped 不算缺口 ===')
 {
   const quick = mk({ usable: 1, untested: 4, noMetrics: true })
-  const qs = Q.qualityScore(quick)
-  ok('无 metrics 的深检结果不产生成功率/延迟证据', qs.parts.success.valid === false && qs.parts.latency.valid === false)
-  ok('快速模式 1 可用 vs 全测 1 可用不因「未测 4 个」误判更优', Q.compareQuality(quick, mk({ usable: 1 })) === 0)
-  const a = mk({ usable: 4, noMetrics: true }), b = mk({ usable: 2, noMetrics: true })
-  ok('两侧都无综合分时回落硬判据（平台数）', Q.compareQuality(a, b) === 1)
-  ok('describeQuality 明确写出「证据不足」', /证据不足/.test(Q.describeQuality({ supportedSources: ['wy'] })))
+  const full1 = mk({ usable: 1, noMetrics: true })
+  ok('快速模式 1 可用 + 4 未测 不因未测判劣', Q.compareVerdict(quick, full1).cmp === 0)
+  ok('untested 不计入 usable', Q.profile(quick).usable === 1 && Q.profile(quick).untested === 4)
+  const skipped = { deep: { checkedAt: 1, platforms: { wy: { status: 'usable', verified: true }, tx: { status: 'skipped' } }, metrics: { attempts: 2, successes: 2, p50LatencyMs: 200, samples: 2 } } }
+  ok('skipped 既不算可用也不算未测', Q.profile(skipped).usable === 1 && Q.profile(skipped).untested === 0)
+  const failed = { deep: { checkedAt: 1, platforms: { wy: { status: 'usable' }, tx: { status: 'failed' } } } }
+  ok('failed 计入 tested 但不计 usable', Q.profile(failed).tested === 2 && Q.profile(failed).usable === 1)
 }
 
-console.log('=== G. 设置项透传 ===')
+console.log('=== H. 平手/边界一律不删（删源不可逆） ===')
 {
-  const cfg = { qualityWeights: { platforms: 0.7, success: 0.1, latency: 0.1, quality: 0.1 }, qualityMinSamples: 5, qualityScoreMargin: 0.2 }
-  const o = Q.optsFromConfig(cfg)
-  ok('config 权重生效并归一化', Math.abs(o.weights.platforms - 0.7) < 1e-9)
-  ok('minSamples / margin 透传', o.minSamples === 5 && o.scoreMargin === 0.2)
-  ok('空 config 走默认', Q.optsFromConfig({}).minSamples === Q.DEFAULT_OPTS.minSamples)
+  const a = mk({ usable: 3, metrics: { p50LatencyMs: 500 } })
+  const b = mk({ usable: 3, metrics: { p50LatencyMs: 600 } })
+  ok('完全平手 → cmp=0', Q.compareVerdict(a, b).cmp === 0)
+  ok('isClearlyBetter 对平手为 false', Q.isClearlyBetter(a, b) === false)
+  ok('cmp 恒为 -1/0/1', [-1, 0, 1].includes(Q.compareVerdict(a, b).cmp))
+  ok('自反比较为平手', Q.compareVerdict(a, a).cmp === 0)
+  const empty = { deep: { checkedAt: 1, platforms: {} } }
+  ok('空平台集不会崩且判平手', Q.compareVerdict(empty, a).cmp === 0)
 }
 
-console.log('=== H. 生产路径回归：optsFromConfig 不能用 undefined 毁掉默认值（22:21 审计根因） ===')
-{
-  // 旧 bug：optsFromConfig({}) 把 minCoverage/scoreMargin/latencyCapMs 传成 undefined，
-  // Object.assign 覆盖 DEFAULT_OPTS 后被 `||` 兜底改成 0 / 0 / 8000，
-  // 于是「服务端只有声明值」也能算出综合分并参与删源。单测若只测不传 opts 的路径就全绿。
-  const o = Q.optsFromConfig({})
-  ok('部分 config 下 minCoverage 仍为 0.5', o.minCoverage === 0.5, 'got ' + o.minCoverage)
-  ok('部分 config 下 scoreMargin 仍为 0.08', o.scoreMargin === 0.08, 'got ' + o.scoreMargin)
-  ok('部分 config 下 latencyCapMs 仍为 3000', o.latencyCapMs === 3000, 'got ' + o.latencyCapMs)
-  ok('部分 config 下 minSamples 仍为 3', o.minSamples === 3)
-  const srv = { supportedSources: ['wy', 'tx', 'kw'] }
-  ok('生产 opts 下服务端声明条目判证据不足（score=null）', Q.qualityScore(srv, o).score === null)
-  ok('生产 opts 下微小分差仍判平手', Q.compareQuality(mk({ usable: 4, metrics: { p50LatencyMs: 1000 } }), mk({ usable: 4, metrics: { p50LatencyMs: 1050 } }), o) === 0)
-  ok('显式 scoreMargin=0 仍可覆盖（0 是合法值）', Q.optsFromConfig({ qualityScoreMargin: 0 }).scoreMargin === 0)
-  ok('weights 传字符串不会污染权重键', Object.keys(Q.optsFromConfig({ qualityWeights: 'oops' }).weights).length === 4)
-  ok('只给 playableRate 时不会被算成可播 0 次', Q.qualityScore({
-    deep: { checkedAt: 1, platforms: { wy: { status: 'usable' } }, metrics: { attempts: 6, successes: 6, playableRate: 0.5, p50LatencyMs: 200, samples: 6, qualityDeclared: ['320k'] } }
-  }).parts.success.raw > 0.5)
-}
-
-console.log('=== I. 三条裁决在生产 opts 下的护栏 ===')
+console.log('=== I. 生产路径：三条灌入口径 ===')
 {
   const H = new Hunter({ config: {} }, () => {})
-  const srv = { id: 'Demo Source v1.0.js', name: 'Demo Source v1.0', supportedSources: ['wy', 'tx', 'kw'], version: '1.0', repository: 'https://github.com/bbb/demo' }
-  const quick = {
-    id: 'c1', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', name: 'Demo Source v1.0',
-    repository: 'https://github.com/aaa/demo',
-    deep: {
-      checkedAt: Date.now(),
-      platforms: { wy: { status: 'usable', verified: true }, tx: { status: 'untested' }, kw: { status: 'untested' }, kg: { status: 'untested' }, mg: { status: 'untested' } },
-      metrics: { attempts: 2, successes: 2, playable: 2, p50LatencyMs: 150, samples: 2, qualityUsed: ['320k'], qualityDeclared: ['320k'] }
-    }
-  }
+  const srvCode = '/* code */'
+  const srvBase = { id: 'Demo Source v1.0.js', name: 'Demo Source v1.0', version: '1.0', supportedSources: ['wy', 'tx', 'kw'], repository: 'https://github.com/bbb/demo' }
+
+  // 口径 2：同仓库 + 版本更高 → 留新删旧
+  const sameRepoNew = Object.assign({}, mk({ usable: 4 }), {
+    id: 'c1', scriptName: 'Demo Source v1.1', lxName: 'Demo Source v1.1',
+    repository: 'https://github.com/bbb/demo'
+  })
+  const v2 = H.sameNameVerdict(sameRepoNew, srvBase, srvCode, {})
+  ok('同仓库同名 + 版本更高 + 质量不劣 → replace', v2.act === 'replace', v2.act + ' | ' + v2.why)
+
+  // 口径 3：跨仓库 + 本地实测更优 → replace；平手 → rename；更差 → skip
+  const crossBetter = Object.assign({}, mk({ usable: 5 }), {
+    id: 'c2', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', repository: 'https://github.com/aaa/demo'
+  })
+  const srvDeepWeak = Object.assign({}, srvBase, { deep: mk({ usable: 2 }).deep })
+  const v3 = H.sameNameVerdict(crossBetter, srvDeepWeak, srvCode, {})
+  ok('跨仓库同名 + 本地 5 平台 vs 服务端 2 平台 → replace', v3.act === 'replace', v3.act + ' | ' + v3.why)
+  ok('理由带判据来源 by=platforms', /platforms/.test(v3.why), v3.why)
+
+  const crossTie = Object.assign({}, mk({ usable: 3 }), {
+    id: 'c3', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', repository: 'https://github.com/aaa/demo'
+  })
+  const srvDeepSame = Object.assign({}, srvBase, { deep: mk({ usable: 3 }).deep })
+  const v4 = H.sameNameVerdict(crossTie, srvDeepSame, srvCode, {})
+  ok('跨仓库同名 + 平台数平手 → rename 并存（不删任何一方）', v4.act === 'rename', v4.act + ' | ' + v4.why)
+
+  const crossWorse = Object.assign({}, mk({ usable: 2 }), {
+    id: 'c4', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', repository: 'https://github.com/aaa/demo'
+  })
+  const srvDeepStrong = Object.assign({}, srvBase, { deep: mk({ usable: 4 }).deep })
+  const v5 = H.sameNameVerdict(crossWorse, srvDeepStrong, srvCode, {})
+  ok('跨仓库同名 + 本地更差 → skip（保留服务端）', v5.act === 'skip', v5.act + ' | ' + v5.why)
+
+  // 口径 1：不同名 → 直接灌入，不走裁决（由 _planImportQueue 处理）
+  ok('同名判定函数不存在「直接灌入」分支', typeof H._planImportQueue === 'function')
+}
+
+console.log('=== J. 生产路径：快速模式绝不按质量删源 ===')
+{
+  const H = new Hunter({ config: {} }, () => {})
+  const srv = { id: 'Demo Source v1.0.js', name: 'Demo Source v1.0', supportedSources: ['wy', 'tx', 'kw'], repository: 'https://github.com/bbb/demo' }
+  const quick = Object.assign({}, mk({ usable: 1, untested: 4, noMetrics: true }), {
+    id: 'q1', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', repository: 'https://github.com/aaa/demo'
+  })
   const v = H.sameNameVerdict(quick, srv, '/* code */', {})
-  ok('跨仓库 + 快速模式未实测 → rename 改名并存（绝不删任何一方）', v.act === 'rename', v.act + ' | ' + v.why)
-  ok('理由明确提示全平台检测', /全平台/.test(v.why))
+  ok('跨仓库 + 快速模式未全测 → rename 改名并存', v.act === 'rename', v.act + ' | ' + v.why)
+  ok('理由提示先做全平台检测', /全平台/.test(v.why), v.why)
 
-  const full = Object.assign({}, quick, { deep: Object.assign({}, quick.deep, {
-    platforms: { wy: { status: 'usable', verified: true }, tx: { status: 'usable', verified: true }, kw: { status: 'failed' }, kg: { status: 'failed' }, mg: { status: 'skipped' } },
-    metrics: { attempts: 6, successes: 6, playable: 6, p50LatencyMs: 200, samples: 6, qualityUsed: ['320k'], qualityDeclared: ['320k'] }
-  }) })
-  const v2 = H.sameNameVerdict(full, srv, '/* code */', {})
-  ok('全平台实测（skipped 不算缺证据）→ 进入质量裁决而非被未测护栏挡下', v2.act !== 'rename', v2.act + ' | ' + v2.why)
-  ok('服务端只有声明值时保守不删（skip 或平手改名，绝不 replace）', v2.act !== 'replace', v2.act + ' | ' + v2.why)
+  const dead = Object.assign({}, mk({ usable: 0 }), {
+    id: 'q2', scriptName: 'Demo Source v1.0', lxName: 'Demo Source v1.0', repository: 'https://github.com/aaa/demo'
+  })
+  const v2 = H.sameNameVerdict(dead, srv, '/* code */', {})
+  ok('本地实测 0 可用 → 绝不替换', v2.act === 'skip', v2.act + ' | ' + v2.why)
+}
 
+console.log('=== K. 回归：等长不同版本不得判 synced（17960 实机坑） ===')
+{
+  const H = new Hunter({ config: {} }, () => {})
+  const code = 'x'.repeat(100)
+  const e = Object.assign({}, mk({ usable: 3 }), {
+    id: 'v110', scriptName: 'Demo v1.1.0', lxName: 'Demo v1.1.0', repository: 'https://github.com/bbb/demo'
+  })
+  const srv = { id: 'Demo v1.0.0.js', name: 'Demo v1.0.0', size: 100, supportedSources: ['wy'], repository: 'https://github.com/bbb/demo' }
+  const v = H.sameNameVerdict(e, srv, code, {})
+  ok('字节长度相同但版本不同 → 不判 synced', v.act !== 'synced', v.act + ' | ' + v.why)
+  ok('版本更高 → 走留新删旧', v.act === 'replace', v.act + ' | ' + v.why)
+  const srvHash = Object.assign({}, srv, { hash: 'abc' })
+  const v2 = H.sameNameVerdict(Object.assign({}, e, { contentHash: 'abc' }), srvHash, code, {})
+  ok('hash 相同 → 判 synced（强证据优先）', v2.act === 'synced')
+}
+
+console.log('=== L. 巡检报告仍是只读，跨仓库给 layered-fallback ===')
+{
   const cross = U.pairSources(
     [{ id: 'Demo Source v1.0.js', name: 'Demo Source v1.0', version: '1.0', repository: 'https://github.com/aaa/demo', supportedSources: ['wy', 'tx'], enabled: true }],
-    [{ id: 'c1', name: 'Demo Source v1.0', scriptName: 'Demo Source v1.0', scriptVersion: '1.0', repository: 'https://github.com/ccc/demo', deep: full.deep }],
+    [{ id: 'c1', name: 'Demo Source v1.0', scriptName: 'Demo Source v1.0', scriptVersion: '1.0', repository: 'https://github.com/ccc/demo', deep: mk({ usable: 4 }).deep }],
     {}
   )[0]
-  ok('跨仓库巡检不再被 fewer-platforms 提前拦死', cross.evidence.quality !== undefined, cross.evidence.via + ' | ' + cross.reason.slice(0, 80))
-  ok('跨仓库巡检如实标记 layered-fallback', cross.evidence.quality && cross.evidence.quality.mode === 'layered-fallback')
+  ok('跨仓库巡检不再被 fewer-platforms 提前拦死', cross.evidence.quality !== undefined)
+  ok('跨仓库巡检如实标 layered-fallback', cross.evidence.quality && cross.evidence.quality.mode === 'layered-fallback')
 }
 
 console.log('\nRESULT ' + pass + ' PASS / ' + fail + ' FAIL')

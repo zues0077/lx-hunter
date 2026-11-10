@@ -3,6 +3,9 @@
 const crypto = require('crypto')
 const { Sandbox } = require('./sandbox')
 const { crawlFetch, readText, fetchAnyWithTimeout, describeNetError, dohLookup, UA } = require('./net')
+// 单一来源：音质档位 → 能力分只由 quality.js 定义。
+// quality.js 不 require checker，无循环依赖。
+const { tierScore } = require('./quality')
 
 const TEST_SONGS = {
   wy: [{ name: '海阔天空', info: { songmid: '347230' } }],
@@ -356,10 +359,10 @@ function declaredQualities(def) {
  *    否则超时失败会把 p50 压成难看的值、把好源误判成差源。
  *  - 音质档保留原始字符串，评分映射交给 quality.js 单一来源，避免两处口径分裂。
  */
-function aggregateMetrics(platforms, srcDefs) {
+function aggregateMetrics(platforms, srcDefs, depth) {
   let attempts = 0, successes = 0, playable = 0
   const okLat = [], allLat = []
-  const qualityUsed = [], qualityDeclared = []
+  const qualityUsed = [], qualityMax = [], qualityDeclared = []
   for (const [src, p] of Object.entries(platforms || {})) {
     const m = p && p.metrics
     if (m) {
@@ -369,10 +372,15 @@ function aggregateMetrics(platforms, srcDefs) {
       for (const x of (m.latencies || [])) okLat.push(Number(x) || 0)
       for (const x of (m.attemptLatencies || [])) allLat.push(Number(x) || 0)
       if (m.qualityUsed) qualityUsed.push(String(m.qualityUsed))
-      for (const q of (m.qualityDeclared || [])) qualityDeclared.push(String(q))
+      if (m.qualityMax) qualityMax.push(String(m.qualityMax))
     }
+    // 声明档位取一份：srcDefs（脚本原始注册对象）优先，缺失时用该平台 metrics 里的副本兜底。
+    // 旧实现两边都 push，而 metrics 副本本身就是 declaredQualities(def) 的拷贝 ⇒ 每平台重复两遍，
+    // 5 平台就是 10 倍。8192 实测 74/77 条重复、平均 7.5 倍，纯属数据膨胀。
     const def = srcDefs && srcDefs[src]
-    for (const q of declaredQualities(def)) qualityDeclared.push(String(q))
+    const fromDef = declaredQualities(def)
+    const fromM = (m && Array.isArray(m.qualityDeclared)) ? m.qualityDeclared : []
+    for (const q of (fromDef.length ? fromDef : fromM)) qualityDeclared.push(String(q))
   }
   const lat = okLat.length ? okLat : allLat
   lat.sort((a, b) => a - b)
@@ -383,6 +391,11 @@ function aggregateMetrics(platforms, srcDefs) {
     return Math.round(arr[lo] + (arr[hi] - arr[lo]) * (idx - lo))
   }
   return {
+    // 这次检测是「初筛」还是「打分档」：2026-11-10 00:1x 用户口径 ——
+    //   初筛（快速模式）只回答「有没有可用平台」，不产生打分数据；
+    //   只有用户主动点「深度检测（打分）」跑全平台，才产出可用于排序/比较的 p50 与平台数。
+    // quality.js 只认 depth==='full'，避免拿 1 次成功请求的 p50 冒充实测能力。
+    depth: depth === 'full' ? 'full' : 'quick',
     attempts, successes, playable,
     // 「拿到链接」≠「真能播」：lxserver 播放侧已知坑（HEAD 校验重定向失败、
     // content-type 非音频、试听片段拒绝、1500/3000ms 超时，见 A/B 四轮报告），
@@ -392,20 +405,28 @@ function aggregateMetrics(platforms, srcDefs) {
     p50LatencyMs: pctl(lat, 0.5), p90LatencyMs: pctl(lat, 0.9),
     samples: lat.length,
     okSamples: okLat.length,
-    qualityUsed, qualityDeclared
+    // 去重：声明档位来自各平台 def，同一声明会重复 5 次，Set 后只保留真实档位集合。
+    qualityUsed, qualityMax,
+    qualityDeclared: [...new Set(qualityDeclared)]
   }
 }
 
 async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
   const songs = TEST_SONGS[src] || []
   if (!songs.length) return { status: 'skipped', message: '无测试歌曲' }
-  // 优先用脚本声明的音质，取不到再退回常用两档（顺带覆盖只认 320k 的源）
-  const QUALITIES = (function () {
-    const own = declaredQualities(def)
-    if (own.length) return own
-    return ['128k', '320k']
-  })()
-  const metrics = { attempts: 0, successes: 0, playable: 0, latencies: [], attemptLatencies: [], qualityUsed: null, qualityDeclared: declaredQualities(def) }
+  const declared = declaredQualities(def)
+  // 音质档探测策略（2026-11-10 23:5x 用户口径，覆盖同日 23:0x 的「最高档优先」）：
+  //   「全面检测没必要测音源音质；只有同名、同平台数、同 p50 才需要比音质」
+  //   ⇒ 采集阶段只回答「能不能用」，按脚本声明的档位顺序逐档试到成功即停。
+  //   ⇒ 不做「最高档优先」探测：全库为排序多付一次高档超时（47→60~70 分钟）不划算，
+  //     且 qualityMax 一旦只在深检里写，就等于「排序用的音质列」绑架了检测耗时。
+  //   ⇒ 真正的音质证据由「同名冲突走到第③层」时的专项补测产生（写 metrics.qualityMax），
+  //     这里不产出，所以本阶段 qualityMax 恒为 null。
+  const probeList = declared.length ? declared : ['128k', '320k']
+  const metrics = {
+    attempts: 0, successes: 0, playable: 0, latencies: [], attemptLatencies: [],
+    qualityUsed: null, qualityMax: null, qualityDeclared: declared
+  }
   const done = r => Object.assign(r, { metrics })
   // 单平台总预算：够跑完「多档音质 + 一次抖动重试」，又不至于让坏脚本拖垮整个批次。
   // 显式配置了就用配置值（只兜一个很小的下限），否则按取链超时推算。
@@ -413,7 +434,7 @@ async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
   const budget = budgetCfg > 0 ? Math.max(3000, budgetCfg) : (Number(cfg.linkTimeoutMs) || 20000) * 2
   const deadline = Date.now() + budget
   let lastMsg = ''
-  for (const q of QUALITIES) {
+  for (const q of probeList) {
     for (const song of songs) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         if (bail()) return done({ status: 'untested', message: '已停止（其它平台已确认可用）' })
@@ -447,7 +468,10 @@ async function testPlatform(sb, src, cfg, onEvent, bail, displayName, def) {
             if (/私有|本地|无效 URL/.test(v.reason || '')) return done({ status: 'failed', message: v.reason })
             metrics.successes++
             metrics.latencies.push(dt)
-            metrics.qualityUsed = q
+            if (!metrics.qualityUsed) metrics.qualityUsed = q
+            // 注意：这里**不**写 qualityMax。qualityUsed 是「声明顺序里第一个成功的档位」，
+            // 只能证明「这个档能用」，不能证明「更高档用不了」；把它当最高可播档会
+            // 让「qualitys 写 128k 在前」的差源看起来和 flac 源同档。最高可播档由专项补测写入。
             if (v.ok) {
               metrics.playable++
               return done({ status: 'usable', message: `「${song.name}」返回可播音频 (${q})`, url: link, verified: true })
@@ -623,9 +647,92 @@ async function deepCheck(entry, code, cfg, onEvent, shouldStop) {
     // 统一在这里收口失效类别：无论走正常流程还是异常分支，统计口径都一致
     result.failKind = deepFailKind(result)
     // 综合性检测样本集：异常/取消时也要有一份（可能为空），下游评分据此判「证据不足」
-    result.metrics = aggregateMetrics(result.platforms, result.sourceDefs || {})
+    result.metrics = aggregateMetrics(result.platforms, result.sourceDefs || {}, quick ? 'quick' : 'full')
   }
   return result
+}
+
+/**
+ * 音质档专项补测（只在「同名冲突、各维度都打平」时调用）。
+ *
+ * 为什么不能放进常规检测：用户口径是「全面检测没必要测音质」——
+ * 每个平台都先试最高档会让全库 47 → 60~70 分钟，只为排序多一列，不划算。
+ * 但同名冲突走到最后一层（平台数相同、p50 差在噪声带内）时，
+ * 「能不能播 flac」就是唯一的区别依据，这时才值得为**那一条**付一次探测成本。
+ *
+ * 做法：建一次沙箱 → 只挑 1~2 个已实测可用的平台 → 按声明档位的**能力分从高到低**
+ * 取前两档试探（最高档成功即得证；最高失败再退次高档，避免「全库最高档都不支持」时误判无音质）；
+ * 两档都失败则**不写结果**（不能把 128k 当能力，也不能凭「高两档失败」就断言最高只有 128k）。
+ *
+ * @returns {{ok:boolean, tier:string|null, platform:string|null, tried:Array, reason:string}}
+ */
+function planTierProbe(declared, max) {
+  const n = Math.max(1, Number(max) || 2)
+  return (Array.isArray(declared) ? declared : [])
+    .filter(q => typeof q === 'string' && q)
+    .map(q => ({ q, s: (tierScore(q) || {}).score || 0 }))
+    .sort((a, b) => b.s - a.s)      // 能力分高的在前（同分保持声明顺序，sort 稳定）
+    .slice(0, n)
+    .map(x => x.q)
+}
+
+async function probeTopTier(entry, code, cfg, opts) {
+  const o = opts || {}
+  const c = cfg || {}
+  const out = { ok: false, tier: null, platform: null, tried: [], reason: '' }
+  if (!code) { out.reason = '没有脚本正文，无法补测'; return out }
+  const budgetMs = Math.max(3000, Number(o.budgetMs) || 20000)
+  const deadline = Date.now() + budgetMs
+  const want = Array.isArray(o.platforms) && o.platforms.length ? o.platforms.slice(0, 2) : null
+  let sb = null
+  try {
+    sb = new Sandbox({
+      id: (entry && entry.id) || 'tier-probe',
+      fetchTimeout: c.timeoutMs,
+      dispatchTimeout: Number(c.linkTimeoutMs) || 20000,
+      initGraceMs: Number(c.initGraceMs) || 4000,
+      initGraceMaxMs: Number(c.initGraceMaxMs) || 15000
+    })
+    const meta = extractMeta(code) || {}
+    const initRes = await sb.init(code, {
+      name: meta.name, description: meta.description, version: meta.version,
+      author: meta.author, homepage: meta.homepage, rawScript: code
+    })
+    if (!initRes || !initRes.inited) {
+      out.reason = '脚本初始化失败，无法补测音质档'
+      return out
+    }
+    const srcDefs = (initRes.data && initRes.data.sources) || {}
+    const cand = (want || Object.keys(srcDefs)).filter(k => srcDefs[k])
+    if (!cand.length) { out.reason = '脚本没有注册任何可测平台'; return out }
+    for (const src of cand) {
+      if (Date.now() > deadline) { out.reason = out.reason || '补测超出时间预算'; break }
+      // 按能力分从高到低取前两档（flac24bit → flac → 320k → …）：
+      // 最高档能播就直接得证；不能播才退次高档，避免「脚本声称支持 flac 但实际只有 320k」
+      // 被误记成「没有音质」。第三档以后不探 —— 那是常规检测该回答的问题，不是第三层。
+      const probe = planTierProbe(declaredQualities(srcDefs[src]), 2)
+      if (!probe.length) continue
+      // 只把「要探的两档」塞进 def.qualitys：testPlatform 会按这个顺序逐档试，
+      // 第一个成功即返回，于是 metrics.qualityUsed 就是这两档里真正能播的最高档。
+      const def = Object.assign({}, srcDefs[src], { qualitys: probe })
+      const r = await testPlatform(sb, src, c, () => {}, () => Date.now() > deadline, meta.name || (entry && entry.name) || '', def)
+        .catch(e => ({ status: 'failed', message: String((e && e.message) || e).slice(0, 80) }))
+      out.tried.push({ platform: src, qualities: probe, status: (r && r.status) || 'failed', message: (r && r.message) || '' })
+      if (r && r.status === 'usable' && r.metrics && r.metrics.qualityUsed) {
+        out.ok = true
+        out.tier = r.metrics.qualityUsed
+        out.platform = src
+        return out
+      }
+    }
+    out.reason = out.reason || '最高两档音质都取不到可播链接（不能据此断言更低档的表现）'
+    return out
+  } catch (e) {
+    out.reason = String((e && e.message) || e).slice(0, 120)
+    return out
+  } finally {
+    if (sb) { try { sb.stop() } catch (e) {} try { sb.destroy() } catch (e) {} }
+  }
 }
 
 /**
@@ -877,7 +984,7 @@ function regressionJudge(prevPassed, newPassed, newFailed) {
 module.exports = {
   TEST_SONGS, PLATFORMS, PLATFORM_LABEL,
   sha256Str, extractMeta, classifyEntry, scoreEntry, isHostAdapterScript, obfuscationRisk, obfuscationTip, verifyUrl,
-  checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge,
+  checkBasic, deepCheck, usableCount, stoppable, testPlatform, sameReasonHint, patrolJudge, probeTopTier, planTierProbe,
   aggregateMetrics, declaredQualities,
   isTransient, isLocalNetworkIssue, deepFailKind, applyProbeRecord, extractApiHosts, probeApiHosts, apiDownVerdict,
   passedPlatforms, regressionJudge

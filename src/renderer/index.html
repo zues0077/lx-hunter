@@ -92,7 +92,7 @@
           <button class="btn ghost" id="btnSelUnimported" title="排除已灌入/已合并项，只勾选当前筛选下「未灌入」的音源（与状态排序「已灌入垫底」配套：排除已灌入部分，只灌未灌入部分）">只选未灌入</button>
           <button class="btn ghost" id="btnHashDedupe" title="只下载并计算内容指纹（不进沙箱），先按内容去重，检测时直接跳过重复项">快速去重（内容指纹）</button>
           <button class="btn ghost" id="btnUndedupe" title="有勾选 → 只撤销勾选的废弃条目；没勾选 → 恢复全部废弃条目为候选（保留检测结果，可重新去重）">撤销去重</button>
-          <button class="btn ghost" id="btnFullPlat" title="对已可用的音源跑「全平台完整检测」：逐个平台真实取链，补齐快速模式下没测的平台">补全平台覆盖</button>
+          <button class="btn ghost" id="btnFullPlat" title="深度检测（打分）：对已可用的音源跑五平台真实取链，补齐快速模式下没测的平台，并产出「可用平台数 + p50 延迟」作为综合排序依据（不测音质）">深度检测（打分）</button>
           <button class="btn danger-ghost" id="btnDeleteSel" title="把勾选的音源从本地音源库删除（不影响服务端已灌入的脚本）；删掉的条目会记入「不再自动采集」名单，可在设置页清除记录后重新爬取">删除选中</button>
           <button class="btn ghost" id="btnClearSel">清空选择</button>
         </div>
@@ -110,7 +110,7 @@
               <tr>
                 <th class="c-chk"><input type="checkbox" id="chkAll"></th>
                 <th class="c-name sortable" data-k="name" title="点击按名称排序（再点反向）">音源<span class="sort-arrow"></span></th>
-                <th class="c-plat sortable" data-k="plat" title="点击按平台可用性排序：实测可用平台多的在前（再点反向）">平台可用性<span class="sort-arrow"></span></th>
+                <th class="c-plat sortable" data-k="plat" title="点击按综合质量排序：实测可用平台数 → p50 延迟 → 最高可播档（再点反向）。质量高的排在前面，可照着从上往下手动灌入">平台可用性<span class="sort-arrow"></span></th>
                 <th class="c-repo sortable" data-k="repo" title="点击按来源仓库排序（再点反向）">来源仓库<span class="sort-arrow"></span></th>
                 <th class="c-status sortable" data-k="status" title="点击按状态排序：可用 → 疑似 → 未检测 → 不可用 → 失效 → 已灌入（垫底，方便排除已灌入、只勾选未灌入的灌入；再点反向）">状态<span class="sort-arrow"></span></th>
                 <th class="c-op">操作</th>
@@ -339,7 +339,7 @@
           <label class="chk"><input type="checkbox" id="cfgAutoUnsafe"><span>脚本要求 VM 模式时自动放行（有安全风险）</span></label>
         </div>
         <div class="field-row">
-          <label class="chk"><input type="checkbox" id="cfgQuick"><span>快速检测（首个平台可用即通过，剩余平台<strong>不测</strong>并标「未测?」——平台列只反映实测结果；要完整覆盖请点「补全平台覆盖」或关闭此项）</span></label>
+          <label class="chk"><input type="checkbox" id="cfgQuick"><span>快速检测（首个平台可用即通过，剩余平台<strong>不测</strong>并标「未测?」——平台列只反映实测结果；要完整覆盖并参与综合排序请点「深度检测（打分）」或关闭此项）</span></label>
           <label class="chk"><input type="checkbox" id="cfgSkipChecked"><span>跳过已检测且脚本内容未变的音源（<strong>单条手动检测与「检测选中 / 检测并灌入」始终强制重测</strong>；此项只对爬取后自动检测、巡检、定时管线等不指定条目的批量生效）</span></label>
           <label class="chk"><input type="checkbox" id="cfgHashDedupe"><span>爬取后先做内容指纹去重（只下载算哈希、不进沙箱），检测直接跳过重复项</span></label>
           <label class="chk"><input type="checkbox" id="cfgApiHostCheck"><span><strong>接口域名存活探测</strong>：检测时对脚本引用的后端域名做轻量探活，后端全挂的音源提前标记。默认关——开启会为每个音源多发若干请求，量大时偏慢</span></label>

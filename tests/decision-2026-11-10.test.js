@@ -53,7 +53,7 @@ console.log('\n== identity / quality：同源键与「质量更优」判据 ==')
   assert.strictEqual(Q.isClearlyBetter(b, a), false)
   const srvDeclared = { supportedSources: ['kw', 'kg'] }
   assert.strictEqual(Q.compareQuality(a, srvDeclared), 0, '服务端只有声明值时判平手（未知证据不参与）')
-  assert.ok(/声明 2 个支持平台/.test(Q.describeQuality(srvDeclared)))
+  assert.ok(/仅声明支持 2 个平台/.test(Q.describeQuality(srvDeclared)))
   ok('质量分层：usable > verified > tested；服务端声明值不冒充实测，平手不删')
 }
 
@@ -99,15 +99,35 @@ console.log('\n== 用户口径 1/2/3：同名裁决规则 ==')
   ok('2e 服务端回传脚本正文时按全文精确判同内容（精确证据优先于字节长度）')
 
   // 口径 3：跨仓库同名 → 按 lx-hunter 实测质量留优删差
+  // 前提：服务端侧必须有**实测**证据。lxserver/音乐服务只回元信息（17950 实测 38 条全无
+  // deep/hash/正文），supportedSources 是脚本自己写的声明值 —— 声明值不能拿去压实测值，
+  // 否则「声明 5 个平台但从没测过」会把一个真能用的本地源删掉。此时只能改名并存。
   const cross = { repository: 'https://github.com/other/baz' }
   v = decided.sameNameVerdict(mkE(), mkS(Object.assign({}, cross, { supportedSources: ['kw'] })), code, {})
+  assert.strictEqual(v.act, 'rename')
+  assert.ok(/无实测证据|证据不足|平手/.test(v.why), v.why)
+  ok('3a 跨仓库 + 服务端只有声明值 → 不判优劣，改名并存（声明≠实测）')
+
+  // 服务端侧有 lx-hunter 本地质量代理（此前实测过这个脚本的 deep）→ 才真正能按质量裁决
+  const proxy = n => ({ qualityProxy: {
+    checkedAt: Date.now(),
+    platforms: { kw: { status: 'usable', verified: true }, kg: { status: 'usable', verified: true }, wy: { status: n > 2 ? 'usable' : 'failed' } },
+    metrics: { depth: 'full', attempts: 3, successes: n, playable: n, p50LatencyMs: 400, samples: n }
+  } })
+  // 平台数相同 → 才轮到 p50；本地 100ms vs 服务端 400ms，差 300ms 刚好出噪声带 → 本地优
+  const fastDeep = {
+    checkedAt: Date.now(),
+    platforms: { kw: { status: 'usable', verified: true }, kg: { status: 'usable', verified: true } },
+    metrics: { depth: 'full', attempts: 2, successes: 2, playable: 2, p50LatencyMs: 100, samples: 2 }
+  }
+  v = decided.sameNameVerdict(mkE({ deep: fastDeep }), mkS(Object.assign({}, cross, proxy(1))), code, {})
   assert.strictEqual(v.act, 'replace')
   assert.ok(/质量更优/.test(v.why), v.why)
-  ok('3a 跨仓库 + 本地实测质量更优 → 留优删差')
+  ok('3b 跨仓库 + 服务端有实测（2 平台）而本地 2 平台且更快/档位不劣时按字典序裁决')
 
-  v = decided.sameNameVerdict(mkE(), mkS(Object.assign({}, cross, { supportedSources: ['kw', 'kg', 'wy'] })), code, {})
+  v = decided.sameNameVerdict(mkE(), mkS(Object.assign({}, cross, proxy(3))), code, {})
   assert.strictEqual(v.act, 'skip')
-  ok('3b 跨仓库 + 服务端更优 → 保留服务端，本地不灌')
+  ok('3b2 跨仓库 + 服务端实测 3 平台 > 本地 2 平台 → 保留服务端，本地不灌')
 
   v = decided.sameNameVerdict(mkE(), mkS(cross), code, {})
   assert.strictEqual(v.act, 'rename')

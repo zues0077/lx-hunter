@@ -300,6 +300,10 @@ details.data-more p.hint { margin-top: 8px; line-height: 1.7; }
 /* 快速模式没测的平台：虚线边框 + 问号，明确区别于「实测失败」 */
 .plat.untested { opacity: .65; border: 1px dashed currentColor; background: transparent; }
 .plat.untested::after { content: '?'; margin-left: 2px; opacity: .8; }
+/* 质量摘要（平台数 · p50）：排序依据的可读化，小号灰字不抢平台徽章 */
+.qbrief { display: block; margin-top: 3px; font-size: 10.5px; color: var(--muted); opacity: .85; white-space: nowrap; }
+/* 未打分（初筛产物）：虚线框提示「还不参与排序」，别让它看起来像个成绩 */
+.qbrief.unscored { display: inline-block; margin-top: 3px; padding: 0 4px; border: 1px dashed var(--line, #3a3a3a); border-radius: 3px; opacity: .7; }
 /* 已解析出播放链接、但本机没能下载校验：算可用，样式上用浅一档绿 + 波浪号标注，区别于「实测可播」 */
 .plat.weak { background: rgba(52,211,153,.08); color: var(--ok); opacity: .85; border: 1px dashed var(--ok); font-weight: 500; }
 .plat.weak::after { content: '~'; margin-left: 2px; opacity: .9; }
