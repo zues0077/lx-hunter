@@ -267,7 +267,11 @@ const t0 = parseReleaseAssets(relsTime, { sinceTs: 0 })
 ck('sinceTs=0 表示不限', t0.length === 3)
 ck('资产携带 publishedAt 供日志', tAll[0].publishedAt > 0)
 const crSrcT = fs.readFileSync(path.join(__dirname, '../src/core/crawler.js'), 'utf8')
-ck('fetchRepoFreshness：commits?since 整仓探测', crSrcT.includes('fetchRepoFreshness') && crSrcT.includes('/commits?per_page=1&since='))
+// v1.13.0：URL 不再带 since（带时间戳会让 ETag 每轮都变、304 永远命中不了），
+// 改成抓最新 1 条提交后本地比时间；同时必须走 ghGetJson 才能吃到 304 缓存。
+ck('fetchRepoFreshness：commits 整仓探测（ETag 友好，不带 since）',
+  crSrcT.includes('fetchRepoFreshness') && crSrcT.includes('/commits?per_page=1') &&
+  !crSrcT.includes('/commits?per_page=1&since=') && crSrcT.includes('ghGetJson(url, token, timeoutMs)'))
 ck('API 异常保守放行（不漏爬）', crSrcT.includes('fresh: true, empty: true'))
 ck('静默仓库整仓跳过（提交与发布都陈旧）', crSrcT.includes('整仓跳过') && crSrcT.includes('无新发布'))
 ck('新鲜度探测补查 Releases（修复只靠 Release 推更新的仓库被漏爬）', crSrcT.includes('fetchReleases') && crSrcT.includes('lastReleaseAt'))
@@ -289,7 +293,7 @@ ck('设置页有时间窗输入', fs.readFileSync(path.join(__dirname, '../src/r
 // ---------- ⑧ v1.10.3 新增：失效仓库自动清理 / 搜索发现节流 / 清单搜索 ----------
 console.log('\n== v1.10.3 新增能力 ==')
 ck('crawl 统计含 deadRepos', crSrcT.includes('deadRepos: []') && crSrcT.includes('stats.deadRepos.push'))
-ck('fetchRepoFreshness 标记 404 失效', crSrcT.includes('notFound: res.status === 404'))
+ck('fetchRepoFreshness 标记 404 失效', crSrcT.includes('notFound: r.status === 404'))
 const hSrc = fs.readFileSync(path.join(__dirname, '../src/core/hunter.js'), 'utf8')
 ck('hunter 自动清理失效仓库（非内置、可关闭）', hSrc.includes('autoCleanDeadRepos') && hSrc.includes('失效仓库自动清理'))
 ck('hunter 搜索发现节流（满 N 小时才跑）', hSrc.includes('searchDiscoverHours') && hSrc.includes('searchDiscoverAt'))

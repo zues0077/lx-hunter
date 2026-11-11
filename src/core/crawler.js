@@ -288,25 +288,110 @@ function judgeFreshness(commitsArr, releasesArr, sinceTs) {
 }
 
 /**
- * 仓库新鲜度探测（v1.7.2 时间过滤，v1.10.3 修正）：
- *  ① 先 commits?since= 1 次配额判断有无新提交——命中即新鲜（无需再查 release）。
- *  ② 若无新提交，再补查 Releases 发布时间（1 次配额）：时间窗内有新发布也算新鲜，
- *     并把 releases 数组带回，供主流程复用（省掉主流程再取 release 的 1 次配额）。
+ * 带 ETag 的 GitHub GET（v1.13.0，配额优化第 1 项）
+ *
+ * GitHub 官方规则：**条件请求拿到 304 不计入 rate limit**
+ * （"Making a conditional request and receiving a 304 response does not count against
+ * your primary rate limit"）。所以「内容没变」的仓库每轮只花一次请求、零配额。
+ *
+ * 两个必须注意的点：
+ *  1. URL 里带会变的时间戳（旧实现 `commits?per_page=1&since=...`）会让 ETag 每轮都变，
+ *     命中率恒为 0 —— 所以新鲜度探测改成「抓最新 1 条提交再本地比时间」，URL 才稳定。
+ *  2. 缓存只放内存：进程重启后首轮全量拉一次，之后靠 304。不落盘，避免 data 目录里
+ *     多一份可能和真实状态不一致的副本。
+ */
+const GH_ETAG_CACHE = new Map()   // url -> { etag, json }
+const GH_ETAG_MAX = 800
+
+async function ghGetJson(url, token, timeoutMs) {
+  const hit = GH_ETAG_CACHE.get(url)
+  const headers = ghHeaders(token)
+  if (hit && hit.etag) headers['If-None-Match'] = hit.etag
+  const res = await fetchWithTimeout(url, { headers }, timeoutMs)
+  if (res.status === 304) {
+    try { await res.text() } catch (e) { /* 304 无 body，读掉避免连接悬挂 */ }
+    return { ok: true, notModified: true, status: 304, json: hit ? hit.json : null }
+  }
+  const text = await readText(res, timeoutMs)
+  let json = null
+  try { json = JSON.parse(text) } catch (e) { json = null }
+  if (res.ok && json != null) {
+    const etag = res.headers && typeof res.headers.get === 'function' ? res.headers.get('etag') : null
+    if (etag) {
+      if (GH_ETAG_CACHE.size > GH_ETAG_MAX) GH_ETAG_CACHE.clear()
+      GH_ETAG_CACHE.set(url, { etag, json })
+    }
+  }
+  return { ok: res.ok, notModified: false, status: res.status, json }
+}
+
+/** 已确认 404 的仓库记忆时长（3 天）—— 过期后允许再探一次，组织恢复/改名修好后能自动回来 */
+const DEAD_REPO_TTL_MS = 3 * 86400 * 1000
+
+/**
+ * 过滤掉「最近 TTL 内已确认 404」的仓库（纯函数，便于单测）
+ * @param {string[]} repos
+ * @param {object} deadMap db.deadRepos：{ 'owner/repo': { at, hits } }
+ * @param {number} [now]
+ * @param {number} [ttlMs]
+ * @returns {{keep:string[], skipped:string[]}}
+ */
+function filterDeadRepos(repos, deadMap, now, ttlMs) {
+  const list = Array.isArray(repos) ? repos : []
+  const dead = deadMap && typeof deadMap === 'object' ? deadMap : {}
+  const t = now || Date.now()
+  const ttl = ttlMs || DEAD_REPO_TTL_MS
+  const keep = []
+  const skipped = []
+  for (const r of list) {
+    const n = normalizeRepo(r) || r
+    const d = dead[n]
+    if (d && t - (Number(d.at) || 0) < ttl) skipped.push(r)
+    else keep.push(r)
+  }
+  return { keep, skipped }
+}
+
+/**
+ * 仓库新鲜度探测（v1.7.2 时间过滤，v1.10.3 修正，v1.13.0 改成 ETag 友好）
+ *  ① 抓「最新 1 条提交」（URL 不带 since，ETag 才能命中 304）→ 本地比时间
+ *  ② 提交陈旧时再查 Releases（URL 也稳定，同样吃 304）——只发 release 的仓库靠这一步
  * 只有「无新提交 且 无新发布」的仓库才整仓跳过（省 tree 配额）。
  * 返回 { fresh, lastCommitAt, lastReleaseAt, releases?, empty }：empty=API 异常（保守放行，不漏爬）。
  */
 async function fetchRepoFreshness(repo, sinceIso, token, timeoutMs) {
   const sinceTs = Date.parse(sinceIso)
+  // v1.13.0（配额优化第 2 项）：新鲜度结论缓存。
+  // 场景是「失败重试 / 一天内多次手动采集」——同一批仓库的目标在 45 分钟内不会变，
+  // 重复探测纯属浪费配额。只缓存有结论的结果，API 异常（empty）不缓存，避免把一次抖动固化成判断。
+  const cached = FRESH_CACHE.get(repo)
+  if (cached && Date.now() - cached.at < FRESH_TTL_MS && !cached.result.empty) {
+    return Object.assign({}, cached.result, { cached: true })
+  }
+  const result = await fetchRepoFreshnessUncached(repo, sinceTs, token, timeoutMs)
+  if (!result.empty) {
+    if (FRESH_CACHE.size > 300) FRESH_CACHE.clear()
+    FRESH_CACHE.set(repo, { at: Date.now(), result })
+  }
+  return result
+}
+
+/** 新鲜度缓存的 TTL：45 分钟（一次爬取 68 个仓库通常 2~5 分钟，重试不会隔太久） */
+const FRESH_TTL_MS = 45 * 60 * 1000
+const FRESH_CACHE = new Map()   // repo -> { at, result }
+
+async function fetchRepoFreshnessUncached(repo, sinceTs, token, timeoutMs) {
   try {
-    const url = `https://api.github.com/repos/${repo}/commits?per_page=1&since=${encodeURIComponent(sinceIso)}`
-    const res = await fetchWithTimeout(url, { headers: ghHeaders(token) }, timeoutMs)
-    if (!res.ok) return { fresh: true, empty: true, notFound: res.status === 404 }   // 异常不拦路；404 额外标记失效
-    const commits = JSON.parse(await readText(res, timeoutMs))
-    if (!Array.isArray(commits)) return { fresh: true, empty: true }
-    if (commits.length > 0) {
-      const last = commits[0] && commits[0].commit && commits[0].commit.committer ? commits[0].commit.committer.date : null
-      return { fresh: true, lastCommitAt: last ? Date.parse(last) || 0 : 0 }
-    }
+    // v1.13.0：不再把 since 放进 URL —— 那会让 URL 每天变一次，ETag 命中率为 0。
+    // 改成本地比较：最新一条提交的日期 < 时间窗起点，就当陈旧。
+    const url = `https://api.github.com/repos/${repo}/commits?per_page=1`
+    const r = await ghGetJson(url, token, timeoutMs)
+    if (!r.ok) return { fresh: true, empty: true, notFound: r.status === 404 }   // 异常不拦路；404 额外标记失效
+    const commits = Array.isArray(r.json) ? r.json : []
+    if (!commits.length) return { fresh: true, empty: true }   // 空仓库/异常响应：保守放行
+    const last = commits[0] && commits[0].commit && commits[0].commit.committer ? commits[0].commit.committer.date : null
+    const lastCommitAt = last ? Date.parse(last) || 0 : 0
+    if (lastCommitAt >= sinceTs) return { fresh: true, lastCommitAt }
   } catch (e) {
     return { fresh: true, empty: true }   // 网络抖动不拦路
   }
@@ -363,10 +448,11 @@ function parseReleaseAssets(releases, opts) {
 
 async function fetchReleases(repo, token, timeoutMs) {
   const url = `https://api.github.com/repos/${repo}/releases?per_page=${RELEASES_PER_REPO}`
-  const res = await fetchWithTimeout(url, { headers: ghHeaders(token) }, timeoutMs)
-  const text = await readText(res, timeoutMs)
-  const j = JSON.parse(text)
-  if (j.message) throw new Error('GitHub API: ' + String(j.message).slice(0, 80))
+  // v1.13.0：走 ETag 缓存。releases 列表的 URL 天然稳定，未发布新版本的仓库命中 304 → 零配额。
+  const r = await ghGetJson(url, token, timeoutMs)
+  if (!r.ok) throw new Error('GitHub API: HTTP ' + r.status)
+  const j = r.json
+  if (j && j.message) throw new Error('GitHub API: ' + String(j.message).slice(0, 80))
   return Array.isArray(j) ? j : []
 }
 
@@ -480,11 +566,16 @@ async function verifyRepoHasSource(repo, o) {
       : ghHeaders(token) }, tmo)
     return res
   }
-  const info = await get(`https://api.github.com/repos/${repo}`)
-  if (!info.ok) return { ok: false, reason: 'repo HTTP ' + info.status }
-  let meta = {}
-  try { meta = JSON.parse(await readText(info, tmo)) } catch (e) {}
-  const branch = meta.default_branch || 'main'
+  // v1.13.0（配额优化第 5 项）：调用方已经知道分支名（搜索结果里就带 default_branch）时，
+  // 直接跳过 /repos/{repo} 这次请求 —— 每个候选仓库省 1 次配额，最多少 60 次/轮。
+  let branch = String((o && o.branch) || '').trim()
+  if (!branch) {
+    const info = await get(`https://api.github.com/repos/${repo}`)
+    if (!info.ok) return { ok: false, reason: 'repo HTTP ' + info.status }
+    let meta = {}
+    try { meta = JSON.parse(await readText(info, tmo)) } catch (e) {}
+    branch = meta.default_branch || 'main'
+  }
   const tr = await get(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`)
   if (!tr.ok) return { ok: false, reason: 'tree HTTP ' + tr.status }
   let tj = {}
@@ -597,6 +688,9 @@ async function discoverReposViaSearch(opts) {
   const out = []
   const seen = new Set(known)
   const perKeyword = {}
+  // v1.13.0：搜索结果里本来就有 default_branch，带给 verifyRepoHasSource 就能省掉一次
+  // /repos/{repo} 请求（每候选仓库省 1 次配额）
+  const branches = {}
   for (const kw of keywords) {
     if (out.length >= maxTotal) break
     try {
@@ -621,6 +715,7 @@ async function discoverReposViaSearch(opts) {
         if (o.skipRelevance !== true && !looksLikeSourceRepo(it)) { filtered++; continue }
         seen.add(n)
         out.push(n)
+        if (it.default_branch) branches[n] = String(it.default_branch)
         added++
       }
       perKeyword[kw] = { found: items.length, added, filtered }
@@ -634,7 +729,8 @@ async function discoverReposViaSearch(opts) {
   let droppedNoSource = 0
   const details = []
   if (o.verify === true && out.length) {
-    const vr = await runPool(out, Math.max(1, Number(o.verifyConcurrency) || 4), (r) => verifyRepoHasSource(r, o))
+    const vr = await runPool(out, Math.max(1, Number(o.verifyConcurrency) || 4),
+      (r) => verifyRepoHasSource(r, Object.assign({}, o, { branch: branches[r] || '' })))
     const kept = []
     for (let i = 0; i < out.length; i++) {
       const v = vr[i] || { ok: false, reason: '验真失败' }
@@ -911,7 +1007,8 @@ async function resolveRepoRename(repo, o) {
 }
 
 module.exports = {
-  DEFAULT_REPOS, crawl, checkQuota, fetchReleases, parseReleaseAssets, fetchRepoFreshness, judgeFreshness,
+  DEFAULT_REPOS, crawl, checkQuota, fetchReleases, ghGetJson, filterDeadRepos, DEAD_REPO_TTL_MS,
+  parseReleaseAssets, fetchRepoFreshness, judgeFreshness,
   discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, resolveRepoRename, isSourceAsset,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,
   filterLatestOnly, latestBaseName, versionNumOf,

@@ -1,6 +1,6 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
-const { crawl, checkQuota, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource, resolveRepoRename } = require('./crawler')
+const { crawl, checkQuota, filterDeadRepos, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource, resolveRepoRename } = require('./crawler')
 const { crawlWebSite, isWebRepo, probeExternalSource, normalizeExternalUrl } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
@@ -555,6 +555,19 @@ class Hunter {
         }
       }
     }
+    // v1.13.0（配额优化第 3 项）：3 天内已确认 404 的仓库直接跳过。
+    // 以前 deadRepos 只活在当轮 stats，内置仓库（autoClean 不动它们）和组织改名后被 404 的仓库
+    // 每轮都要重新探一次 —— 明知死了还天天问。行级主动采集不过滤（用户点了就是想要一次重试机会）。
+    if (!onlyRepos.length) {
+      const dead = this.store.db.deadRepos && typeof this.store.db.deadRepos === 'object' ? this.store.db.deadRepos : null
+      if (dead) {
+        const fr = filterDeadRepos(repos, dead)
+        if (fr.skipped.length) {
+          this.log(`跳过 ${fr.skipped.length} 个 3 天内已确认 404 的仓库（省探测配额；仓库恢复或被改名后会自动回来）`, '爬取', 'warn')
+          repos = fr.keep
+        }
+      }
+    }
     this.job = { running: true, type: 'crawl', cancel: false, progress: { reposDone: 0, repoTotal: repos.length, added: 0, linksFound: 0 }, step: '' }
     this.emit('job', { running: true, type: 'crawl' })
     this.log((onlyRepos.length ? '主动采集' : incremental ? '定时增量爬取' : '开始爬取') + ` ${repos.length} 个仓库（文件树 + Releases）…`, '爬取')
@@ -647,6 +660,19 @@ class Hunter {
           }
         }
         if (stateDirty) this.store.saveConfig()
+      }
+      // v1.13.0（配额优化第 3 项）：把 404 结果持久化，供下一轮直接跳过。
+      // 只记确定性 404（crawl 里只有 404 才进 deadRepos），临时失败/限流不会进这张表。
+      if (crawlStats && Array.isArray(crawlStats.deadRepos)) {
+        const dead = this.store.db.deadRepos && typeof this.store.db.deadRepos === 'object' ? this.store.db.deadRepos : {}
+        const deadSet = new Set(crawlStats.deadRepos.map(r => normalizeRepo(r) || r))
+        for (const r of deadSet) dead[r] = { at: Date.now(), hits: ((dead[r] && dead[r].hits) || 0) + 1 }
+        // 本轮探到活的 → 从死亡名单摘掉（组织改名修好/仓库恢复后自动回来）
+        for (const r of repos) {
+          const n = normalizeRepo(r) || r
+          if (!deadSet.has(n) && dead[n]) delete dead[n]
+        }
+        this.store.db.deadRepos = dead
       }
       // v1.10.3：失效仓库自动清理（仅非内置；只删确定性 404，不误删临时失败/限流）
       if (crawlStats && Array.isArray(crawlStats.deadRepos) && crawlStats.deadRepos.length && cfg.autoCleanDeadRepos !== false) {
