@@ -108,7 +108,12 @@ function profile(entry) {
   // 只有用户主动跑「深度检测（打分）」才产出可用于排序/比较的数据。
   // 没有 depth 标记的老记录（升级前的快速模式产物）一律视为「未打分」——
   // 它们同样只有 1 个平台样本，拿它的 p50 排序等于用一个样本冒充能力。
-  const scored = !!(metrics && metrics.depth === 'full')
+  // 2026-11-11 修正（P-1411 P1-3）：深检但 0 样本（平台集为空 / 全部 skipped，
+  // 实测「野草音源」就是 depth=full + samples=0 + p50=null）不算「已打分」——
+  // 拿一个空样本冒充能力，和初筛只有一个样本本质相同。
+  // 只把「显式 0 样本」降级；老记录没有 samples 字段时保持原口径（不让升级把历史全翻案）。
+  const zeroSamples = !!(metrics && Number(metrics.samples) === 0)
+  const scored = !!(metrics && metrics.depth === 'full' && !zeroSamples)
 
   // 最高可播档位：**只认 qualityMax**（同名冲突时的专项补测产物）。
   // 绝不用 qualityUsed 兜底 —— 它是「脚本声明的档位顺序里第一个成功的那个」，
@@ -137,6 +142,16 @@ function profile(entry) {
 }
 
 /**
+ * 「这一侧为什么不能打分」——给 compareVerdict 的 insufficient 理由用。
+ * 区分两种缺口：只跑过初筛（quick，1 个样本）/ 深检跑过但一个样本都没产出（0 样本）。
+ */
+function unscoredReason(p) {
+  const d = p && p.metrics && p.metrics.depth
+  if (d === 'full') return '深度检测没有产出任何可用样本（0 样本），不能当质量证据'
+  return '只做过初筛（没有延迟/音质证据，需深度检测才能比较）'
+}
+
+/**
  * 字典序比较。返回 { cmp, by, reason, a, b }
  *  cmp: 1 = a 更优，-1 = b 更优，0 = 平手或证据不足（调用方必须按「不删」处理）
  *  by : platforms | tier | latency | tie | insufficient
@@ -161,6 +176,21 @@ function compareVerdict(a, b) {
     return wrap({
       cmp: pa.usable > pb.usable ? 1 : -1, by: 'platforms',
       reason: `可用平台数 ${pa.usable} vs ${pb.usable} → ${win} 侧更多`,
+      a: pa, b: pb
+    })
+  }
+
+  // ①.5) 没有打分档的一侧不参与第二、三层（2026-11-11，P-1411 P1-2）。
+  // 原实现会让「本地只跑过初筛」一路走到最后，返回 `by:'tie'`（理由「平台数同为 N → 平手」）——
+  // 把「没测过」写成「打平了」。跨仓库分支要求「质量必须更优」才替换，于是本地新版永远灌不进，
+  // 而用户看到的理由是「质量平手」，完全误导。这里显式判证据不足，文案指明该去补跑深检。
+  if (!pa.scored || !pb.scored) {
+    const bad = []
+    if (!pa.scored) bad.push('A 侧' + unscoredReason(pa))
+    if (!pb.scored) bad.push('B 侧' + unscoredReason(pb))
+    return wrap({
+      cmp: 0, by: 'insufficient',
+      reason: bad.join('，') + ' → 未比较延迟/音质（先做深度检测再裁决）',
       a: pa, b: pb
     })
   }

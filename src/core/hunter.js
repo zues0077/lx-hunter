@@ -210,6 +210,52 @@ function patrolAutoDeleteWanted(cfg, streak) {
 }
 
 /**
+ * 同批「同名不同版本」去重（2026-11-11，P-1411 P0）。
+ *
+ * 场景：一次勾选同一音源的 v1.0.0 + v2.0.0 两个文件。原来的规划只按**精确名**去重，
+ * 版本号写在名字里 → 两个名字不同 → 两条都通过，且都对着服务端**同一条**旧版规划 replace。
+ * 执行期第一条删掉旧版装入 v1，第二条再 remove 同一个 id 必然失败（HTTP 500），
+ * 退回改名上传 → 服务端并存两条（`…v1.0.0.js` + `…_v2.0.0（副本2）.js`），
+ * 留下的还是低版本；下次灌 v3 只会删 v2，v1 永久成僵尸（17960 实机复现）。
+ *
+ * 规则（刻意写窄，避免误伤）：
+ *  - 只有「剥掉版本号后同名」（baseNameKey 相同）**且版本可比、且互不相同**才去重；
+ *    同版本/取不到版本的同名多源，多半是不同仓库转发的不同脚本，保持原样交给逐条裁决。
+ *  - 只在「本来就能灌」的条目里挑（服务端原生 / 无正文 / 本地实测不可用的不参与），
+ *    否则可能挑中一条永远不会被灌的，把唯一能灌的那条也一起跳过。
+ *  - 保留顺序：版本高 → 可用平台多 → 修改时间新 → id 字典序（结果可复现）。
+ *
+ * @returns {Object<string, object>} 被跳过的条目 id → 本次保留的那条
+ */
+function planBaseDedupe(targets, cfg) {
+  const c = cfg || {}
+  const groups = {}
+  for (const e of (targets || [])) {
+    if (!e || e.fromServer) continue
+    if (!e.url && !(typeof e.code === 'string' && e.code)) continue
+    if (c.skipUnusable !== false && !e.usable && e.deep && !e.stale) continue
+    const bk = baseNameKey(e.lxName || e.scriptName || e.name)
+    if (!bk) continue
+    ;(groups[bk] = groups[bk] || []).push(e)
+  }
+  const skip = {}
+  for (const bk of Object.keys(groups)) {
+    const g = groups[bk]
+    if (g.length < 2) continue
+    const rows = g.map(e => ({ e, v: versionNum(verLabel(e.scriptVersion || e.lxName || e.scriptName || e.name)) }))
+    if (rows.some(r => !r.v)) continue                        // 有取不到版本的 → 不猜
+    if (new Set(rows.map(r => r.v)).size < 2) continue         // 版本全同 → 不是「多版本」，不去重
+    rows.sort((x, y) => -cmpVersion(x.v, y.v) ||
+      usableCount(y.e) - usableCount(x.e) ||
+      (y.e.lastModified || 0) - (x.e.lastModified || 0) ||
+      String(x.e.id).localeCompare(String(y.e.id)))
+    const win = rows[0].e
+    for (const r of rows.slice(1)) skip[r.e.id] = win
+  }
+  return skip
+}
+
+/**
  * 构建本次健康巡检的队列（v1.10.2 抽成纯函数，便于回归测试）。
  *
  * 私人音源（private:true，用户「导入单个音源」入库的个人脚本）**完全不参与巡检**：
@@ -236,7 +282,10 @@ function buildPatrolItems(imported, sources, aliveLxIds) {
     if (e.private) continue                                   // v1.10.2：私人音源不参与巡检
     // 无脚本地址的跳过：手动灌入无本地记录，或服务端原生音源未留存 sourceUrl。
     // 本地存有正文（code）的非私人条目仍可直接复测，不跳过。
-    if (!e.url && typeof e.code !== 'string') continue
+    // 2026-11-11（P-1411 P1-1）：与灌入门槛（_planImportQueue）同口径 —— 必须是**非空** code。
+    // 原来只判 `typeof e.code !== 'string'`，空串也能过（`typeof '' === 'string'`），
+    // 结果那条音源进了巡检却永远测不出东西，白占每轮预算。
+    if (!e.url && !(typeof e.code === 'string' && e.code)) continue
     items.push({ srcId, e, rec })
   }
   return items
@@ -2110,6 +2159,17 @@ class Hunter {
       let r = null
       // S3 / 原子性：删旧灌新过程的状态存档与回滚信息（写入本轮灌入结果，便于审计）
       let replaceInfo = null
+      // P-1411 P0-B（执行期兜底）：规划是一次性快照，执行期服务端可能已经变了。
+      // 同一批里前一条若已把这条服务端旧版删掉（同 base 多版本、或两条同名），这里再 remove
+      // 必然失败（HTTP 500），旧实现会退回改名上传，于是服务端并存「（副本2）」条并列条目。
+      // 以 p.serverIds（本轮开始时真实存在的 id）为准：旧版已不在 → 名字已空出来，直接按原名上传；
+      // 仍撞名（例如前面刚装了同名）再退回改名上传。
+      let replaceGone = false
+      if (item.replaceServer && p.serverIds && !p.serverIds.has(item.replaceServer.id)) {
+        replaceGone = true
+        this.log(tag + `服务端旧版「${item.replaceServer.name || name}」已不在（本轮前面已替换/删除），改为直接上传新版本`, '灌入', 'warn')
+        item = Object.assign({}, item, { replaceServer: null })
+      }
       if (item.sameContentServer) {
         // 服务端已有一份内容相同的音源（同名命中，或按脚本内容指纹比对命中）：不重复上传，
         // 直接把本地这条挂到服务端那一条上，标记为「已灌入」。
@@ -2222,16 +2282,24 @@ class Hunter {
         r = code
           ? await svc.adapter.upload(svc.acct, code, (e.lxName || e.scriptName || e.name))
           : await svc.adapter.importUrl(svc.acct, e.url, (e.lxName || e.scriptName || e.name))
+        // 旧版已消失但名字仍被占（本轮前面刚装过同名）：退回改名上传，至少保证这条能进去
+        if (replaceGone && code && r && !r.success && r.message && /已存在/.test(r.message)) {
+          this.log(tag + '旧版已不在但名字仍被占用，退回改名上传', '灌入', 'warn')
+          r = await this._uploadRenamed(svc, code, (e.lxName || e.scriptName || e.name), p.serverByName, p.usedRename)
+          if (r && r.success) r.replacedFallback = 'renamed'
+        }
       }
       if (r && r.success) {
         this._markImported(e, svc, r.id, r.name || name, r.platforms || [], false, codeCache[e.id])
         // 把裁决理由带上：用户最常问的就是「为什么这次是替换、那次是改名」
-        const note = item.replaceServer
-          ? (r.replacedFallback === 'renamed'
-            ? '（同名替换失败，已改名上传）'
-            : '（已替换服务端同名旧版：先删后传）' + (item.why ? ' — ' + item.why : ''))
-          : item.renameServer ? '（已改名并存，未删服务端旧版）' + (item.why ? ' — ' + item.why : '')
-            : (item.why ? '（' + item.why + '）' : '')
+        const note = replaceGone
+          ? '（服务端同名旧版已不存在，直接上传）' + (r.replacedFallback === 'renamed' ? '（原名仍被占用，已改名上传）' : '')
+          : item.replaceServer
+            ? (r.replacedFallback === 'renamed'
+              ? '（同名替换失败，已改名上传）'
+              : '（已替换服务端同名旧版：先删后传）' + (item.why ? ' — ' + item.why : ''))
+            : item.renameServer ? '（已改名并存，未删服务端旧版）' + (item.why ? ' — ' + item.why : '')
+              : (item.why ? '（' + item.why + '）' : '')
         // 靠「删版本号后同名」配上的，明确标出来：用户看日志能分清是精确同名还是基准名配对
         const baseNote = item.matchedByBase ? '（按删版本号后同名配对）' : ''
         const st = item.replaceServer && r.replacedFallback !== 'renamed' ? 'replaced' : 'success'
@@ -2279,8 +2347,13 @@ class Hunter {
       // 下次同名冲突时「服务端那条」本该拿不出任何实测证据 ⇒ 只能一律改名并存。
       // 这是我们自己刚灌进去的脚本，本地有它的实测画像，按服务端 id 存一份最小快照，
       // 下次就能回放成 qualityProxy，让「同名留优」真正能比，而不是靠声明值猜。
-      // 只存打分档（depth==='full'）的结果：初筛的 1 样本 p50 不值得存。
-      score: (e.deep && e.deep.metrics && e.deep.metrics.depth === 'full') ? {
+      // 只存打分档（depth==='full' 且真有样本）的结果：初筛的 1 样本 p50 不值得存。
+      // 2026-11-11（P-1411 P1-4）：之前非 full 时沿用 `prev.score`，等于让这份快照「世袭」——
+      // 用户只做初筛就把新版灌进去，账本里仍挂着上一版的质量画像，下次同名裁决拿旧画像
+      // 代表新版去比，结论必然是错的（旧版质量 ≠ 新版质量）。现在不满足打分档就写 null，
+      // 宁可让下一次裁决落到「证据不足」，也不用错证据。
+      score: (e.deep && e.deep.metrics && e.deep.metrics.depth === 'full' &&
+              Number(e.deep.metrics.samples) !== 0) ? {
         at: Date.now(),
         checkedAt: e.deep.checkedAt || null,
         platforms: e.deep.platforms || {},
@@ -2292,7 +2365,7 @@ class Hunter {
           successRate: e.deep.metrics.successRate,
           qualityMax: e.deep.metrics.qualityMax || null
         }
-      } : (prev && prev.score) || null
+      } : null
     }
     this.store.saveImported()
   }
@@ -2602,9 +2675,11 @@ class Hunter {
           // 「…→ 平手，不删任何一方」，而这里恰恰要删（同仓库同源、版本更高），
           // 直接拼进去就成了「平手，不删任何一方 → 留新删旧」的自相矛盾（实测出现过）。
           if (qd.cmp === 0) {
+            // 2026-11-11：这里的「证据不足」可能是任一侧（本地只跑初筛 / 服务端没快照），
+            // 原来固定写「服务端侧质量证据不足」会指错方向 —— qd.reason 已经写明是哪一侧。
             const tail = qd.by === 'tie'
               ? `质量相当（可用平台数同为 ${newN} 个，延迟与音质档无显著差异）`
-              : `服务端侧质量证据不足、无法比较优劣（${qd.reason}）`
+              : `质量证据不足、无法比较优劣（${qd.reason}）`
             return { act: 'replace', why: `同仓库同名，本地版本更高（${localVer} > ${srvVer}），${tail} → 同源以版本为准，留新删旧（删旧装新）` }
           }
           return { act: 'replace', why: `同仓库同名，本地版本更高（${localVer} > ${srvVer}）且质量更优（${qd.reason}）→ 留新删旧（删旧装新）` }
@@ -2733,7 +2808,11 @@ class Hunter {
         // 反过来写的话，没下载正文的条目会被静默跳过，用户看不到「你还没跑深度检测」这句提示。
         const mine = qualityProfile(e)
         if (!mine.scored) {
-          item.why += '；未做深度检测，音质档未补测（先跑「深度检测（打分）」）'
+          // 深检跑过但 0 样本（平台集为空）也算「没分」，但提示不能叫用户再跑一遍深检
+          const full = !!(e.deep && e.deep.metrics && e.deep.metrics.depth === 'full')
+          item.why += full
+            ? '；深度检测没有产出任何可用样本，音质档无法比较（请重跑深度检测）'
+            : '；未做深度检测，音质档未补测（先跑「深度检测（打分）」）'
           continue
         }
         if (mine.tier !== null) continue
@@ -2816,6 +2895,9 @@ class Hunter {
     }
     for (const k of Object.keys(groups)) { groups[k].sort(rank); best[k] = groups[k][0] }
     for (const k of Object.keys(ngroups)) { ngroups[k].sort(rank); nbest[k] = ngroups[k][0] }
+    // 一次勾选同一音源的多个版本（v1.0.0 + v2.0.0）：精确名不同、base 相同 → 只留最高版本，
+    // 否则两条都会去 replace 服务端同一条旧版（P-1411 P0，实机复现出「（副本2）」并列条目）。
+    const skipByBase = planBaseDedupe(targets, cfg)
     const queue = []
     // 同名音源一律走同一套裁决（含 MusicSync）—— 同名/同内容该怎么处理与平台无关，
     // 区别只有「要不要改名」：名字不是 key 的平台（MusicSync）根本不需要改，
@@ -2896,6 +2978,17 @@ class Hunter {
         queue.push({ e, skip: `与本次所选的「${best[e.contentHash].scriptName || best[e.contentHash].name}」内容相同，跳过` })
       } else if (nm && nbest[nm] && nbest[nm] !== e) {
         queue.push({ e, skip: `与本次所选的「${nbest[nm].scriptName || nbest[nm].name}」同名（视为同一音源新旧版本），跳过` })
+      } else if (skipByBase[e.id]) {
+        // 同一音源的多个版本被一起勾选：只灌最高版本那条（理由见 planBaseDedupe）。
+        // 不许两条都进 replace 流程 —— 第二条会去删一条已被删掉的服务端条目。
+        const w = skipByBase[e.id]
+        const wName = w.scriptName || w.lxName || w.name
+        const lv2 = verLabel(e.scriptVersion || e.lxName || e.scriptName || e.name)
+        const wv = verLabel(w.scriptVersion || w.lxName || w.scriptName || w.name)
+        queue.push({
+          e,
+          skip: `与本次所选的「${wName}」是同名音源的不同版本（${wv} > ${lv2}），同批只灌最高版本；要灌这一版请单独勾选再灌`
+        })
       } else if (nm && serverByName[nm]) {
         planSameName(e, serverByName[nm], false)
       } else if (eBase && serverByBase[eBase]) {

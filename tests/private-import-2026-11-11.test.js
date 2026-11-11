@@ -77,7 +77,11 @@ console.log('\n=== C. 灌入门槛与巡检门槛口径一致（源码级） ===
   ok('灌入门槛认「非空 code」', /!e\.url && !\(typeof e\.code === 'string' && e\.code\)/.test(src))
   ok('fromServer 单独一个分支拦掉', /if \(e\.fromServer\) \{/.test(src))
   ok('不再有「只认 url」的旧写法', !/if \(!e\.url \|\| e\.fromServer\)/.test(src))
-  ok('巡检门槛同样是认 code 的写法', /if \(!e\.url && typeof e\.code !== 'string'\) continue/.test(src))
+  // 2026-11-11（P-1411 P1-1）：巡检门槛原来写 `typeof e.code !== 'string'`，空串也算「有正文」，
+  // 那条音源会进巡检却永远测不出东西。现在与灌入口径完全一致（必须是**非空** code）。
+  ok('巡检门槛同样是认「非空 code」的写法',
+    (src.match(/if \(!e\.url && !\(typeof e\.code === 'string' && e\.code\)\)/g) || []).length >= 2)
+  ok('巡检不再保留「空串 code 也算有正文」的旧写法', !/if \(!e\.url && typeof e\.code !== 'string'\) continue/.test(src))
 }
 
 console.log('\n=== D. 同仓库版本更高 + 质量平手：replace 且文案不自相矛盾 ===')

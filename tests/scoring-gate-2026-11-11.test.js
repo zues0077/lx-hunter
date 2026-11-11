@@ -69,15 +69,24 @@ console.log('=== B. quality：只有 full 才算「有分」 ===')
 
   const a = mk({ usable: 3, metrics: { depth: 'quick', p50LatencyMs: 100 } })
   const b = mk({ usable: 3, metrics: { depth: 'quick', p50LatencyMs: 3000 } })
-  ok('两个初筛结果之间不比延迟（判平手）', Q.compareVerdict(a, b).by === 'tie', Q.compareVerdict(a, b).by)
+  // 2026-11-11（P-1411 P1-2）：原先这里判 'tie'，文案变成「平台数同为 3 → 平手」——
+  // 把「两边都没测过」说成「打平了」。跨仓库分支要求「质量必须更优」，于是本地新版永远灌不进，
+  // 用户看到的理由还是误导性的「平手」。现在显式判 insufficient，文案指名去补跑深检。
+  const quickV = Q.compareVerdict(a, b)
+  ok('两个初筛结果之间不比延迟（判证据不足，不假装平手）',
+    quickV.by === 'insufficient' && /初筛/.test(quickV.reason), quickV.by + ' | ' + quickV.reason)
 
   const c = mk({ usable: 3, metrics: { depth: 'full', p50LatencyMs: 100 } })
   const d = mk({ usable: 3, metrics: { depth: 'full', p50LatencyMs: 3000 } })
   ok('两个深度检测结果之间才比延迟', Q.compareVerdict(c, d).by === 'latency')
 
   const e1 = mk({ usable: 4, metrics: { depth: 'full', p50LatencyMs: 2000 } })
-  const e2 = mk({ usable: 4, metrics: { depth: 'quick', p50LatencyMs: 100 } })
-  ok('平台数仍优先于「有没有打分」（初筛只是缺证据，不是更差）', Q.compareVerdict(e1, e2).by === 'tie' || Q.compareVerdict(e1, e2).by === 'platforms')
+  const e2 = mk({ usable: 3, metrics: { depth: 'quick', p50LatencyMs: 100 } })
+  ok('平台数仍优先于「有没有打分」（初筛只是缺证据，不是更差）', Q.compareVerdict(e1, e2).by === 'platforms')
+
+  const e3 = mk({ usable: 4, metrics: { depth: 'quick', p50LatencyMs: 100 } })
+  const tv = Q.compareVerdict(e1, e3)
+  ok('平台数相同但一侧只跑过初筛 → 证据不足（不是平手）', tv.cmp === 0 && tv.by === 'insufficient', tv.by + ' | ' + tv.reason)
 
   ok('描述里明确写出「未打分」而不是假装有结论', /未打分/.test(Q.describeQuality(quick)), Q.describeQuality(quick))
   ok('音质档也只在打分档里才认（初筛写进来的 qualityMax 不算）', (() => {
