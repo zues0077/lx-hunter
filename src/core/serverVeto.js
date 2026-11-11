@@ -11,11 +11,14 @@
  * 这里把「服务端的动作」翻译成本地冻结标记，冻结期间**任何灌入目标都不再上传该音源**，
  * 直到音源内容（contentHash）发生变化 —— 上游发了新版本才值得再试一次。
  *
- * 为什么单平台禁用也按整源冻结
- * ----------------------------
- * 冻结只针对「同一份字节」。同一份脚本在 mg 平台上被禁用，不代表换个平台上传它就变好；
- * 上游改了内容（sha 变了）才会解冻。这样既不会重复灌同样的坏字节，也不会因为一次
- * 单平台禁用就永久拉黑一个还在维护的源。
+ * 「部分平台被禁」为什么不冻结（2026-11-12 用户纠正）
+ * ------------------------------------------------
+ * 只禁了 mg 的源，kw/wy 照样能出歌 —— 它是**还能用的源**。整源冻结会连它的更新都不许推，
+ * 那是把「用户嫌 mg 不通」误当成「这个源废了」。
+ * 所以只做**展示标记**（partial=true，界面上告诉用户「它在 mg 上被你关掉了」），
+ * 不参与灌入拦截；只有「整源禁用 / 全部平台都禁 / 删除 / 护栏隔离」才是真的判死。
+ *
+ * 冻结只针对「同一份字节」：上游改了内容（sha 变了）就自动解冻。
  *
  * 纯函数设计：不读写文件、不碰 store，方便单测（tests/server-veto.test.js）。
  */
@@ -87,6 +90,8 @@ function computeVeto(p) {
     const srv = byServerId.get(String(lxId))
     let type = ''
     let detail = ''
+    let partial = false
+    let offList = []
 
     if (!srv) {
       type = VETO_TYPES.REMOVED
@@ -101,11 +106,15 @@ function computeVeto(p) {
       const off = Array.isArray(srv.disabledSources) ? srv.disabledSources.filter(Boolean) : []
       const all = Array.isArray(srv.supportedSources) ? srv.supportedSources.filter(Boolean) : []
       if (off.length && all.length && all.every(x => off.indexOf(x) !== -1)) {
+        // 全部平台都被关 = 实际等于整源不可用 → 冻结
         type = VETO_TYPES.PLATFORM_DISABLED
         detail = `服务端把它的全部平台都关掉了（${off.join('/')}）`
       } else if (off.length) {
+        // 只关了部分平台：源还能用，**不冻结**，只做展示标记
         type = VETO_TYPES.PLATFORM_DISABLED
-        detail = `服务端关掉了它的 ${off.join('/')} 平台`
+        partial = true
+        offList = off
+        detail = `服务端关掉了它的 ${off.join('/')} 平台（其余平台仍可用，不冻结）`
       }
     }
 
@@ -113,6 +122,9 @@ function computeVeto(p) {
     veto[eid] = {
       type,
       detail,
+      // partial=true：只关了部分平台，源仍可用 → isFrozen 会返回 false（只展示不拦截）
+      partial: !!partial,
+      platforms: offList,
       lxId: String(lxId),
       sha,
       since: old && old.type === type && old.since ? old.since : now,
@@ -148,6 +160,8 @@ function isFrozen(vetoMap, entry) {
   if (!vetoMap || !entry) return false
   const v = vetoMap[entry.id]
   if (!v) return false
+  // 只关了部分平台 → 源还能用，不拦截灌入（2026-11-12 用户纠正）
+  if (v.partial) return false
   const sha = entry.contentHash || ''
   if (v.sha && sha && v.sha !== sha) return false
   return true

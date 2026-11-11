@@ -44,7 +44,7 @@ ok('整源禁用 → disabled，且冻结', () => {
   assert.ok(vetoReason(r.veto.e1).indexOf('禁用') >= 0)
 })
 
-ok('单平台禁用 → platform-disabled（同样整源冻结，因为同一份字节）', () => {
+ok('只禁部分平台 → 只打展示标记，不冻结（源还能用）', () => {
   const r = computeVeto({
     imported: { e1: rec('src.js') },
     sources: { e1: { id: 'e1', contentHash: 'sha-old' } },
@@ -54,8 +54,13 @@ ok('单平台禁用 → platform-disabled（同样整源冻结，因为同一份
     now: NOW
   })
   assert.strictEqual(r.veto.e1.type, VETO_TYPES.PLATFORM_DISABLED)
-  assert.ok(/mg/.test(r.veto.e1.detail))
-  assert.strictEqual(isFrozen(r.veto, { id: 'e1', contentHash: 'sha-old' }), true)
+  assert.strictEqual(r.veto.e1.partial, true)
+  assert.deepStrictEqual(r.veto.e1.platforms, ['mg'])
+  assert.ok(/不冻结/.test(r.veto.e1.detail))
+  assert.strictEqual(isFrozen(r.veto, { id: 'e1', contentHash: 'sha-old' }), false, '部分禁用的源必须仍可灌入/更新')
+  const { keep, frozen } = splitFrozen(r.veto, [{ id: 'e1', contentHash: 'sha-old' }])
+  assert.strictEqual(keep.length, 1, '留在可灌入队列里')
+  assert.strictEqual(frozen.length, 0)
 })
 
 ok('全部平台被禁 → 仍然 platform-disabled，但原因写明「全部平台」', () => {
