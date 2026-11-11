@@ -171,18 +171,44 @@ function filterLatestOnly(items) {
   return { kept, dropped, groups: groupCount }
 }
 
-/** 树里的 .js 候选（带 blob sha —— 增量判重靠它，零额外请求） */
+/**
+ * LX Music 客户端**本体源码**的目录特征。
+ *
+ * 背景（2026-11-11 性能项 2，实测生产库 1405 条）：不少仓库把「LX Music 客户端 + 音源」
+ * 整个塞进一个仓库，采集器把 `src/**` 下每个 .js 都建成候选，于是
+ * `src/renderer/utils/musicSdk/wy|tx|kw|kg|mg|bd`、`src/utils`、`src/renderer/views/**`、
+ * `src/stores`、`server/routes`、`server/utils` 这类客户端实现代码堆了近百条候选
+ * （生产库实测：这些目录 **可用 0 条**，且压根不是音源脚本——`scoreEntry` 全部 < 4）。
+ * 它们每条都要占一次下载与一次检测排队，纯属浪费。
+ *
+ * 只排除「名字就说明是客户端本体」的目录；音源脚本极少放在这些位置，
+ * 万一真有，用户仍可用「手动导入 / 行级采集仓库」补回。
+ */
+const CLIENT_SOURCE_PATH = /^(?:src\/(?:renderer|main|common|stores|utils|workers)|server\/(?:routes|utils)|packages\/[^/]+\/src)\//
+
+/** 脚本正文大小上限，与 checker.MAX_CONTENT_BYTES 同口径（超了检测会判「文件过大」） */
+const MAX_SCRIPT_BYTES = 2 * 1024 * 1024
+
+/** 树里的 .js 候选（带 blob sha —— 增量判重靠它，零额外请求）
+ *  2026-11-11 性能项 2：候选阶段先按「路径 + 体积」预过滤，少建条目 = 少下载、少排队。
+ *  @returns {{items:Array<{path,sha,size}>, filtered:{path:number,size:number}}} */
 function extractCandidates(tree, maxPerRepo) {
   const out = []
+  const filtered = { path: 0, size: 0 }
   const items = (tree && tree.tree) || []
   for (const item of items) {
     if (item.type !== 'blob' || !/\.js$/i.test(item.path || '')) continue
     if (/(^|\/)(node_modules|test|tests|__tests__|dist\/assets)\//.test(item.path)) continue
     if (/(webpack|vite|rollup|babel|jest|eslint|tsconfig)[^/]*\.js$/i.test(item.path)) continue
-    out.push({ path: item.path, sha: item.sha || '' })
+    if (CLIENT_SOURCE_PATH.test(item.path)) { filtered.path++; continue }
+    const size = Number(item.size)
+    // 空文件 / 超过检测上限的文件：下载也是白下（checkBasic 会判「文件过大」或空正文）
+    if (size === 0) { filtered.size++; continue }
+    if (Number.isFinite(size) && size > MAX_SCRIPT_BYTES) { filtered.size++; continue }
+    out.push({ path: item.path, sha: item.sha || '', size: Number.isFinite(size) ? size : 0 })
     if (out.length >= (maxPerRepo || 400)) break
   }
-  return out
+  return { items: out, filtered }
 }
 
 /** 从仓库树里挑压缩包候选（音源仓库常用 zip 分发脚本，不处理就漏抓） */
@@ -688,7 +714,15 @@ async function crawl(opts, onEvent, shouldStop) {
       const tree = JSON.parse(text)
       if (tree.message) throw new Error('GitHub API: ' + String(tree.message).slice(0, 80))
       if (tree.truncated) onEvent('log', { level: 'warn', module: '爬取', msg: `${repo} 文件树被截断，可能漏掉部分文件` })
-      const cands = extractCandidates(tree, opts.maxCandidatesPerRepo)
+      const cand = extractCandidates(tree, opts.maxCandidatesPerRepo)
+      const cands = cand.items
+      if (cand.filtered.path || cand.filtered.size) {
+        onEvent('log', {
+          level: 'info', module: '爬取',
+          msg: `${repo}：预过滤 ${cand.filtered.path + cand.filtered.size} 个非音源候选` +
+            `（客户端源码目录 ${cand.filtered.path}、空/超大文件 ${cand.filtered.size}）`
+        })
+      }
       const newOnes = []
       for (const c of cands) {
         const p = c.path
@@ -704,7 +738,7 @@ async function crawl(opts, onEvent, shouldStop) {
           status: 'unknown',
           suspected: null,
           usable: false,
-          size: 0,
+          size: c.size || 0,        // 树里的体积先用着，检测时以真实下载长度为准
           addedAt: Date.now(),
           lastCheck: 0,
           deep: null

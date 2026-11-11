@@ -422,7 +422,9 @@ ipcMain.handle('sources:get', guard(() => {
     if (s.deep && s.deep.failKind == null) s.deep.failKind = deepFailKind(s.deep)
   }
   return {
-    sources: store.getSources(),
+    // 桌面版同样剥掉 code：IPC 也要序列化这 11MB，剥掉后列表响应体 14.3MB → 2.7MB
+    // （渲染层列表不用正文，见 core/sourceView.js 的说明）
+    sources: require('../core/sourceView').publicSourceList(store.getSources()),
     imported: store.imported,
     lastCrawl: store.db.lastCrawl,
     patrol: store.db.patrol || { lastRun: 0 }

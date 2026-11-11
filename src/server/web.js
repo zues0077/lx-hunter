@@ -21,6 +21,7 @@ const { getActiveService, getService, resolveService, TYPE_LABELS, NO_ACCOUNT_ER
 const { createUpdater } = require('../core/sourceUpdate')
 const { DEFAULT_REPOS } = require('../core/crawler')
 const { Auth, SESSION_TTL_MS } = require('../core/auth')
+const { publicSourceList } = require('../core/sourceView')
 
 const PORT = Number(process.env.PORT || 7970)
 // Docker 部署时浏览器访问的是宿主机映射端口（如 8191:7970 里的 8191），
@@ -364,7 +365,8 @@ route('GET', '/api/sources', guard(() => {
     if (s.deep && s.deep.failKind == null) s.deep.failKind = deepFailKind(s.deep)
   }
   return {
-    sources: store.getSources(),
+    // 列表只传元信息：剥掉 code（实测占载荷 81%，前端列表不用正文，见 core/sourceView.js）
+    sources: publicSourceList(store.getSources()),
     imported: store.imported,
     lastCrawl: store.db.lastCrawl,
     patrol: store.db.patrol || { lastRun: 0 }

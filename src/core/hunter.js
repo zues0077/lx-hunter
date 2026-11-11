@@ -61,6 +61,32 @@ function isWeakBaseName(nm) {
   if (nm.length <= 2) return true        // 过短：kw.js / kg.js
   return WEAK_BASE_NAMES.has(nm)
 }
+
+/**
+ * 「删旧后上传」的轮询重试间隔（纯函数，便于单测）。
+ *
+ * 背景（2026-11-11 性能项 3）：旧实现删完固定 `sleep(2500)` 再传，撞名再等 2500ms ——
+ * 每个同名替换白等 2.5 秒，批量更新 20 条就是 50 秒纯等待；而实测服务端重载通常几百毫秒
+ * 就完成，等的是「平均情况」而不是「真实就绪」。
+ * 新口径：删完立刻试传，撞名就按 200→300→450→675ms 退避轮询，总预算 3 秒；
+ * 3 秒还撞名才退化成「改名上传」兜底（原逻辑最后一步，不变）。
+ *
+ * @param attempt 已重试次数（0 = 第一次撞名后）
+ * @param waitedMs 从删成功起已等待的毫秒数
+ * @returns 下次等待毫秒数；null = 超出预算，别再等
+ */
+const REPLACE_UPLOAD_POLL_MS = Number(process.env.LXH_REPLACE_POLL_MS) || 3000
+function replaceRetryDelay(attempt, waitedMs, opts) {
+  const o = opts || {}
+  const budget = Number(o.budgetMs) || REPLACE_UPLOAD_POLL_MS
+  const waited = Number(waitedMs) || 0
+  if (waited >= budget) return null
+  const base = Number(o.baseMs) || 200
+  const cap = Number(o.maxMs) || 800
+  const delay = Math.min(cap, base * Math.pow(1.5, Math.max(0, Number(attempt) || 0)))
+  // 剩余预算不够下一档就别硬等：让调用方立刻用最后结果收尾
+  return (waited + delay > budget + cap) ? null : Math.round(delay)
+}
 // versionNum 已统一到 src/core/version.js 的逐段零填充键（versionKey）。
 // 返回字符串而不是数字：调用点一律用 cmpVersion() 比较，禁止做减法。
 // 顶部 require 以别名 versionNum 引入，module.exports 继续导出同名符号。
@@ -2200,15 +2226,11 @@ class Hunter {
           if (r && r.success) r.replacedFallback = 'renamed'
         } else {
           replaceInfo.deleted = true
-          this.log(tag + `已删除服务端旧版「${srv.name || name}」（id=${srv.id}），等待服务端重载后上传新版本…`, '灌入')
-          await sleep(2500)
-          r = await svc.adapter.upload(svc.acct, code, name)
+          this.log(tag + `已删除服务端旧版「${srv.name || name}」（id=${srv.id}），轮询上传新版本…`, '灌入')
+          // 轮询上传：等服务端重载完成（撞「已存在」就退避重试），不再固定硬等 2.5 秒
+          r = await this._uploadAfterReplace(svc, code, name)
           if (!r.success && r.message && /已存在/.test(r.message)) {
-            await sleep(2500)
-            r = await svc.adapter.upload(svc.acct, code, name)
-          }
-          if (!r.success && r.message && /已存在/.test(r.message)) {
-            // 仍撞名（极少见）：退回改名上传，保证音源至少能进去
+            // 预算内仍撞名（极少见）：退回改名上传，保证音源至少能进去
             this.log(tag + '替换上传仍撞名，退回改名上传', '灌入', 'warn')
             r = await this._uploadRenamed(svc, code, item.baseName, p.serverByName, p.usedRename)
             if (r && r.success) r.replacedFallback = 'renamed'
@@ -3005,6 +3027,43 @@ class Hunter {
   }
 
   /**
+   * 删旧之后把新版本传上去：**轮询**而不是硬等固定 2.5 秒（2026-11-11 性能项 3）。
+   *
+   * 旧实现：remove 成功 → sleep(2500) → upload；撞名再 sleep(2500) 重试一次。
+   * 批量替换（同名版本更新场景常见）时每条白等 2.5 秒，20 条约 50 秒纯等待。
+   * 现在：立刻试传，只有真的撞「已存在」才按 replaceRetryDelay 退避轮询，
+   * 总预算 `LXH_REPLACE_POLL_MS`（默认 3000ms）；超预算返回最后一次失败结果，
+   * 由调用方按原逻辑退化成「改名上传」。
+   *
+   * 只对「已存在」重试：其它错误（超时/需要 VM/参数错）重试没有意义。
+   * @returns 最后一次 upload 的结果对象
+   */
+  async _uploadAfterReplace(svc, code, name, opts) {
+    const o = opts || {}
+    const t0 = Date.now()
+    let attempt = 0
+    let last = null
+    let tries = 0
+    for (;;) {
+      tries++
+      const r = await svc.adapter.upload(svc.acct, code, name)
+      if (r && r.success) {
+        if (tries > 1) this.log(`服务端重载完成，第 ${tries} 次上传成功：${name}`, '灌入')
+        return r
+      }
+      last = r
+      if (!(r && r.message && /已存在/.test(r.message))) return last
+      const delay = replaceRetryDelay(attempt, Date.now() - t0, o)
+      if (delay == null) {
+        this.log(`服务端仍报「已存在」（已轮询 ${Date.now() - t0}ms / ${tries} 次），改用改名上传兜底：${name}`, '灌入', 'warn')
+        return last
+      }
+      await sleep(delay)
+      attempt++
+    }
+  }
+
+  /**
    * 改名上传（规避服务端 generateId 撞名）：撞名就换名重试，最多 4 次。
    * 传 svc 而不是 acct：多平台灌入时改名必须打到「当时那个」账号上，
    * 用 this._active() 会一律打到当前选中账号，把第二个平台的音源灌错地方。
@@ -3477,4 +3536,4 @@ class Hunter {
   }
 }
 
-module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, patrolSchedule, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildPatrolItems, buildRepoSeeds }
+module.exports = { Hunter, normName, identityMismatch, formatIntervalHours, patrolSchedule, renameSelfCheck, versionNum, patrolAutoDeleteWanted, buildPatrolItems, buildRepoSeeds, replaceRetryDelay, REPLACE_UPLOAD_POLL_MS }
