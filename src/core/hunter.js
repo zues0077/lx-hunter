@@ -3585,6 +3585,16 @@ class Hunter {
       ? '巡检已取消（已完成部分保留）'
       : `巡检完成：正常 ${ok}${reEnabled ? `（含恢复启用 ${reEnabled}）` : ''}、失效禁用 ${disabled}${deleted ? `、自动删除 ${deleted}` : ''}、无法判定 ${unknown} / 共 ${items.length}` +
         (stillDisabled ? `；仍有 ${stillDisabled} 个源处于巡检停用，可在「已灌入」页单个恢复或点「全部恢复启用」` : ''), '巡检', this.cancelRequested ? 'warn' : 'info')
+    // v1.13.2：巡检收尾顺手对齐一次「服务端处置」冻结表。
+    // 巡检开头本来就拉过服务端列表（serverList），这里**不再发请求**，纯本地重算 + 一次落库。
+    // 意义：用户在网页上恢复平台 / 解除隔离后，最迟下一轮巡检就能反映，
+    // 不用等到下一次灌入（默认 24h）才更新冻结表。
+    try {
+      await this._refreshServerVeto(
+        [{ svc, label: (svc.acct && (svc.acct.name || svc.acct.url)) || '', serverList }],
+        cfg.activePlatformId
+      )
+    } catch (e) { /* 冻结表刷新失败不影响巡检结论 */ }
     this.job.running = false
     this.emit('job', { running: false, type: 'patrol', done: true, cancelled: this.cancelRequested, summary: { total: items.length, ok, disabled, unknown, reEnabled, deleted } })
     return { ok, disabled, unknown, reEnabled, deleted, total: items.length }

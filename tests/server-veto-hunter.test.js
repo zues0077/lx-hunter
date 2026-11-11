@@ -109,6 +109,16 @@ async function main() {
     ok('多平台取并集，删除优先级最高')
   }
 
+  {
+    // v1.13.2：巡检收尾要顺手重算一次冻结表（复用巡检已有的 serverList，不发新请求）
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'hunter.js'), 'utf8')
+    const patrol = src.slice(src.indexOf('async runPatrol'), src.indexOf('async runPatrol') + 60000)
+    const tailIdx = patrol.lastIndexOf('_refreshServerVeto')
+    assert.ok(tailIdx > 0, '巡检收尾必须调 _refreshServerVeto')
+    assert.ok(patrol.slice(Math.max(0, tailIdx - 400), tailIdx).includes('serverList'), '必须复用巡检已拉到的 serverList')
+    ok('巡检收尾对齐冻结表（不额外发请求）')
+  }
+
   console.log(`\n全部通过（${pass} 项）`)
 }
 
