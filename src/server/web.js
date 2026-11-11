@@ -949,9 +949,12 @@ server.listen(PORT, '0.0.0.0', () => {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.crawlScheduleEnabled || hunter.job.running) return
-      const last = store.db.lastCrawl || 0
       const hours = Math.max(1, Number(cfg.crawlIntervalHours) || 24)
-      if (Date.now() - last < hours * 3600 * 1000) return
+      // v1.13.0：到期判据统一走 db.crawlNextAt —— 配额重置时间、代理/镜像健康度、失败退避
+      // 都由 runCrawl 收尾的 _finishCrawlSchedule 算好写进去，定时器只做「到没到点」。
+      // 老数据没有该字段时回落「上次成功 + 间隔」，行为与升级前一致。
+      const due = Number(store.db.crawlNextAt) || ((store.db.lastCrawl || 0) + hours * 3600 * 1000)
+      if (Date.now() < due) return
       const span = formatIntervalHours(hours)
       if (cfg.crawlAutoImport) {
         pushLog({ msg: `定时爬取到期（间隔 ${span}），开始「增量爬取 → 检测 → 自动灌入」…`, module: '爬取', level: 'info', at: Date.now() })

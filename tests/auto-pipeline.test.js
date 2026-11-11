@@ -221,12 +221,15 @@ console.log('\n== 定时器接线 ==')
   assert.ok(/runAutoPipeline\(\)/.test(webSrc), 'Web 版要调 runAutoPipeline')
   ok('桌面版 + Web/Docker 版都按 crawlAutoImport 分流到 runAutoPipeline')
 
-  // 两边的到期判据必须仍是「距上次执行 ≥ 间隔」，而不是「每分钟跑一次」
+  // v1.13.0：到期判据从「距上次成功 ≥ 间隔」改成「now < crawlNextAt 就 return」。
+  // 前者在爬取失败时永远成立（lastCrawl 不推进）→ 每分钟重跑；后者由 runCrawl 收尾统一算
+  // （配额 reset / 代理镜像健康 / 指数退避），语义仍是「间隔 ≠ 轮询节奏」。
   for (const [label, s] of [['桌面版', mainSrc], ['Web 版', webSrc]]) {
-    assert.ok(/Date\.now\(\) - last >= hours \* 3600 \* 1000/.test(s), label + ' 到期判据必须是间隔比较')
-    assert.ok(/Date\.now\(\) - last < hours \* 3600 \* 1000/.test(s), label + ' 未到期要直接 return')
+    assert.ok(/Date\.now\(\) < due/.test(s), label + ' 未到期要直接 return')
+    assert.ok(/crawlNextAt/.test(s), label + ' 到期时间统一走 crawlNextAt')
+    assert.ok(/crawlIntervalHours/.test(s), label + ' 没有 crawlNextAt 时回落「上次成功 + 间隔」')
   }
-  ok('两处都是「每分钟核对一次、够了间隔才跑」（间隔 ≠ 轮询节奏）')
+  ok('两处都是「每分钟核对一次、到点才跑」（间隔 ≠ 轮询节奏；失败由退避接管）')
 }
 
 // ---------------- 设置页接线：开关位置与文案 ----------------

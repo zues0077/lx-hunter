@@ -176,9 +176,10 @@ app.whenReady().then(() => {
       if (!store || !hunter) return
       const cfg = store.config
       if (!cfg.crawlScheduleEnabled || hunter.job.running) return
-      const last = store.db.lastCrawl || 0
       const hours = Math.max(1, Number(cfg.crawlIntervalHours) || 24)
-      if (Date.now() - last < hours * 3600 * 1000) return
+      // v1.13.0：与 Web 版同一条判据 —— crawlNextAt 由 runCrawl 收尾算好（配额/代理/退避）
+      const due = Number(store.db.crawlNextAt) || ((store.db.lastCrawl || 0) + hours * 3600 * 1000)
+      if (Date.now() < due) return
       const span = formatIntervalHours(hours)
       if (cfg.crawlAutoImport) {
         pushLog({ msg: `定时爬取到期（间隔 ${span}），开始「增量爬取 → 检测 → 自动灌入」…`, module: '爬取', level: 'info', at: Date.now() })

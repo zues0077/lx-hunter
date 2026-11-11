@@ -116,7 +116,8 @@ for (const [label, s] of [['桌面版', main], ['Web/Docker 版', web]]) {
   ok(/sched\.dueByRetry/.test(s), label + ' 失败按退避间隔到期')
   ok(/patrolRetryMinutes|retryMinutes/.test(s), label + ' 日志/配置体现重试间隔')
   ok(/Date\.now\(\) - last >= hours \* 3600 \* 1000/.test(s), label + ' 主判据仍是「距上次执行 ≥ 间隔」')
-  ok(/Date\.now\(\) - last < hours \* 3600 \* 1000\) return/.test(s), label + ' 定时爬取未到期仍直接 return（既有契约不破坏）')
+  // v1.13.0：爬取的到期判据改成 crawlNextAt（失败也推进水位），但「未到期直接 return」的契约不变
+  ok(/Date\.now\(\) < due\) return/.test(s), label + ' 定时爬取未到期仍直接 return（既有契约不破坏）')
   ok(/不会每分钟重复尝试/.test(s), label + ' 失败日志明确告知不会每分钟刷屏')
 }
 ok(/Object\.assign\(\{\}, this\.store\.db\.patrol, \{/.test(hunt) && /lastAttempt: Date\.now\(\), lastError: null/.test(hunt),

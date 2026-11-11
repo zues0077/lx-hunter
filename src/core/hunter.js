@@ -1,6 +1,6 @@
 'use strict'
 /** 任务编排：爬取 / 检测 / 灌入 / 撤回 */
-const { crawl, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource, resolveRepoRename } = require('./crawler')
+const { crawl, checkQuota, DEFAULT_REPOS, normalizeRepo, discoverReposViaSearch, verifyRepoHasSource, resolveRepoRename } = require('./crawler')
 const { crawlWebSite, isWebRepo, probeExternalSource, normalizeExternalUrl } = require('./websource')
 const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
@@ -14,6 +14,8 @@ const { versionKey: versionNum, cmpVersion, verLabel } = require('./version')
 const { normName, candidateRepo, serverRepo, baseNameKey, pickHighestVersion } = require('./identity')
 // v1.13.0：服务端动作（禁用 / 单平台禁用 / 隔离 / 删除）→ 本地冻结标记，防止「删了又灌回来」
 const { computeVeto, isFrozen, vetoReason, splitFrozen, VETO_PRIORITY } = require('./serverVeto')
+// v1.13.0：定时爬取的下次允许时间（配额 → 代理/镜像 → 指数退避，纯函数）
+const { planNextCrawl, describeNextCrawl } = require('./crawlSchedule')
 const { compareVerdict, describeQuality, profile: qualityProfile } = require('./quality')
 
 // normName 已统一到 src/core/identity.js（hunter / sourceUpdate 必须完全同口径），
@@ -556,6 +558,10 @@ class Hunter {
     this.job = { running: true, type: 'crawl', cancel: false, progress: { reposDone: 0, repoTotal: repos.length, added: 0, linksFound: 0 }, step: '' }
     this.emit('job', { running: true, type: 'crawl' })
     this.log((onlyRepos.length ? '主动采集' : incremental ? '定时增量爬取' : '开始爬取') + ` ${repos.length} 个仓库（文件树 + Releases）…`, '爬取')
+    // v1.13.0：水位推进放到「开始」而不是「成功」—— 失败也要留痕，否则定时器永远判「到期」
+    this.store.db.crawlLastAttempt = Date.now()
+    this.store.saveDb()
+    let crawlError = null
     try {
       const known = this._knownMaps()   // 手动/定时爬取都用判重地图：压缩包 sha 未变不解压、release 资产已抓不重下
       // crawlSinceDays（v1.7.2）：只爬 N 天内有更新的仓库（0=不限）。静默仓库整仓跳过，
@@ -672,6 +678,7 @@ class Hunter {
       }
       await this.dedupe()
     } catch (e) {
+      crawlError = e || new Error('未知爬取错误')
       this.log('爬取异常：' + String((e && e.message) || e), '爬取', 'error')
     } finally {
       this.job.running = false
@@ -679,6 +686,9 @@ class Hunter {
         running: false, type: 'crawl', done: true,
         summary: Object.assign({ incremental }, merge)
       })
+      // v1.13.0：算下一次什么时候允许再跑（配额 → 代理/镜像 → 指数退避），
+      // 读盘失败也不能影响任务收尾，所以整体 try 包住
+      try { await this._finishCrawlSchedule(crawlError) } catch (e) { /* 调度计算失败不影响本轮结果 */ }
     }
     return {
       added: total, updated: merge.updated, skipped: merge.skipped,
@@ -687,6 +697,57 @@ class Hunter {
       staleRepos: (crawlStats && crawlStats.staleRepos) || [],
       sinceDays: Math.max(0, Number(cfg.crawlSinceDays) || 0),
       latestOnly: cfg.crawlLatestOnly !== false
+    }
+  }
+
+  /**
+   * 收尾：算出「下一次定时爬取最早什么时候允许跑」并落库（v1.13.0）
+   *
+   * 为什么必须有这一步：`lastCrawl` 只在成功路径写，失败时定时器判据恒为「到期」，
+   * 于是 60 秒后又跑一轮 —— 爬取一挂就变成每分钟重跑。这里把失败也纳入调度：
+   *   配额耗尽 → 按 GitHub 的 reset 时间；代理/镜像可用 → 2 分钟短重试；
+   *   链路确实不通 → 5/15/30/60 分钟指数退避。
+   *
+   * @param {Error|null} error 本轮抛出的异常（null = 成功，含部分成功）
+   */
+  async _finishCrawlSchedule(error) {
+    const db = this.store.db
+    const cfg = this.store.config || {}
+    const prev = db.crawlLastResult || null
+    const attempts = error ? (Number(prev && prev.attempts) || 0) + 1 : 0
+
+    let quota = null
+    if (error) {
+      // 可注入（单测用）：默认走真实 checkQuota，避免测试打 GitHub
+      const probe = typeof this.quotaProbe === 'function' ? this.quotaProbe : checkQuota
+      try { quota = await probe(1, cfg.ghToken) } catch (e) { quota = null }
+    }
+    // 代理在冷却期 = 这层兜底也不可用；读不到健康度时按"可用"处理（宁可早重试）
+    let proxyHealthy = true
+    try {
+      const h = require('./net').getProxyHealth()
+      proxyHealthy = !(h && Number(h.cooldownRemainingMs) > 0)
+    } catch (e) { /* 保持 true */ }
+
+    const plan = planNextCrawl({
+      now: Date.now(),
+      intervalHours: cfg.crawlIntervalHours,
+      lastCrawl: db.lastCrawl || 0,
+      lastResult: error ? { ok: false, attempts } : { ok: true },
+      quota,
+      proxyHealthy
+    })
+
+    db.crawlLastResult = error
+      ? { ok: false, attempts, error: String((error && error.message) || error).slice(0, 300), at: Date.now() }
+      : { ok: true, attempts: 0, at: Date.now() }
+    db.crawlNextAt = plan.dueAt
+    this.store.saveDb()
+
+    if (error) {
+      this.log(`定时爬取本轮失败（连续第 ${attempts} 次）：${plan.reason}；下次在 ${describeNextCrawl(plan)} 重试`, '爬取', 'warn')
+    } else if (attempts === 0 && prev && prev.ok === false) {
+      this.log(`定时爬取已恢复正常，下次按间隔 ${Math.max(1, Number(cfg.crawlIntervalHours) || 24)} 小时执行`, '爬取')
     }
   }
 
