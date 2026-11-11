@@ -61,6 +61,23 @@ async function listAs(cfg, username) {
   return Array.isArray(r.data) ? r.data : []
 }
 
+/**
+ * 服务端自检护栏的隔离名单（v1.13.0）
+ *
+ * 隔离 ≠ 禁用：服务端只是把脚本从沙箱里卸载了，列表里仍然 enabled=true，
+ * 所以光看 /custom-source/list 发现不了「服务端已经否定过它」。灌入前必须读这份名单。
+ * 老版本服务端没有这个接口（404）→ 返回 []，不影响既有灌入流程。
+ */
+async function listIsolations(cfg) {
+  try {
+    const r = await req(cfg, 'GET', '/api/source-guard/isolations')
+    if (!r.ok || !r.data || !Array.isArray(r.data.list)) return []
+    return r.data.list.map(x => (x && (x.id || x.sourceId)) || '').filter(Boolean)
+  } catch (e) {
+    return []
+  }
+}
+
 /** 校验脚本（不落盘），返回元信息与支持平台（身份与灌入口径一致） */
 async function validate(cfg, script) {
   const r = await req(cfg, 'POST', '/api/custom-source/validate', {
@@ -368,4 +385,4 @@ async function removePublicBatch(cfg, ids, onProgress) {
   return out
 }
 
-module.exports = { verify, list, importUrl, upload, toggle, remove, setPlatforms, validate, baseUrl, listTrash, restoreTrash, listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername }
+module.exports = { verify, list, importUrl, upload, toggle, remove, setPlatforms, validate, baseUrl, listTrash, restoreTrash, listPublic, removePublic, removePublicBatch, planPublicCleanup, isPublicSource, targetUsername, listIsolations }

@@ -364,13 +364,42 @@ route('GET', '/api/sources', guard(() => {
   for (const s of store.getSources()) {
     if (s.deep && s.deep.failKind == null) s.deep.failKind = deepFailKind(s.deep)
   }
+  // v1.13.0：把服务端处置冻结标到条目上，列表直接能显示「为什么不会再灌入」
+  const veto = store.db.veto || {}
+  const list = publicSourceList(store.getSources())
+  for (const s of list) {
+    if (s && veto[s.id]) s.veto = veto[s.id]
+  }
   return {
     // 列表只传元信息：剥掉 code（实测占载荷 81%，前端列表不用正文，见 core/sourceView.js）
-    sources: publicSourceList(store.getSources()),
+    sources: list,
     imported: store.imported,
     lastCrawl: store.db.lastCrawl,
-    patrol: store.db.patrol || { lastRun: 0 }
+    patrol: store.db.patrol || { lastRun: 0 },
+    // v1.13.0：服务端处置冻结表（禁用/隔离/删除过的音源，内容更新前不再灌入）
+    veto
   }
+}))
+
+// v1.13.0：服务端处置冻结表 —— 查看 / 人工解除
+// 冻结是「服务端动作 → 本地不再重灌」的桥；人工解除后下一轮会按服务端现状重新判定，
+// 所以解除只在「用户确认服务端已恢复/想强制重灌」时才用。
+route('GET', '/api/veto', guard(() => ({ veto: store.db.veto || {} })))
+route('POST', '/api/veto/clear', guard((req, res, ctx) => {
+  if (!store.db.veto || typeof store.db.veto !== 'object') store.db.veto = {}
+  const ids = Array.isArray(ctx.body && ctx.body.ids) ? ctx.body.ids.map(String) : []
+  if (!ids.length) {
+    const n = Object.keys(store.db.veto).length
+    store.db.veto = {}
+    store.saveDb()
+    pushLog({ msg: `已解除全部服务端处置冻结（${n} 条）`, module: '灌入', level: 'info', at: Date.now() })
+    return { cleared: n }
+  }
+  let cleared = 0
+  for (const id of ids) if (store.db.veto[id]) { delete store.db.veto[id]; cleared++ }
+  store.saveDb()
+  pushLog({ msg: `已解除 ${cleared} 条服务端处置冻结（下一轮灌入会按服务端现状重新判定）`, module: '灌入', level: 'info', at: Date.now() })
+  return { cleared }
 }))
 
 route('GET', '/api/logs', guard(() => logs.slice(-800)))

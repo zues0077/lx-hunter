@@ -1703,8 +1703,15 @@ function platCells(e) {
 
 function statusCell(e) {
   if (e.checking) return '<span class="badge accent">检测中…</span>'
+  // v1.13.0：服务端处置冻结（禁用/单平台禁用/护栏隔离/删除）→ 内容不变就不再灌入。
+  // 和「已灌入」并列显示：它说明的不是"灌过没有"，而是"为什么不会再灌"。
+  const vBadge = e.veto
+    ? `<span class="badge fail" title="${esc((e.veto.detail || '') + '；该音源内容更新前不会自动灌入任何平台，更新后自动解冻')}">` +
+      (e.veto.type === 'removed' ? '服务端已删·冻结' : e.veto.type === 'isolated' ? '服务端隔离·冻结' : '服务端已禁·冻结') +
+      '</span>'
+    : ''
   const im = importedBadge(e)
-  if (im) return im
+  if (im) return vBadge ? im + ' ' + vBadge : im
   // 去重废弃的条目一律显示「重复·已合并」——不管它有没有历史检测结果。
   // 旧逻辑只在无深检结果时显示，带历史结果的会落进「疑似」分支，让人误判成检测失败。
   // 它的真实状态是「已合并到保留项」，必须这么说。

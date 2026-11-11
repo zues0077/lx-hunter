@@ -109,8 +109,23 @@ function resolveService(config, override) {
 
 const NO_ACCOUNT_ERR = '未配置或未选择服务平台账号：请先在「设置」里添加并选中一个平台账号'
 
+/**
+ * 服务端「自检护栏」隔离名单（v1.13.0）。
+ * 只有 lxserver 有这个能力（其余平台没有隔离概念）→ 没有该方法就当空名单。
+ * 读失败也不抛：隔离名单只是灌入前的附加否决信号，不能因为读不到就卡住整个灌入。
+ */
+async function getIsolations(svc) {
+  if (!svc || !svc.adapter || typeof svc.adapter.listIsolations !== 'function') return []
+  try {
+    const ids = await svc.adapter.listIsolations(svc.acct)
+    return Array.isArray(ids) ? ids : []
+  } catch (e) {
+    return []
+  }
+}
+
 module.exports = {
   getService, getActiveService, resolveService, TYPE_LABELS, REGISTRY,
-  getBatchImportAccounts, getImportTargets,
+  getBatchImportAccounts, getImportTargets, getIsolations,
   NO_ACCOUNT_ERR, SUPPORTED_TYPES: Object.keys(REGISTRY)
 }

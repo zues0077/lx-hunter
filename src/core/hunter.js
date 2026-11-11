@@ -6,12 +6,14 @@ const { fetchCommunityRepos } = require('./community')
 const { collectFromHubs } = require('./hubfeed')
 const { checkBasic, deepCheck, extractMeta, sha256Str, usableCount, stoppable, isLocalNetworkIssue, patrolJudge, obfuscationRisk, obfuscationTip, applyProbeRecord, probeApiHosts, apiDownVerdict, passedPlatforms, regressionJudge, probeTopTier } = require('./checker')
 const { crawlFetch, readText, sleep } = require('./net')
-const { getActiveService, getService, getBatchImportAccounts, NO_ACCOUNT_ERR } = require('./services')
+const { getActiveService, getService, getBatchImportAccounts, getIsolations, NO_ACCOUNT_ERR } = require('./services')
 const { Store } = require('./store')
 // 2026-11-10 科学性复核：版本算法 / 身份键 / 质量判据统一到单一来源，
 // 不再各写一份（详见 src/core/version.js 顶部说明）。
 const { versionKey: versionNum, cmpVersion, verLabel } = require('./version')
 const { normName, candidateRepo, serverRepo, baseNameKey, pickHighestVersion } = require('./identity')
+// v1.13.0：服务端动作（禁用 / 单平台禁用 / 隔离 / 删除）→ 本地冻结标记，防止「删了又灌回来」
+const { computeVeto, isFrozen, vetoReason, splitFrozen, VETO_PRIORITY } = require('./serverVeto')
 const { compareVerdict, describeQuality, profile: qualityProfile } = require('./quality')
 
 // normName 已统一到 src/core/identity.js（hunter / sourceUpdate 必须完全同口径），
@@ -875,13 +877,21 @@ class Hunter {
     const all = this.store.getSources()
       .filter(e => !e.deprecated && e.usable && (e.url || typeof e.code === 'string'))
       .filter(e => !this._importedEverywhere(e.id, tids, activeId))
-    const gated = all.filter(e => this._autoImportBlocked(e))
+    // v1.13.0 服务端处置冻结：服务端禁用 / 单平台禁用 / 护栏隔离 / 删除过的音源，
+    // 同一份内容不再自动灌回（内容更新后 computeVeto 会自然解冻）。
+    const { keep: allLive, frozen } = splitFrozen(this.store.db.veto, all)
+    if (frozen.length) {
+      this.log(`服务端处置冻结：${frozen.length} 条不参与本轮自动灌入（` +
+        frozen.slice(0, 5).map(x => x.entry.lxName || x.entry.scriptName || x.entry.name || x.entry.id).join('、') +
+        (frozen.length > 5 ? ' 等' : '') + `）；这些音源内容更新后自动解冻`, '灌入', 'warn')
+    }
+    const gated = allLive.filter(e => this._autoImportBlocked(e))
     if (gated.length) {
       this.log(`质量守门：${gated.length} 条疑似回归版本本轮不自动灌入（` +
         gated.slice(0, 5).map(e => e.lxName || e.scriptName || e.name || e.id).join('、') +
         (gated.length > 5 ? ' 等' : '') + `）；音源库带「疑似回归」徽章，人工复测通过后自动解除`, '质量', 'warn')
     }
-    const ids = all.filter(e => !this._autoImportBlocked(e)).map(e => e.id)
+    const ids = allLive.filter(e => !this._autoImportBlocked(e)).map(e => e.id)
     if (!ids.length) {
       out.skipped = 'nothing-to-import'
       this.log('定时任务：新增音源里没有可灌入的（检测未通过，或灌入目标账号都已有），本轮结束', '定时')
@@ -2095,7 +2105,16 @@ class Hunter {
     // 同名冲突取决于该服务端自己的现状，改名池也要按账号分开（否则第二个平台会
     // 以为名字已被占用而继续往后加后缀）
     const activeId = cfg.activePlatformId || (plans[0] && plans[0].svc.acct.id)
+
+    // ---- 服务端动作冻结（v1.13.0）----
+    // 在账本对账 / 队列规划之前刷新一次「服务端处置」冻结表：lx-music 侧禁用、单平台禁用、
+    // 自检护栏隔离、删除过的音源，同一份内容不再灌回任何目标平台（用户口径：直到该音源有更新为止）。
+    // 顺序很关键：必须在 reconcileImported 之前，否则对账先把记录摘掉，就再也看不出
+    // 「这条曾经在服务端上、现在被删了」，删除动作会被误当成「从没灌过」而重灌。
+    await this._refreshServerVeto(plans, activeId)
+
     let total = 0
+    let frozenTotal = 0
     for (const p of plans) {
       // 账本对账（只在该账号的列表确实读到时才做）：服务端已经删掉的条目，本地记录跟着摘掉。
       // 不这么做的话，用户「删空服务端再重灌」会被本地那枚「已灌入」标记整体排除，表现为「灌不进去」。
@@ -2114,6 +2133,24 @@ class Hunter {
         uniqueName: p.svc.adapter.uniqueName !== false
       })
       p.usedRename = new Set()
+      // 服务端处置冻结：被判过的音源不再灌（同一份内容）。转成 skip 项而不是直接从队列里
+      // 抹掉 —— 结果面板要能说清「为什么没灌」，否则用户会以为漏了。
+      const vetoNow = this.store.db.veto || {}
+      let frozenHere = 0
+      p.queue = p.queue.map(item => {
+        if (!item || item.skip || !item.e) return item
+        if (!isFrozen(vetoNow, item.e)) return item
+        frozenHere++
+        return {
+          e: item.e,
+          skip: `服务端已处置过该音源（${vetoReason(vetoNow[item.e.id])}）→ 冻结，不重复灌入；该音源内容更新后自动解冻`,
+          frozen: true
+        }
+      })
+      if (frozenHere) {
+        frozenTotal += frozenHere
+        this.log(`「${p.label}」${frozenHere} 条按服务端处置冻结跳过（禁用/隔离/删除过的音源，内容未变不重灌）`, '灌入', 'warn')
+      }
       total += p.queue.length
     }
     // 同名冲突第三层：平台数、p50 都打平且本地还没有音质档证据时，为**这一条**补测最高可播档。
@@ -2403,6 +2440,88 @@ class Hunter {
       lxId: nx.lxId, platformId: nx.platformId, platformType: nx.platformType, accountName: nx.accountName,
       importedTo: rest   // 必须写回：只改顶层不改数组的话，下次撤回还会以为这个平台仍有一份
     })
+  }
+
+  /**
+   * 刷新「服务端处置」冻结表（v1.13.0）
+   *
+   * 把 lx-music 侧的四种动作翻译成本地冻结：
+   *   removed（服务端已删除）/ isolated（自检护栏隔离）/ disabled（整源禁用）/
+   *   platform-disabled（单平台或全部平台禁用）
+   * 冻结期间任何灌入目标都不再上传该音源；音源内容（contentHash）变了自动解冻。
+   *
+   * 三个必须守住的点：
+   *  1. **顺序**：必须在 reconcileImported 之前跑 —— 对账会摘掉「服务端已删」的记录，
+   *     摘完就再也分不清「被删了」和「从没灌过」。
+   *  2. **列表没读到就不要动冻结表**：服务端抖动时 serverList 为 null，此时按「全部消失」
+   *     去算会把整张表写成 removed —— 一次网络故障就把全库源冻死。
+   *  3. **多平台取并集**：冻结只针对同一份字节，任一平台判过就够（删除最优先）。
+   *
+   * @param {Array} plans runImport 阶段已建好的 {svc,label,serverList} 列表
+   * @param {string} activeId 当前选中账号（老记录归属）
+   */
+  async _refreshServerVeto(plans, activeId) {
+    const db = this.store.db
+    const prev = db.veto && typeof db.veto === 'object' ? db.veto : {}
+    const merged = {}
+    let sawList = false
+
+    for (const p of plans) {
+      if (!p || !p.svc || !Array.isArray(p.serverList)) continue
+      sawList = true
+      let isolatedIds = []
+      try { isolatedIds = await getIsolations(p.svc) } catch (e) { isolatedIds = [] }
+      const r = computeVeto({
+        imported: this.store.imported || {},
+        sources: db.sources || {},
+        serverList: p.serverList,
+        platformId: p.svc.acct.id || activeId,
+        activePlatformId: activeId,
+        prev,
+        isolatedIds,
+        now: Date.now()
+      })
+      for (const [eid, v] of Object.entries(r.veto)) {
+        const cur = merged[eid]
+        if (!cur || (VETO_PRIORITY[v.type] || 0) > (VETO_PRIORITY[cur.type] || 0)) merged[eid] = v
+      }
+    }
+
+    // 一个账号的列表都没读到 → 保持原样，绝不把「读不到」当成「全被删了」
+    if (!sawList) {
+      this.log('服务端音源列表未读到，本轮跳过「服务端处置」冻结刷新（冻结表保持不变）', '灌入', 'warn')
+      return { added: 0, updated: 0, cleared: 0, total: Object.keys(prev).length }
+    }
+
+    const next = {}
+    for (const [eid, v] of Object.entries(merged)) {
+      const old = prev[eid]
+      next[eid] = old ? Object.assign({}, v, { since: old.since || v.since }) : v
+    }
+
+    let added = 0
+    let updated = 0
+    let cleared = 0
+    for (const eid of Object.keys(next)) {
+      const o = prev[eid]
+      if (!o) added++
+      else if (o.type !== next[eid].type || o.sha !== next[eid].sha) updated++
+    }
+    for (const eid of Object.keys(prev)) if (!next[eid]) cleared++
+
+    db.veto = next
+    this.store.saveDb()
+
+    if (added || updated) {
+      const names = Object.keys(next)
+        .filter(eid => !prev[eid] || prev[eid].type !== next[eid].type)
+        .slice(0, 5)
+        .map(eid => (db.sources[eid] && (db.sources[eid].lxName || db.sources[eid].name)) || eid)
+      this.log(`服务端处置冻结：新增/变更 ${added + updated} 条（${names.join('、')}${Object.keys(next).length > 5 ? ' 等' : ''}），` +
+        '这些音源在内容更新前不会再被灌入', '灌入', 'warn')
+    }
+    if (cleared) this.log(`服务端处置冻结：解除 ${cleared} 条（音源已更新或服务端已恢复）`, '灌入')
+    return { added, updated, cleared, total: Object.keys(next).length }
   }
 
   /**

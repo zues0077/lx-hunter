@@ -58,7 +58,10 @@ console.log('=== A. 列表接口剥离脚本正文（载荷 14.3MB → 2.7MB） 
   // 两个入口都必须真的用上（防「写了工具没人调」）
   const webSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'server', 'web.js'), 'utf8')
   const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.js'), 'utf8')
-  ok('/api/sources 走 publicSourceList', /sources:\s*publicSourceList\(store\.getSources\(\)\)/.test(webSrc))
+  // v1.13.0 起 /api/sources 先把 publicSourceList 的结果存进 list（要在返回前补 veto 标记），
+  // 断言相应放宽成「先剥正文、再按 list 返回」，仍然守住「写了工具必须真的被调用」这个目的。
+  ok('/api/sources 走 publicSourceList',
+    /publicSourceList\(store\.getSources\(\)\)/.test(webSrc) && /sources:\s*list\b/.test(webSrc))
   ok('桌面版 sources:get 也剥正文', /publicSourceList\(store\.getSources\(\)\)/.test(mainSrc))
 }
 
