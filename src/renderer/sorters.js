@@ -110,7 +110,17 @@
     const m = (e && e.deep && e.deep.metrics) || null
     const scored = !!(m && m.depth === 'full')
     if (!scored) {
-      // 初筛出来的可用源：明确告诉用户「还没打分」，而不是显示一个 1 样本的 p50 冒充能力
+      // 快速模式（初筛 / 巡检）测到第一个可用平台就停，剩下的标 untested。
+      // 这种「平台数」不是脚本真实支持的平台数，只是本次体检的下限 ——
+      // 必须把它叫成「快速体检值」，否则用户会拿巡检后变小的数字当能力下降（P-1414）。
+      let untested = 0
+      for (const k in p) if (p[k] && p[k].status === 'untested') untested++
+      if (untested > 0) {
+        return '<span class="qbrief unscored" title="快速体检值：巡检/初筛测到第一个可用平台就停，另有 ' + untested +
+          ' 个平台没测、不计入这里的 ' + n + ' 个。所以这个平台数只是体检下限，不是脚本能用的全部平台；' +
+          '想看准确平台数（并让质量排序生效）请点工具栏「深度检测（打分）」">快速体检 ' + n + ' 平台</span>'
+      }
+      // 没有未测平台仍不打分（如老记录没 depth）：明确说「还没打分」，不拿 1 样本 p50 冒充能力
       return '<span class="qbrief unscored" title="初筛只确认「有可用平台」，不打分。' +
         '点工具栏「深度检测（打分）」跑五平台真取链后，这里会显示「N平台 · XXms」并参与排序">未打分</span>'
     }

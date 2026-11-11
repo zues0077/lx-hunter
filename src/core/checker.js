@@ -819,7 +819,19 @@ function patrolJudge(d, ctx) {
   if (!d || d.cancelled) return { verdict: 'unknown', note: d && d.cancelled ? '已取消' : '无深检结果' }
   if (!d.loadable) return { verdict: 'unknown', note: '本地无法验证（' + String(d.loadError || '').slice(0, 60) + '），不动服务端' }
   const n = usableCount(d)
-  if (n > 0) return { verdict: 'ok', note: '可用平台 ' + n + ' 个' + (c.updated ? '（脚本内容已更新）' : '') }
+  if (n > 0) {
+    // 巡检跑的是快速模式（depth=quick）：测到第一个可用平台就停，其余标 untested。
+    // 这个 n 是「体检下限」而不是脚本真实支持的平台数，日志/记录里必须这么叫，
+    // 否则用户拿巡检后的平台数跟深检结果比，会以为源「能力下降了」（P-1414）。
+    const plats = Object.values(d.platforms || {})
+    const untested = plats.filter(p => p && p.status === 'untested').length
+    const quick = !(d.metrics && d.metrics.depth === 'full')
+    const head = quick ? '快速体检可用平台 ' + n + ' 个' : '可用平台 ' + n + ' 个'
+    const tail = (quick && untested > 0)
+      ? '（测到第一个可用平台即停，另有 ' + untested + ' 个平台未测、不计入；要看准确平台数请跑深度检测）'
+      : ''
+    return { verdict: 'ok', note: head + tail + (c.updated ? '（脚本内容已更新）' : '') }
+  }
   const fails = Object.values(d.platforms || {}).filter(p => p && p.status === 'failed')
   const firstMsg = fails.length ? String(fails[0].message || '') : ''
   const netIssue = fails.some(p => isLocalNetworkIssue(p.message || ''))

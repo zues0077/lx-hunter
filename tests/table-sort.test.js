@@ -132,6 +132,19 @@ ck('同分按名称兜底', sortSources(tie, { key: 'status', dir: 'asc' }, {}).
   // 口径变更（2026-11-10 00:1x）：有可用平台但没打分 → 显示「未打分」，不再什么都不显示。
   // 什么都不显示会让人以为这条没有质量信息，实际是「还没测」，必须区分开。
   ck('未打分的可用源显示「未打分」而不是编造延迟', /未打分/.test(qualityBriefHtml({ deep: { platforms: { wy: { status: 'usable' } } } })))
+  // 2026-11-11 拍板方案 C：快速模式有未测平台时，平台数必须自称「快速体检」，不能冒充准确平台数
+  {
+    const quickB = qualityBriefHtml({
+      deep: { platforms: { wy: { status: 'usable' }, tx: { status: 'untested' }, kw: { status: 'untested' } }, metrics: { depth: 'quick' } }
+    })
+    ck('快速体检：平台数标成「快速体检 1 平台」', /快速体检 1 平台/.test(quickB), quickB)
+    ck('快速体检：title 说明未测平台数与「体检下限」', /快速体检值/.test(quickB) && /另有 2 个平台没测/.test(quickB) && /体检下限/.test(quickB))
+    ck('快速体检：title 指路「深度检测（打分）」', /深度检测（打分）/.test(quickB))
+    // 有未测平台但已打分（全平台跑过、个别脚本未声明）→ 仍按打分档展示，不加体检标签
+    ck('已打分优先于体检标签', /2平台 · 300ms/.test(qualityBriefHtml({
+      deep: { platforms: { wy: { status: 'usable' }, tx: { status: 'usable' }, kw: { status: 'untested' } }, metrics: { depth: 'full', p50LatencyMs: 300 } }
+    })))
+  }
   ck('深度检测过但没有成功计时样本 → 「无延迟样本」', /无延迟样本/.test(qualityBriefHtml({
     deep: { platforms: { wy: { status: 'usable' } }, metrics: { depth: 'full', p50LatencyMs: null } }
   })))

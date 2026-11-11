@@ -3148,17 +3148,20 @@ class Hunter {
       return { ok: 0, disabled: 0, unknown: 0, total: 0 }
     }
 
+    // 巡检并发刻意压得比主检低：几十个聚合源同时重测，打到的是同一批后端接口，
+    // 并发太高会把对方打到限流，整批「全平台失败」，看起来就像集体失效。
+    // 注意：日志里必须写这个真实值（曾经写死 Math.min(8,…) 而实际跑 3，纯文案误导）。
+    const conc = Math.max(1, Math.min(3, cfg.concurrency || 8))
     this.job = { running: true, type: 'patrol', cancel: false, progress: { done: 0, total: items.length, ok: 0, disabled: 0 }, step: '' }
     this.emit('job', { running: true, type: 'patrol' })
-    this.log(`开始健康巡检：${items.length} 个已灌入音源（并发 ${Math.max(1, Math.min(8, cfg.concurrency || 8))}）…`, '巡检')
+    this.log(`开始健康巡检：${items.length} 个已灌入音源（并发 ${conc}，快速体检：每个源测到第一个可用平台即停）…` +
+      '注意：快速体检只回答「还能不能用」，未测平台不计入平台数，所以巡检后的平台数是体检下限；' +
+      '要看准确平台数请跑「深度检测（打分）」', '巡检')
     this.mirrorPref = null
     // 巡检期服务端写操作串行化（v1.9.1）：每条写请求走同一条链，delete 前后保持
     // serverDeleteIntervalMs 间隔，避免把 lxserver 打假死（即本次 bug 连带的二次事故）
     this._patrolWriteChain = null
     this._patrolPrevHeavy = false
-    // 巡检并发刻意压得比主检低：几十个聚合源同时重测，打到的是同一批后端接口，
-    // 并发太高会把对方打到限流，整批「全平台失败」，看起来就像集体失效
-    const conc = Math.max(1, Math.min(3, cfg.concurrency || 8))
     let idx = 0, ok = 0, disabled = 0, unknown = 0, reEnabled = 0, deleted = 0
 
     const worker = async () => {

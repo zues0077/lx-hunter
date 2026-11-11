@@ -31,6 +31,18 @@ ck('空入参不抛且为 0', usableCount(null) === 0 && usableCount({}) === 0)
 let j = patrolJudge(deepUsable, {})
 ck('有可用平台 → ok', j.verdict === 'ok' && /可用平台 1 个/.test(j.note), j.note)
 
+// 2026-11-11 方案 C：巡检是快速体检，平台数必须自称「快速体检」并说明未测平台
+{
+  const quick = { loadable: true, metrics: { depth: 'quick' }, platforms: {
+    wy: { status: 'usable' }, tx: { status: 'untested' }, kw: { status: 'untested' }
+  } }
+  const qj = patrolJudge(quick, {})
+  ck('快速体检：note 标「快速体检可用平台」', /快速体检可用平台 1 个/.test(qj.note), qj.note)
+  ck('快速体检：note 说明 2 个未测平台 + 体检下限口径', /另有 2 个平台未测/.test(qj.note) && /准确平台数/.test(qj.note))
+  const fj = patrolJudge(Object.assign({}, quick, { metrics: { depth: 'full' } }), {})
+  ck('全平台深检：note 仍写「可用平台」（不套体检标签）', /^可用平台 1 个/.test(fj.note), fj.note)
+}
+
 j = patrolJudge(deepAllFail, { prevStreak: 0, threshold: 2 })
 ck('首次全失败（非网络原因）→ suspect 不判死', j.verdict === 'suspect' && j.streak === 1, j.note)
 ck('suspect 提示说明需连续确认', /连续第 1 次/.test(j.note) && /连续 2 次确认/.test(j.note), j.note)
