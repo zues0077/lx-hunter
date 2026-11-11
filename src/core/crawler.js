@@ -303,18 +303,37 @@ function judgeFreshness(commitsArr, releasesArr, sinceTs) {
 const GH_ETAG_CACHE = new Map()   // url -> { etag, json }
 const GH_ETAG_MAX = 800
 
+/**
+ * 条件请求统计（v1.13.1）：给日志一个「这轮到底省了多少配额」的硬数字。
+ * 只看 304 次数是不够的 —— 要同时给出「带条件头的请求数」和「真正计费的 200 数」，
+ * 否则 304=0 无法区分「没缓存」和「缓存全没命中」。
+ */
+const GH_STATS = { conditional: 0, notModified: 0, counted: 0 }
+
+function resetGhStats() {
+  GH_STATS.conditional = 0
+  GH_STATS.notModified = 0
+  GH_STATS.counted = 0
+}
+
+function ghStatsSnapshot() {
+  return Object.assign({}, GH_STATS)
+}
+
 async function ghGetJson(url, token, timeoutMs) {
   const hit = GH_ETAG_CACHE.get(url)
   const headers = ghHeaders(token)
-  if (hit && hit.etag) headers['If-None-Match'] = hit.etag
+  if (hit && hit.etag) { headers['If-None-Match'] = hit.etag; GH_STATS.conditional++ }
   const res = await fetchWithTimeout(url, { headers }, timeoutMs)
   if (res.status === 304) {
+    GH_STATS.notModified++
     try { await res.text() } catch (e) { /* 304 无 body，读掉避免连接悬挂 */ }
     return { ok: true, notModified: true, status: 304, json: hit ? hit.json : null }
   }
   const text = await readText(res, timeoutMs)
   let json = null
   try { json = JSON.parse(text) } catch (e) { json = null }
+  if (res.ok) GH_STATS.counted++
   if (res.ok && json != null) {
     const etag = res.headers && typeof res.headers.get === 'function' ? res.headers.get('etag') : null
     if (etag) {
@@ -761,6 +780,7 @@ async function crawl(opts, onEvent, shouldStop) {
   // 开销：每仓库先 1 次 commit 探测；commit 陈旧的仓库再多 1 次 release 探测（若判新鲜则带回
   // releases 复用、省主流程 1 次配额）。既无提交又无新发布的静默仓库整仓跳过（省 tree 配额），
   // 冷仓库多的库净省配额。
+  resetGhStats()   // v1.13.1：每轮从零计，日志里的数字才是这一轮的
   const sinceDays = Number(opts.sinceDays) > 0 ? Number(opts.sinceDays) : 0
   const sinceTs = sinceDays ? Date.now() - sinceDays * 86400 * 1000 : 0
   const stats = { added: 0, reposDone: 0, repoTotal: repos.length, linksFound: 0, staleSkipped: 0, staleRepos: [], deadRepos: [] }
@@ -976,6 +996,17 @@ async function crawl(opts, onEvent, shouldStop) {
     }
     await sleep(300)
   }
+
+  // v1.13.1：把「凭证省了多少配额」写进日志 —— 只有 304 次数没法说明问题，
+  // 所以连「带条件头的请求数」「真正计费的 200 数」一起给出来。
+  const gh = ghStatsSnapshot()
+  if (gh.conditional > 0 || gh.notModified > 0) {
+    stats.ghStats = gh
+    onEvent('log', {
+      level: 'info', module: '爬取',
+      msg: `GitHub 条件请求：${gh.notModified}/${gh.conditional} 次命中 304（零配额），本轮实际计费请求 ${gh.counted} 次`
+    })
+  }
   return stats
 }
 
@@ -1008,6 +1039,7 @@ async function resolveRepoRename(repo, o) {
 
 module.exports = {
   DEFAULT_REPOS, crawl, checkQuota, fetchReleases, ghGetJson, filterDeadRepos, DEAD_REPO_TTL_MS,
+  resetGhStats, ghStatsSnapshot,
   parseReleaseAssets, fetchRepoFreshness, judgeFreshness,
   discoverReposViaSearch, looksLikeSourceRepo, verifyRepoHasSource, resolveRepoRename, isSourceAsset,
   extractCandidates, extractArchiveCandidates, pickScriptsFromZip, normalizeRepo,

@@ -90,4 +90,29 @@ async function main() {
   console.log(`\n全部通过（${pass} 项）`)
 }
 
-main().catch(e => { console.error(e); process.exit(1) })
+main()
+  .then(() => statsCase())
+  .then(() => console.log(`\n全部通过（共 ${pass} 项）`))
+  .catch(e => { console.error(e); process.exit(1) })
+
+// v1.13.1：304 计数（日志里要给「省了多少配额」一个硬数字）
+const { resetGhStats, ghStatsSnapshot } = require('../src/core/crawler')
+async function statsCase() {
+  console.log('\n== 304 计数（日志量化） ==')
+  await withServer((req, res) => {
+    const etag = '"s1"'
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); res.end(); return }
+    res.writeHead(200, { 'Content-Type': 'application/json', ETag: etag })
+    res.end('[]')
+  }, async (base) => {
+    resetGhStats()
+    await ghGetJson(base + '/x1', '', 5000)   // 200 → counted
+    await ghGetJson(base + '/x1', '', 5000)   // 304 → notModified
+    await ghGetJson(base + '/x2', '', 5000)   // 200 → counted
+    const st = ghStatsSnapshot()
+    assert.strictEqual(st.counted, 2)
+    assert.strictEqual(st.notModified, 1)
+    assert.strictEqual(st.conditional, 1)
+    ok('条件请求/304/计费三种计数都记到日志口径')
+  })
+}
