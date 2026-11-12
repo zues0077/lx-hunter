@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
-<link rel="stylesheet" href="styles.css?v=19">
-<script src="auth-bg.js?v=2"></script>
+<link rel="stylesheet" href="styles.css?v=20">
+<script src="auth-bg.js?v=3"></script>
 </head>
 <body>
 <div class="app">
@@ -685,19 +685,40 @@
       <button type="button" class="auth-bg-swatch sw-night" data-bg="night" aria-pressed="false"><i></i><span>星夜</span></button>
       <button type="button" class="auth-bg-swatch sw-plain" data-bg="plain" aria-pressed="false"><i></i><span>纯净</span></button>
     </div>
-    <div class="auth-bg-custom">
-      <label class="auth-bg-label" for="authBgFile">本地图片</label>
-      <input class="auth-bg-file" type="file" id="authBgFile" accept="image/*">
-      <label class="auth-bg-label" for="authBgUrl">图片地址或随机图接口</label>
-      <input class="input" id="authBgUrl" type="url" placeholder="https://example.com/random.php?type=bg" autocomplete="off" spellcheck="false">
-      <p class="auth-bg-note">支持带参数的随机图接口与跳转地址，每次打开登录页自动换一张。本地图片会自动压缩，偏好只存在当前浏览器。</p>
-      <div class="auth-bg-ops">
-        <button class="btn sm" type="button" id="btnAuthBgApply">应用地址</button>
-        <button class="btn sm ghost" type="button" id="btnAuthBgNext">换一张</button>
-        <button class="btn sm ghost" type="button" id="btnAuthBgReset">恢复默认</button>
+    <!-- 我的背景：填过的地址/上传的图都留在这里，点一行即切换（见 auth-bg.js） -->
+    <div class="auth-bg-lib">
+      <div class="auth-bg-lib-head">
+        <button class="auth-bg-lib-toggle" id="btnAuthBgLib" type="button" aria-expanded="true" aria-controls="authBgLibBody">
+          <svg class="chev" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>我的背景</span>
+          <span class="auth-bg-count" id="authBgCount">0</span>
+        </button>
+        <span class="auth-bg-usage" id="authBgUsage"></span>
       </div>
-      <p class="auth-bg-msg" id="authBgMsg"></p>
+      <div class="auth-bg-lib-body" id="authBgLibBody">
+        <div class="auth-bg-list" id="authBgList" role="group" aria-label="已保存的登录背景"></div>
+        <p class="auth-bg-empty" id="authBgEmpty">还没有保存的背景，点下面的「添加背景」上传一张或填个地址。</p>
+        <p class="auth-bg-more" id="authBgMore" hidden></p>
+        <div class="auth-bg-add">
+          <button class="auth-bg-add-toggle" id="btnAuthBgAdd" type="button" aria-expanded="false" aria-controls="authBgAddBody">＋ 添加背景</button>
+          <div class="auth-bg-add-body" id="authBgAddBody" hidden>
+            <label class="auth-bg-label" for="authBgFile">本地图片</label>
+            <input class="auth-bg-file" type="file" id="authBgFile" accept="image/*">
+            <label class="auth-bg-label" for="authBgUrl">图片地址或随机图接口</label>
+            <input class="input" id="authBgUrl" type="url" placeholder="https://example.com/random.php?type=bg" autocomplete="off" spellcheck="false">
+            <p class="auth-bg-note">支持带参数的随机图接口与跳转地址，每次打开登录页自动换一张。本地图片会自动压缩后存在本浏览器，最多 6 张。</p>
+            <div class="auth-bg-ops">
+              <button class="btn sm" type="button" id="btnAuthBgApply">添加并应用</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
+    <div class="auth-bg-ops auth-bg-foot">
+      <button class="btn sm ghost" type="button" id="btnAuthBgNext">换一张</button>
+      <button class="btn sm ghost" type="button" id="btnAuthBgReset">恢复默认</button>
+    </div>
+    <p class="auth-bg-msg" id="authBgMsg"></p>
   </div>
 </div>
 

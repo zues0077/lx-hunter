@@ -300,8 +300,8 @@ ck('payloadHash 二进制安全且稳定',
     appSrc.includes('only: [url]') && appSrc.includes('only: urls'))
   ck('loadConfig / saveAllCfg / 数据导入后都刷新站外源列表',
     (appSrc.match(/renderExternalList\(/g) || []).length >= 5)
-  ck('缓存戳 v66 / v57 / v19',
-    htmlSrc.includes('app.js?v=66') && htmlSrc.includes('web-bridge.js?v=57') && htmlSrc.includes('styles.css?v=19'))
+  ck('缓存戳 v66 / v57 / v20',
+    htmlSrc.includes('app.js?v=66') && htmlSrc.includes('web-bridge.js?v=57') && htmlSrc.includes('styles.css?v=20'))
 
   console.log(`\n${bad ? 'FAIL（失败 ' + bad + ' 项）' : 'ALL PASS'}`)
   process.exit(bad ? 1 : 0)

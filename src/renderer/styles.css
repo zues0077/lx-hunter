@@ -511,6 +511,7 @@ html[data-theme="light"] .auth-bg-toggle:hover { background: #fff; }
 .auth-bg-panel {
   position: absolute; right: 20px; bottom: 64px; z-index: 3;
   width: 300px; max-width: calc(100vw - 40px); padding: 16px;
+  max-height: calc(100vh - 120px); overflow-y: auto; overscroll-behavior: contain;
   border-radius: 14px; border: 1px solid var(--line);
   background: var(--card); color: var(--text);
   box-shadow: 0 14px 40px rgba(0,0,0,.28); font-size: 12.5px;
@@ -531,7 +532,68 @@ html[data-theme="light"] .auth-bg-toggle:hover { background: #fff; }
 .sw-mint i { background: linear-gradient(135deg, #2fa38c, #3b7fc4); }
 .sw-night i { background: linear-gradient(135deg, #1b2350, #42306e); }
 .sw-plain i { background: linear-gradient(135deg, #f3f5fa, #d9deea); border: 1px solid var(--line); }
-.auth-bg-custom { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+/* 我的背景库：一行一张，点整行即切换（v1.13.3） */
+.auth-bg-lib { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line); }
+.auth-bg-lib-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.auth-bg-lib-toggle {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px 4px 3px;
+  border: 0; background: transparent; color: var(--text-2); border-radius: 7px;
+  font-family: inherit; font-size: 11.5px; cursor: pointer;
+}
+.auth-bg-lib-toggle:hover { color: var(--text); background: var(--card-2); }
+.auth-bg-lib-toggle .chev { flex: 0 0 auto; transform: rotate(90deg); transition: transform .15s ease; }
+.auth-bg-lib-toggle[aria-expanded="false"] .chev { transform: rotate(0deg); }
+.auth-bg-count { color: var(--muted); font-size: 11px; }
+.auth-bg-usage { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auth-bg-usage.is-now::before {
+  content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); margin-right: 5px; vertical-align: middle;
+}
+.auth-bg-lib-body { margin-top: 8px; }
+.auth-bg-list {
+  display: flex; flex-direction: column; gap: 5px;
+  max-height: 186px; overflow-y: auto; overscroll-behavior: contain; padding-right: 1px;
+}
+.auth-bg-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--card-2);
+  cursor: pointer; color: var(--text-2); text-align: left;
+}
+.auth-bg-item:hover { border-color: rgba(124,125,245,.45); background: color-mix(in srgb, var(--accent) 7%, var(--card-2)); }
+.auth-bg-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.auth-bg-item.is-active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.auth-bg-thumb {
+  position: relative; flex: 0 0 40px; width: 40px; height: 27px; border-radius: 6px;
+  overflow: hidden; background: var(--card); color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+}
+.auth-bg-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.auth-bg-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.auth-bg-item-name {
+  display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.auth-bg-badge {
+  flex: 0 0 auto; font-style: normal; font-size: 10.5px; font-weight: 500; padding: 0 4px;
+  border-radius: 4px; color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.auth-bg-item-sub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auth-bg-item-ops { flex: 0 0 auto; display: flex; gap: 3px; }
+.auth-bg-icon {
+  width: 21px; height: 21px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text-2); cursor: pointer;
+}
+.auth-bg-icon:hover { color: var(--text); border-color: rgba(124,125,245,.5); }
+.auth-bg-icon.armed { color: #ff9b9b; border-color: #e04b4a; background: rgba(224,75,74,.18); }
+.auth-bg-empty { margin: 2px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.auth-bg-more { margin: 4px 0 0; text-align: center; color: var(--muted); font-size: 11px; }
+.auth-bg-add { margin-top: 8px; }
+.auth-bg-add-toggle {
+  width: 100%; height: 28px; border: 1px dashed var(--line); border-radius: 9px;
+  background: transparent; color: var(--text-2); font-family: inherit; font-size: 11.5px; cursor: pointer;
+}
+.auth-bg-add-toggle:hover { border-color: var(--accent); color: var(--text); }
+.auth-bg-add-body { margin-top: 8px; }
 .auth-bg-label { display: block; margin: 8px 0 5px; color: var(--text-2); font-size: 11.5px; }
 .auth-bg-file { width: 100%; font-size: 11px; color: var(--text-2); }
 .auth-bg-file::file-selector-button {
@@ -539,9 +601,10 @@ html[data-theme="light"] .auth-bg-toggle:hover { background: #fff; }
   border-radius: 7px; background: var(--card-2); color: var(--text);
   font-family: inherit; font-size: 11px; cursor: pointer;
 }
-.auth-bg-custom .input { width: 100%; background: var(--card-2); }
+.auth-bg-add-body .input { width: 100%; background: var(--card-2); }
 .auth-bg-note { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .auth-bg-ops { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.auth-bg-foot { margin-top: 11px; }
 .auth-bg-msg { margin: 8px 0 0; min-height: 15px; color: var(--accent); font-size: 11px; }
 @media (max-width: 520px) {
   .auth-bg-toggle { right: 12px; bottom: 12px; }

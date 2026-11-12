@@ -163,4 +163,136 @@ ok(/styles\.css\?v=(\d+)/.test(head) && Number(/styles\.css\?v=(\d+)/.exec(head)
 ok(pkg.scripts.test.includes('auth-bg-ui.test.js'), '新测试已注册进 npm test')
 ok(fs.existsSync(path.join(renderer, 'auth-bg.js')), '静态资源 auth-bg.js 存在（web.js 按目录直出 .js）')
 
+console.log('--- ⑧ 背景库模型：脏数据、去重、上限 ---')
+
+// 内存版 localStorage：setItem 超过 5M 字符就抛 QuotaExceededError（贴近真实浏览器）
+function makeLs(seed) {
+  const m = new Map(Object.entries(seed || {}))
+  return {
+    getItem(k) { return m.has(k) ? m.get(k) : null },
+    setItem(k, v) {
+      const s = String(v)
+      if (s.length > 5 * 1024 * 1024) {
+        const e = new Error('QuotaExceededError')
+        e.name = 'QuotaExceededError'
+        throw e
+      }
+      m.set(k, s)
+    },
+    removeItem(k) { m.delete(k) },
+    _map: m
+  }
+}
+
+ok(bg.LIB_KEY === 'lxh-auth-bg-lib' && bg.UI_KEY === 'lxh-auth-bg-ui', '库与界面状态用各自独立的 key')
+ok(bg.normalizeLib(null).items.length === 0, '空库清洗成 0 条')
+ok(bg.normalizeLib('{坏 JSON').items.length === 0, '坏 JSON 得到空库而不是抛错')
+ok(bg.normalizeItem({ kind: 'url', src: 'javascript:alert(1)' }) === null, '非法 src 的条目被丢弃')
+ok(bg.normalizeItem({ kind: 'file', src: goodUrl }) === null, 'kind=file 但 src 不是 data URL → 丢弃')
+ok(bg.normalizeItem({ kind: 'url', src: 'data:image/png;base64,AAAA' }) === null, 'kind=url 但 src 是 data URL → 丢弃')
+const ni = bg.normalizeItem({ kind: 'url', src: goodUrl })
+ok(ni && /^[A-Za-z0-9_-]+$/.test(ni.id) && ni.kind === 'url' && ni.src === goodUrl, '合法地址条目保留并补上 id')
+ok(bg.normalizeLib({ items: [{ kind: 'url', src: goodUrl }, { 脏: 1 }, null] }).items.length === 1, '混入坏条目时只保留能用的那条')
+
+// 两个随机图源都叫「随机图接口」就分不清了，所以名称用域名、性质放副标题
+ok(bg.labelFor('url', 'https://img.xjh.me/random_img.php?type=bg') === 'img.xjh.me', '地址类名称取域名（多个随机图源不会同名）')
+ok(bg.labelFor('url', 'https://www.picsum.photos/1600/900') === 'picsum.photos', '名称去掉 www 前缀')
+ok(bg.labelFor('file', 'data:image/png;base64,AA', '雪夜星空.jpg') === '雪夜星空', '本地图名称取原文件名并去扩展名')
+ok(bg.labelFor('file', 'data:image/png;base64,AA', '') === '本地图', '没有文件名时叫「本地图」')
+ok(/^随机图接口 · \/random_img\.php$/.test(bg.subFor({ kind: 'url', src: 'https://img.xjh.me/random_img.php?type=bg' })), '副标题写清性质与路径')
+ok(/^在线图片/.test(bg.subFor({ kind: 'url', src: 'https://a.com/wall/bg.jpg' })), '普通图片副标题标「在线图片」')
+ok(/^本地图 · 1280×720 · 2 KB$/.test(bg.subFor({ kind: 'file', src: 'data:image/png;base64,AA', w: 1280, h: 720, bytes: 2000 })), '本地图副标题含尺寸与体积')
+
+const first = bg.addToLib(bg.normalizeLib(null), { kind: 'url', src: 'https://a.com/1.jpg' })
+ok(first.ok && first.lib.items.length === 1, '新地址入库')
+const again = bg.addToLib(first.lib, { kind: 'url', src: 'https://a.com/1.jpg' })
+ok(again.ok && again.dup === true && again.lib.items.length === 1, '同一地址不重复入库（返回 dup 供提示）')
+
+let fileLib = bg.normalizeLib(null)
+let fileAdded = 0
+for (let i = 0; i < bg.MAX_FILE_ITEMS; i++) {
+  const x = bg.addToLib(fileLib, { kind: 'file', src: 'data:image/png;base64,QUJD' + i + 'RA==' })
+  if (x.ok) { fileAdded++; fileLib = x.lib }
+}
+ok(fileAdded === bg.MAX_FILE_ITEMS, '本地图可以存满 ' + bg.MAX_FILE_ITEMS + ' 张')
+const overFile = bg.addToLib(fileLib, { kind: 'file', src: 'data:image/png;base64,WFla' })
+ok(!overFile.ok && /最多 6 张/.test(overFile.reason), '第 7 张本地图被拒绝并说明原因')
+
+const tooBig = 'data:image/png;base64,' + 'A'.repeat(bg.MAX_ITEM_CHARS + 10)
+const rBig = bg.addToLib(bg.normalizeLib(null), { kind: 'file', src: tooBig })
+ok(!rBig.ok && /换一张小一点的/.test(rBig.reason), '单张超过 80 万字符被拒绝')
+
+let heavy = bg.normalizeLib(null)
+const chunk = 'A'.repeat(690000)
+for (let i = 0; i < 4; i++) {
+  const x = bg.addToLib(heavy, { kind: 'file', src: 'data:image/png;base64,' + chunk + i })
+  ok(x.ok, '第 ' + (i + 1) + ' 张 690KB 图入库')
+  heavy = x.lib
+}
+const rFull = bg.addToLib(heavy, { kind: 'file', src: 'data:image/png;base64,' + chunk + 'ZZZZ' })
+ok(!rFull.ok && /存储已接近上限/.test(rFull.reason), '总量接近 320 万字符时拒绝新增并提示删旧图')
+ok(bg.libChars(bg.normalizeLib(null)) < 40, '空库的字符开销很小')
+
+console.log('--- ⑨ 老数据迁移：单张图自动进库，不让人以为图丢了 ---')
+const ls1 = makeLs({ 'lxh-auth-bg': JSON.stringify({ mode: 'image', image: goodUrl }) })
+global.localStorage = ls1
+ok(bg.migrateLegacy() === true, '老格式的单张图迁移成功')
+const migLib = bg.readLib()
+ok(migLib.items.length === 1 && migLib.items[0].src === goodUrl, '那张图已进入背景库')
+const migSet = JSON.parse(ls1.getItem('lxh-auth-bg'))
+ok(migSet.mode === 'image' && migSet.itemId === migLib.items[0].id, '偏好改成指向条目 id')
+ok(!('image' in migSet), '偏好里不再重复存整张图（省一半配额）')
+const migResolved = bg.readSetting()
+ok(migResolved.mode === 'image' && migResolved.image === goodUrl, 'readSetting 能把 id 还原成真实地址')
+ok(bg.migrateLegacy() === false, '已经迁移过，不会重复加一条')
+ls1.setItem(bg.LIB_KEY, JSON.stringify({ v: 1, items: [] }))
+ok(bg.readSetting().mode === 'preset', '库里没这条了，偏好自动回退默认配色（不留空背景）')
+
+console.log('--- ⑩ 写入失败回滚与折叠状态 ---')
+const ls2 = makeLs({})
+global.localStorage = ls2
+ok(bg.commitLib({ v: 1, items: [] }, null) === true, '正常写入成功')
+ok(bg.saveUi({ libOpen: false }) && bg.readUi().libOpen === false, '折叠状态被记住')
+global.localStorage = makeLs({})
+ok(bg.readUi().libOpen === true, '没有界面状态时默认展开')
+const tiny = makeLs({ 'lxh-auth-bg-lib': '{"v":1,"items":[]}' })
+global.localStorage = tiny
+const hugeLib = { v: 1, items: [{ id: 'x', kind: 'url', src: 'https://a.com/' + 'a'.repeat(5.4 * 1024 * 1024) }] }
+ok(bg.commitLib(hugeLib, tiny.getItem(bg.LIB_KEY)) === false, '超配额时写入失败返回 false')
+ok(tiny.getItem(bg.LIB_KEY) === '{"v":1,"items":[]}', '写入失败后旧库原样保留（不丢已存的背景）')
+global.localStorage = undefined
+
+console.log('--- ⑪ 新面板 DOM 与样式契约 ---')
+for (const id of ['btnAuthBgLib', 'authBgLibBody', 'authBgList', 'authBgEmpty', 'authBgMore', 'authBgUsage', 'authBgCount', 'btnAuthBgAdd', 'authBgAddBody']) {
+  ok(new RegExp('id="' + id + '"').test(html), '新面板元素存在：' + id)
+}
+ok(/id="btnAuthBgLib"[^>]*aria-expanded="true"[^>]*aria-controls="authBgLibBody"/.test(html), '折叠开关默认展开并声明控制目标')
+ok(/id="authBgAddBody" hidden>/.test(html), '添加区默认收起（面板平时只有列表）')
+ok(/id="btnAuthBgApply">添加并应用</.test(html), '按钮文案改成“添加并应用”')
+ok(!/auth-bg-custom/.test(html), '旧的单图表单容器已从 HTML 移除')
+ok(/\.auth-bg-list\s*\{[^}]*max-height\s*:\s*186px/.test(cssRules), '列表固定最大高度（背景多了不撑长面板）')
+ok(/\.auth-bg-list\s*\{[^}]*overflow-y\s*:\s*auto/.test(cssRules), '超出部分在列表内部滚动')
+ok(/\.auth-bg-item\.is-active/.test(cssRules), '当前项高亮样式存在')
+ok(/\.auth-bg-item:hover/.test(cssRules), '整行可点的悬停反馈存在')
+ok(/\.auth-bg-icon\.armed/.test(cssRules), '删除两段确认有视觉反馈')
+ok(/\.auth-bg-thumb img/.test(cssRules), '缩略图样式存在')
+ok(/\.auth-bg-panel\s*\{[^}]*max-height/.test(cssRules), '面板本身也不会超出视口')
+ok(/\.auth-bg-usage\.is-now/.test(cssRules), '折叠时用…当前项摘要替代容量文字的样式存在')
+
+// 实机踩过的坑：删除时先读“当前用的是哪张”再删库，反过来会读不到 → 误判成没删当前项
+// → 背景留着一条指向已删条目的 url()，页面变白。这条断言把顺序钉死。
+const bgSrc = fs.readFileSync(path.join(renderer, 'auth-bg.js'), 'utf8')
+function deleteReadsBeforeCommit(src) {
+  const at = src.indexOf('function deleteItem')
+  if (at < 0) return false
+  const body = src.slice(at, at + 1600)
+  const iCur = body.indexOf('const cur = readSetting()')
+  const iWas = body.indexOf('const wasActive')
+  const iCommit = body.indexOf('const next = removeFromLib')
+  return iCur >= 0 && iWas > iCur && iCommit > iWas
+}
+ok(!deleteReadsBeforeCommit('function deleteItem(){ const next = removeFromLib(lib,id); const cur = readSetting(); const wasActive = 1 }'),
+  '对照：先删库再读当前项时断言必败')
+ok(deleteReadsBeforeCommit(bgSrc), '删除当前项前先读当前选中（顺序反了会导致不回退默认背景）')
+
 console.log(`\nauth-bg-ui.test.js: PASS ${pass} / FAIL 0`)
