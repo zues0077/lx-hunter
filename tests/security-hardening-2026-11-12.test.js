@@ -69,4 +69,13 @@ ok(!/renderHead\(readLib\(\)/.test(bgSrc), 'renderHead 不再自己重新读库�
 ok(!/findItem\(null, v\.itemId\) : null/.test(bgSrc), 'syncFoot 用传入的库（不再 readLib）')
 ok(/applySetting\(v, null, freshNonce\(\), lib\)/.test(bgSrc), 'activate 的 applySetting 复用 lib')
 
+console.log('--- ⑫ P-1429 #6：patrolDisableAfter 暴露到设置页 ---')
+ok(/patrolDisableAfter: 2,/.test(storeSrc), 'store 默认 patrolDisableAfter=2（原先无此键恒隐藏 2）')
+ok(/id="cfgPatrolDisableAfter" type="number" min="1" max="20"/.test(
+  fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8')), '设置页已暴露自动禁用阈值')
+ok(/patrolDisableAfter: Math\.max\(1, Math\.min\(20/.test(
+  fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8')), '保存链路带范围钳制（1-20）')
+ok(/自动禁用.*先于.*自动删除|禁用次数应 ≤ 删除次数/.test(
+  fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8')), '页面说明「先禁后删」次序')
+
 console.log(`\nsecurity-hardening: PASS ${pass} / FAIL 0`)

@@ -270,6 +270,7 @@ async function loadConfig() {
   $('cfgPatrolDisable').checked = c.patrolAutoDisable !== false
   $('cfgPatrolAutoDelete').checked = !!c.patrolAutoDelete
   $('cfgPatrolDeleteAfter').value = c.patrolDeleteAfter || 3
+  $('cfgPatrolDisableAfter').value = c.patrolDisableAfter || 2
   $('cfgCrawlOn').checked = !!c.crawlScheduleEnabled
   $('cfgCrawlAutoImport').checked = !!c.crawlAutoImport
   $('cfgCrawlHours').value = c.crawlIntervalHours || 24
@@ -326,6 +327,7 @@ async function saveAllCfg() {
     patrolAutoDisable: $('cfgPatrolDisable').checked,
     patrolAutoDelete: $('cfgPatrolAutoDelete').checked,
     patrolDeleteAfter: Math.max(1, Math.min(20, parseInt($('cfgPatrolDeleteAfter').value, 10) || 3)),
+    patrolDisableAfter: Math.max(1, Math.min(20, parseInt($('cfgPatrolDisableAfter').value, 10) || 2)),
     crawlScheduleEnabled: $('cfgCrawlOn').checked,
     crawlAutoImport: $('cfgCrawlAutoImport').checked,
     crawlIntervalHours: Math.max(1, Math.min(720, parseInt($('cfgCrawlHours').value, 10) || 24)),

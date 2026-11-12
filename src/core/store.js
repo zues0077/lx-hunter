@@ -140,6 +140,11 @@ const DEFAULT_CONFIG = {
   // 巡检判定 dead 才走删除。注意：本地（未灌入服务端）的音源无论开关如何都只禁用、不删。
   patrolAutoDelete: false,
   patrolDeleteAfter: 3,
+  // v1.13.4：巡检「连续失效自动禁用」的阈值（patrolJudge 的 streak 达到即处置、
+  // apiDownVerdict 的域名判死同用此值）。之前无 config 键也无 UI，恒为隐藏默认 2（P-1429 #6）。
+  // 语义次序：失效 streak 先到 patrolDisableAfter → 禁用；继续失效到 patrolDeleteAfter 且
+  // patrolAutoDelete 开 → 删除。所以本值应 ≤ patrolDeleteAfter 才有「先禁后删」。
+  patrolDisableAfter: 2,
   enableAfterImport: true,
   autoAllowUnsafeVM: false,
   allowUnsafeVM: false,
