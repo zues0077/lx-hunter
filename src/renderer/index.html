@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>音源猎手 PC 版</title>
 <link rel="stylesheet" href="styles.css?v=20">
-<script src="auth-bg.js?v=3"></script>
+<script src="auth-bg.js?v=4"></script>
 </head>
 <body>
 <div class="app">
@@ -702,6 +702,8 @@
         <div class="auth-bg-add">
           <button class="auth-bg-add-toggle" id="btnAuthBgAdd" type="button" aria-expanded="false" aria-controls="authBgAddBody">＋ 添加背景</button>
           <div class="auth-bg-add-body" id="authBgAddBody" hidden>
+            <label class="auth-bg-label" for="authBgName">名称</label>
+            <input class="input" id="authBgName" type="text" maxlength="40" placeholder="可留空，默认用域名或文件名" autocomplete="off" spellcheck="false">
             <label class="auth-bg-label" for="authBgFile">本地图片</label>
             <input class="auth-bg-file" type="file" id="authBgFile" accept="image/*">
             <label class="auth-bg-label" for="authBgUrl">图片地址或随机图接口</label>

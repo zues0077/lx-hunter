@@ -79,10 +79,11 @@
     return 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
   }
 
+  const CTRL_CHARS = /[\u0000-\u001f\u007f]/g
+
   // 名称自动生成：本地图用原文件名；地址类用 host。
   // 为什么不用「随机图接口 / 在线图片」当名称：存两个随机图源时会撞成同名，
   // 列表就失去辨识度，所以域名当名称、性质放副标题。
-  // 不做重命名——列表是为了快速认出是哪张，不是为了编辑元数据。
   function labelFor(kind, src, name) {
     if (kind === 'file') {
       const n = String(name || '').replace(/\.[^.]+$/, '').trim()
@@ -91,6 +92,14 @@
     try {
       return new URL(String(src)).host.replace(/^www\./i, '').slice(0, MAX_LABEL)
     } catch (e) { return '在线图片' }
+  }
+
+  // 用户填了名称就用填的，留空才回落到自动名（域名 / 文件名）。
+  // 控制字符一律去掉：标题是单行布局，带换行会把列表撑歪。
+  function pickLabel(kind, src, custom, fileName) {
+    const c = String(custom == null ? '' : custom).replace(CTRL_CHARS, '').trim()
+    if (c) return c.slice(0, MAX_LABEL)
+    return labelFor(kind, src, fileName)
   }
 
   function isRandomApi(src) {
@@ -144,7 +153,7 @@
       id: /^[A-Za-z0-9_-]{1,64}$/.test(String(raw.id || '')) ? String(raw.id) : newId(),
       kind,
       src,
-      label: String(raw.label || labelFor(kind, src, '')).slice(0, MAX_LABEL),
+      label: pickLabel(kind, src, raw.label, ''),
       addedAt: Number(raw.addedAt) > 0 ? Math.round(Number(raw.addedAt)) : Date.now()
     }
     if (kind === 'file') {
@@ -445,6 +454,7 @@
     const addBody = $('authBgAddBody')
     const fileInput = $('authBgFile')
     const urlInput = $('authBgUrl')
+    const nameInput = $('authBgName')
 
     // 色块只在“当前用的是预设”时高亮；用图片时五个色块全灭，避免误导
     function markSwatches(v) {
@@ -590,17 +600,29 @@
     }
 
     // 入库 + 立刻应用：添加完就应该在新背景上，不该让用户再点一次
-    function addImage(input, nonce) {
+    function addImage(input) {
       const prevRaw = readRaw(LIB_KEY)
-      const r = addToLib(readLib(), Object.assign({ id: newId(), addedAt: Date.now() }, input))
+      // 名称留空就回落到自动名（域名 / 原文件名），调用方不用关心
+      const label = pickLabel(input.kind, input.src, nameInput ? nameInput.value : '', input.fileName)
+      const r = addToLib(readLib(), {
+        id: newId(),
+        addedAt: Date.now(),
+        kind: input.kind,
+        src: input.src,
+        label: label,
+        w: input.w,
+        h: input.h,
+        bytes: input.bytes
+      })
       if (!r.ok) { say(r.reason); return null }
       if (!commitLib(r.lib, prevRaw)) { say('浏览器存储已满或不可用，没能保存这张背景'); return null }
-      const used = nonce || freshNonce()
+      const used = freshNonce()
       const v = { mode: 'image', itemId: r.item.id, image: r.item.src }
       if (!saveSetting(v)) { say('没能保存偏好：浏览器存储不可用'); return null }
       applySetting(v, null, used)
       setLibOpen(true, true)
       setAddOpen(false)
+      if (nameInput) nameInput.value = '' // 成功才清，失败留着重试
       renderLib(r.item.id)
       markSwatches(v)
       renderHead(readLib(), v)
@@ -751,7 +773,7 @@
         addImage({
           kind: 'file',
           src: dataUrl,
-          label: labelFor('file', dataUrl, meta && meta.name),
+          fileName: meta && meta.name,
           w: meta && meta.w,
           h: meta && meta.h,
           bytes: meta && meta.bytes
@@ -765,7 +787,7 @@
       if (!raw) return say('请填写图片地址')
       const safe = sanitizeImageUrl(raw)
       if (!safe) return say('地址无效：仅支持 http(s) 图片链接，且不能含引号、括号或空格')
-      const r = addImage({ kind: 'url', src: safe, label: labelFor('url', safe) })
+      const r = addImage({ kind: 'url', src: safe })
       if (!r) return
       if (urlInput) urlInput.value = ''
       if (r.dup) return // 已在列表里，不必再探一次
@@ -788,6 +810,7 @@
       syncFoot(v)
       if (urlInput) urlInput.value = ''
       if (fileInput) fileInput.value = ''
+      if (nameInput) nameInput.value = ''
       say('已恢复默认配色（保存过的背景都还在）')
     })
 
@@ -801,7 +824,7 @@
     MAX_ITEM_CHARS, MAX_LIB_CHARS, MAX_URL_ITEMS, MAX_FILE_ITEMS,
     sanitizeImageUrl, cacheBustedUrl, freshNonce, forRender, probeImage,
     normalizeBgSetting, readSetting, saveSetting, clearSetting, applySetting, compressImageFile,
-    newId, labelFor, hostPath, formatSize, subFor, isRandomApi,
+    newId, labelFor, pickLabel, hostPath, formatSize, subFor, isRandomApi,
     normalizeItem, normalizeLib, libChars, countKind, addToLib, removeFromLib,
     readLib, commitLib, findItem, migrateLegacy, readUi, saveUi
   }

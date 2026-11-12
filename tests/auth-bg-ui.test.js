@@ -203,6 +203,15 @@ ok(/^随机图接口 · \/random_img\.php$/.test(bg.subFor({ kind: 'url', src: '
 ok(/^在线图片/.test(bg.subFor({ kind: 'url', src: 'https://a.com/wall/bg.jpg' })), '普通图片副标题标「在线图片」')
 ok(/^本地图 · 1280×720 · 2 KB$/.test(bg.subFor({ kind: 'file', src: 'data:image/png;base64,AA', w: 1280, h: 720, bytes: 2000 })), '本地图副标题含尺寸与体积')
 
+// 自定义名称：填了用填的，留空回落自动名
+ok(bg.pickLabel('url', 'https://img.xjh.me/a.php', '  公司随机图  ') === '公司随机图', '填了名称就用填的（去掉首尾空格）')
+ok(bg.pickLabel('url', 'https://img.xjh.me/a.php', '   ') === 'img.xjh.me', '只填空格时回退到默认域名')
+ok(bg.pickLabel('url', 'https://img.xjh.me/a.php', '') === 'img.xjh.me', '留空回退到默认域名')
+ok(bg.pickLabel('file', 'data:image/png;base64,AA', '', '雪夜.jpg') === '雪夜', '不填时本地图用原文件名')
+ok(bg.pickLabel('url', 'https://a.com/x', 'a'.repeat(80)).length === 40, '名称超长截到 40 字')
+ok(bg.pickLabel('url', 'https://a.com/x', '第一行\n第二行\u0000') === '第一行第二行', '名称里的换行与空字符被清掉（单行布局不会被撑歪）')
+ok(bg.normalizeItem({ kind: 'url', src: goodUrl, label: 'x'.repeat(100) }).label.length === 40, '读回脏数据时同样截断')
+
 const first = bg.addToLib(bg.normalizeLib(null), { kind: 'url', src: 'https://a.com/1.jpg' })
 ok(first.ok && first.lib.items.length === 1, '新地址入库')
 const again = bg.addToLib(first.lib, { kind: 'url', src: 'https://a.com/1.jpg' })
@@ -269,6 +278,9 @@ for (const id of ['btnAuthBgLib', 'authBgLibBody', 'authBgList', 'authBgEmpty', 
 ok(/id="btnAuthBgLib"[^>]*aria-expanded="true"[^>]*aria-controls="authBgLibBody"/.test(html), '折叠开关默认展开并声明控制目标')
 ok(/id="authBgAddBody" hidden>/.test(html), '添加区默认收起（面板平时只有列表）')
 ok(/id="btnAuthBgApply">添加并应用</.test(html), '按钮文案改成“添加并应用”')
+ok(/id="authBgName" type="text" maxlength="40"/.test(html), '添加区有名称输入框，长度与存储上限一致')
+ok(/id="authBgName"[^>]*placeholder="[^"]*默认/.test(html), '占位提示不填就用默认名')
+ok(/<label class="auth-bg-label" for="authBgName">名称<\/label>/.test(html), '名称输入框有标签（不带括号标注）')
 ok(!/auth-bg-custom/.test(html), '旧的单图表单容器已从 HTML 移除')
 ok(/\.auth-bg-list\s*\{[^}]*max-height\s*:\s*186px/.test(cssRules), '列表固定最大高度（背景多了不撑长面板）')
 ok(/\.auth-bg-list\s*\{[^}]*overflow-y\s*:\s*auto/.test(cssRules), '超出部分在列表内部滚动')
