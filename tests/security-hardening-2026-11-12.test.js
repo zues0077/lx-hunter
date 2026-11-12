@@ -78,4 +78,16 @@ ok(/patrolDisableAfter: Math\.max\(1, Math\.min\(20/.test(
 ok(/自动禁用.*先于.*自动删除|禁用次数应 ≤ 删除次数/.test(
   fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8')), '页面说明「先禁后删」次序')
 
+console.log('--- ⑬ P-1429 #6 扩展：灌入后启用改为账号级 ---')
+const idxSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'services', 'index.js'), 'utf8')
+const lxSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'services', 'lxserver.js'), 'utf8')
+ok(/function resolveEnableAfterImport\(acct, config\)/.test(idxSrc), 'getBatchImportAccounts 统一解析账号级开关')
+ok(/enableAfterImport: p\.enableAfterImport !== undefined \? p\.enableAfterImport : globalOn|resolveEnableAfterImport\(p, config\)/.test(idxSrc), '账号值优先、未设回退全局')
+ok(/Object\.assign\(\{\}, cur\.acct, \{ enableAfterImport: resolveEnableAfterImport/.test(idxSrc), 'active 兜底路径同样解析')
+ok(/acct\.enableAfterImport !== undefined\) cfg\.enableAfterImport = acct\.enableAfterImport/.test(lxSrc), 'lxserver toCfg 透传账号级字段（修复 Web 版全局开关失效）')
+const accHtml = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8')
+ok(/id="accEnableAfter"/.test(accHtml), '账号弹窗有「灌入后自动启用」勾选框')
+ok(/accEnableAfter'\)\.checked/.test(
+  fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8')), '弹窗初始值：账号值优先、跟随全局')
+
 console.log(`\nsecurity-hardening: PASS ${pass} / FAIL 0`)

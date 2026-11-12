@@ -1327,6 +1327,10 @@ function openAccountForm(id) {
   // 「参与批量灌入」：新建时默认勾上（多平台是本版主打用法，勾了才用得上），
   // 编辑已有账号时以存下来的值为准 —— 老账号没这个字段就不勾，行为与升级前一致。
   $('accBatch').checked = acc ? acc.batchImport === true : true
+  // 「灌入后自动启用」（账号级，P-1429 #6 扩展）：账号存过值用账号的；
+  // 没存过（老账号）跟随灌入规则里的全局开关；新建账号也以全局开关为初始值。
+  const globalEnableAfter = state.config ? state.config.enableAfterImport !== false : true
+  $('accEnableAfter').checked = acc ? (acc.enableAfterImport !== undefined ? acc.enableAfterImport !== false : globalEnableAfter) : globalEnableAfter
   $('accName').focus()
 }
 
@@ -1352,7 +1356,8 @@ function validateAccount() {
     password: $('accPwd').value,
     timeoutMs: parseInt($('accTmo').value, 10) || 25000,
     enabled: true,
-    batchImport: !!$('accBatch').checked
+    batchImport: !!$('accBatch').checked,
+    enableAfterImport: !!$('accEnableAfter').checked
   }
 }
 

@@ -473,6 +473,7 @@
           <p class="hint" id="accHint"></p>
           <div class="field-row">
             <label class="chk"><input type="checkbox" id="accBatch"><span><strong>参与批量灌入</strong>（勾了才会被「灌入选中的音源 / 灌入全部可用」以及「定时爬取后自动灌入」同时灌入；一个都不勾时只灌当前选中账号）</span></label>
+            <label class="chk"><input type="checkbox" id="accEnableAfter"><span><strong>灌入后自动启用</strong>（按账号设置：适合「巡检确认可用后再启用」的服务端就不勾；不勾 = 停用落地。未手动保存过时跟随灌入规则里的全局开关）</span></label>
           </div>
           <div class="row-form">
             <button class="btn primary" id="btnAccSave">保存账号</button>
@@ -729,6 +730,6 @@
 <div class="toast" id="toast" hidden></div>
 <script src="sorters.js?v=27"></script>
 <script src="web-bridge.js?v=57"></script>
-<script src="app.js?v=67"></script>
+<script src="app.js?v=68"></script>
 </body>
 </html>

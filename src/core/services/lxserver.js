@@ -14,12 +14,18 @@
 const L = require('../lxservice')
 
 function toCfg(acct) {
-  return {
+  const cfg = {
     serverUrl: acct && acct.url || '',
     adminPassword: acct && acct.password || '',
     username: (acct && acct.username) || 'default',
     serverTimeoutMs: (acct && acct.timeoutMs) || 25000
   }
+  // P-1429 #6：账号级「灌入后自动启用」。之前 Web 版路径 toCfg 只带连接字段，
+  // lxservice.afterImport 读 cfg.enableAfterImport 恒 undefined → LX Server 账号
+  // 灌入后【恒自动启用】，全局/账号开关都失效。getBatchImportAccounts 已把
+  // 账号值（未设则回退全局）解析进 acct 副本，这里透传给 afterImport。
+  if (acct && acct.enableAfterImport !== undefined) cfg.enableAfterImport = acct.enableAfterImport
+  return cfg
 }
 
 function verify(acct) { return L.verify(toCfg(acct)) }

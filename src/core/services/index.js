@@ -70,13 +70,25 @@ function wrap(acct) {
  * - 一个都没标记 → 回退为「只灌当前选中账号」（与旧版行为一致，老用户无感升级）；
  * - 标记了 → 只灌标记的那些（用户可以只勾其中两个，不想灌的别勾）。
  * enabled === false 的账号一律跳过（禁用的账号不参与任何自动行为）。
+ *
+ * P-1429 扩展：「灌入后自动启用」改为账号级。账号上的 enableAfterImport 若已设置
+ * （true/false）则覆盖；未设置（undefined）回退全局 config.enableAfterImport。
+ * 返回的 acct 是副本并已解析好该字段——各 adapter（lxserver/musicsync/songloft/geelonn）
+ * 都能直接读 acct.enableAfterImport，不再出现「lxserver 路径读 toCfg 产物、全局开关失效」。
  */
+function resolveEnableAfterImport(acct, config) {
+  if (acct && acct.enableAfterImport !== undefined) return acct.enableAfterImport !== false
+  return (config && config.enableAfterImport) !== false
+}
+
 function getBatchImportAccounts(config) {
   const list = ((config && config.platforms) || []).filter(p => p && p.type && p.enabled !== false)
   const marked = list.filter(p => p.batchImport === true)
+    .map(p => Object.assign({}, p, { enableAfterImport: resolveEnableAfterImport(p, config) }))
   if (marked.length) return marked
   const cur = getActiveService(config)
-  return cur ? [cur.acct] : []
+  if (!cur) return []
+  return [Object.assign({}, cur.acct, { enableAfterImport: resolveEnableAfterImport(cur.acct, config) })]
 }
 
 /**
