@@ -262,7 +262,24 @@ class Store {
   }
 
   _write(f, obj) {
-    try { fs.writeFileSync(f, JSON.stringify(obj), 'utf8'); return true } catch (e) { return false }
+    // P-1429：改为"写临时文件 + rename"两步。之前直接 writeFileSync 覆盖 17MB 的
+    // sources.json，写盘中途断电/崩溃/磁盘满会留下半个文件，下次启动 JSON 解析失败
+    // = 数据看着"丢了"。同目录 rename 在同一文件系统上是原子操作，最坏只剩完整的旧文件。
+    // 目录权限不足（rename 需要目录写权限）时回退旧的直接写——最坏退化为旧行为，不会更糟。
+    try {
+      const tmp = f + '.tmp'
+      fs.writeFileSync(tmp, JSON.stringify(obj), 'utf8')
+      fs.renameSync(tmp, f)
+      return true
+    } catch (e1) {
+      try { if (fs.existsSync(f + '.tmp')) fs.unlinkSync(f + '.tmp') } catch (e2) {}
+      try {
+        fs.writeFileSync(f, JSON.stringify(obj), 'utf8')
+        return true
+      } catch (e3) {
+        return false
+      }
+    }
   }
 
   saveConfig(patch) {

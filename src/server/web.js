@@ -15,6 +15,7 @@
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const zlib = require('zlib')
 const { Store } = require('../core/store')
 const { Hunter, formatIntervalHours, patrolSchedule } = require('../core/hunter')
 const { getActiveService, getService, resolveService, TYPE_LABELS, NO_ACCOUNT_ERR } = require('../core/services')
@@ -146,27 +147,80 @@ const MIME = {
   '.woff2': 'font/woff2'
 }
 
+const STATIC_CACHE = new Map() // file -> { etag, data }（<=512KB 的文本资源；bind-mount 补丁更新文件后靠 mtime 自动失效）
+
 function staticHandler(req, res, pathname) {
   let rel = pathname === '/' ? '/index.html' : pathname
   const file = path.normalize(path.join(RENDERER_DIR, rel))
   // 防目录穿越：解析后必须仍在 renderer 目录内
   if (!file.startsWith(RENDERER_DIR + path.sep)) return sendJson(res, 403, { ok: false, error: 'forbidden' })
-  fs.readFile(file, (err, buf) => {
-    if (err) return sendJson(res, 404, { ok: false, error: 'not found: ' + rel })
-    const ext = path.extname(file).toLowerCase()
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': 'no-cache' // 与桌面版一致：刷新即最新，避免升级后旧 UI
-    })
-    res.end(buf)
-  })
+  let st = null
+  try { st = fs.statSync(file) } catch (e) {}
+  if (!st || !st.isFile()) return sendJson(res, 404, { ok: false, error: 'not found: ' + rel })
+  // P-1429：no-cache 语义保留（刷新即最新，避免升级后旧 UI），但补上 ETag——
+  // 之前没有指纹可协商，no-cache 退化成"每次全量重传 186KB app.js"；命中即 304 空包。
+  const etag = '"' + st.mtimeMs.toString(36) + '-' + st.size.toString(36) + '"'
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { ETag: etag })
+    return res.end()
+  }
+  let cached = STATIC_CACHE.get(file)
+  if (!cached || cached.etag !== etag) {
+    try {
+      cached = { etag, data: fs.readFileSync(file) }
+    } catch (e) {
+      return sendJson(res, 404, { ok: false, error: 'not found: ' + rel })
+    }
+    if (cached.data.length <= 512 * 1024) STATIC_CACHE.set(file, cached)
+    else STATIC_CACHE.delete(file)
+  }
+  const ext = path.extname(file).toLowerCase()
+  const mime = MIME[ext] || 'application/octet-stream'
+  const headers = { 'Content-Type': mime, 'Cache-Control': 'no-cache', ETag: etag }
+  // 文本类资源才压（png/woff2 自身已压缩，压了更费 CPU）
+  const acc = req.headers['accept-encoding'] || ''
+  if (cached.data.length > 1024 && /\bgzip\b/i.test(acc) && /javascript|css|html|svg|json/.test(mime)) {
+    const gz = zlib.gzipSync(cached.data)
+    headers['Content-Encoding'] = 'gzip'
+    headers['Content-Length'] = gz.length
+    res.writeHead(200, headers)
+    return res.end(gz)
+  }
+  headers['Content-Length'] = cached.data.length
+  res.writeHead(200, headers)
+  return res.end(cached.data)
 }
 
 // ---------------- 工具 ----------------
 function sendJson(res, code, obj) {
-  const body = JSON.stringify(obj)
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
-  res.end(body)
+  const body = Buffer.from(JSON.stringify(obj), 'utf8')
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' }
+  // P-1429：大响应按协商压缩。sources（3.59MB）实测 gzip 后约省 85%+，外网/手机端收益最大。
+  // res.req 由 http 模块自动回指请求对象，调用点几十处不用改签名。
+  const acc = (res.req && res.req.headers['accept-encoding']) || ''
+  if (body.length > 1024 && /\bgzip\b/i.test(acc)) {
+    const gz = zlib.gzipSync(body)
+    headers['Content-Encoding'] = 'gzip'
+    headers['Content-Length'] = gz.length
+    res.writeHead(code, headers)
+    return res.end(gz)
+  }
+  headers['Content-Length'] = body.length
+  res.writeHead(code, headers)
+  return res.end(body)
+}
+
+// P-1429：非管理员不回传凭据类字段。实测 116/116 次从 /api/config 拿到明文
+// adminPassword / ghToken / 各平台 password —— 任何登录账号都能搬走全部凭据。
+// 只影响非管理员的读取；管理员（唯一应该配凭据的角色）拿到的仍是完整配置。
+function sanitizeConfig(cfg) {
+  const c = JSON.parse(JSON.stringify(cfg))
+  c.adminPassword = ''
+  c.ghToken = ''
+  if (Array.isArray(c.platforms)) {
+    c.platforms = c.platforms.map(p => Object.assign({}, p, { password: '' }))
+  }
+  return c
 }
 
 function readBody(req) {
@@ -196,7 +250,12 @@ function guard(fn) {
       // 导出类接口（db/export、data/export）自行写完附件响应，这里不能二次写
       if (!res.writableEnded) sendJson(res, 200, { ok: true, data })
     } catch (e) {
-      if (!res.writableEnded) sendJson(res, 200, { ok: false, error: String((e && e.message) || e) })
+      if (!res.writableEnded) {
+        // P-1429：业务失败打上 X-Lxh-Error 头。状态码保持 200 是桥接层的既有契约
+        // （前端只读 json.ok），但监控/告警从此可以按这个头识别失败，不用解析 body。
+        res.setHeader('X-Lxh-Error', '1')
+        sendJson(res, 200, { ok: false, error: String((e && e.message) || e) })
+      }
     }
   }
 }
@@ -208,14 +267,23 @@ function route(method, pattern, handler) { routes.push({ method, pattern, handle
 route('GET', '/api/health', guard(() => ({ app: 'lx-hunter-pc', mode: 'web', version: require('../../package.json').version, dataDir: DATA_DIR })))
 
 // mirrors：内置镜像清单（v1.9.13 起设置页下拉由它动态生成，新增镜像不用再改 HTML）
-route('GET', '/api/config', guard(() => ({
-  config: store.config,
-  dataDir: DATA_DIR,
-  defaultRepos: DEFAULT_REPOS,
-  mirrors: require('../core/net').MIRROR_PRESETS.map(m => ({ id: m.id, label: m.label }))
-})))
+route('GET', '/api/config', guard((req) => {
+  const me = currentUser(req)
+  const isAdmin = !!(me && me.admin)
+  return {
+    // P-1429：凭据只回传给管理员；非管理员拿掩码版（设置页保存会被下面的 POST 拦下）
+    config: isAdmin ? store.config : sanitizeConfig(store.config),
+    dataDir: DATA_DIR,
+    defaultRepos: DEFAULT_REPOS,
+    mirrors: require('../core/net').MIRROR_PRESETS.map(m => ({ id: m.id, label: m.label }))
+  }
+}))
 
 route('POST', '/api/config', guard(async (req, res, ctx) => {
+  // P-1429：配置里是全部凭据（ghToken / 各平台密码），改配置 = 改凭据，必须管理员。
+  // 之前任何登录账号都能 POST——比 GET 泄露更严重，等于人人可改。
+  const me = currentUser(req)
+  if (!me || !me.admin) throw new Error('仅管理员可修改配置')
   // 与桌面版一致：附加仓库做规范化（支持完整 URL）
   if (Array.isArray(ctx.body.customRepos)) {
     const { normalizeRepo } = require('../core/crawler')
@@ -638,6 +706,8 @@ route('POST', '/api/service/platforms', guard(async (req, res, ctx) => {
 // 公共音源清理（v1.7.4，与桌面版 service:listPublic / service:removePublicBatch 对应）：
 // 只删服务端公开源（_open），绝不碰各账号私有源；批删串行，逐条返回结果。
 // 仅 LX Server / Geelonn LX Server 平台具备该能力，其他平台返回友好提示。
+// 命名说明（P-1429）："public" 指"公开音源"，不是"免鉴权"——本路由仍要登录
+//（鉴权中间件覆盖所有 /api/*），只是返回的是公开可见的那部分音源列表。
 route('GET', '/api/service/list/public', guard(async () => {
   const svc = getActiveService(store.config)
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
@@ -853,6 +923,10 @@ function isPublicApi(pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // P-1429 安全基线头：在入口统一 setHeader（writeHead 之前设置都生效，导出附件路径也覆盖）
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  res.setHeader('Referrer-Policy', 'no-referrer')
   let pathname = '/'
   try { pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname) } catch (e) {}
   try {
@@ -878,13 +952,17 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' || req.method === 'HEAD') return staticHandler(req, res, pathname)
     return sendJson(res, 404, { ok: false, error: 'not found: ' + pathname })
   } catch (e) {
+    // 分发层异常（如 parseJsonBody 的非法 JSON）落在这里，同样打上失败标记
+    res.setHeader('X-Lxh-Error', '1')
     return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) })
   }
 })
 
-// 长任务为长轮询语义：关掉 Node 默认的请求超时（否则几分钟的爬取会被切断）
-server.requestTimeout = 0
-server.headersTimeout = 0
+// P-1429 纠正旧注释：requestTimeout 只约束"接收整个请求"的阶段（Node 文档语义），
+// 处理与响应时长不受它管——爬取是"先收完请求、再跑几分钟、最后响应"，不会被切断。
+// 之前设 0 等于放弃 Slowloris 防线（慢连接永不超时），恢复默认值即可两全。
+server.requestTimeout = 300000
+server.headersTimeout = 60000
 server.keepAliveTimeout = 75000
 
 // ---------------- 启动 ----------------

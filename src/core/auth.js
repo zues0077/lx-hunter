@@ -57,7 +57,7 @@ class Auth {
     const n = String(name || '').trim()
     const p = String(password || '')
     if (!/^[A-Za-z0-9_\u4e00-\u9fa5.-]{2,32}$/.test(n)) return '账号名 2–32 位，仅限字母数字下划线中文点横线'
-    if (p.length < 6) return '密码至少 6 位'
+    if (p.length < 6) return '密码至少 6 位（建议混合字母、数字与符号）'
     if (p.length > 128) return '密码过长'
     return null
   }

@@ -298,12 +298,12 @@ function deleteReadsBeforeCommit(src) {
   const at = src.indexOf('function deleteItem')
   if (at < 0) return false
   const body = src.slice(at, at + 1600)
-  const iCur = body.indexOf('const cur = readSetting()')
+  const iCur = body.indexOf('const cur = readSetting(lib)')
   const iWas = body.indexOf('const wasActive')
   const iCommit = body.indexOf('const next = removeFromLib')
   return iCur >= 0 && iWas > iCur && iCommit > iWas
 }
-ok(!deleteReadsBeforeCommit('function deleteItem(){ const next = removeFromLib(lib,id); const cur = readSetting(); const wasActive = 1 }'),
+ok(!deleteReadsBeforeCommit('function deleteItem(){ const next = removeFromLib(lib,id); const cur = readSetting(lib); const wasActive = 1 }'),
   '对照：先删库再读当前项时断言必败')
 ok(deleteReadsBeforeCommit(bgSrc), '删除当前项前先读当前选中（顺序反了会导致不回退默认背景）')
 

@@ -283,11 +283,13 @@
   }
 
   // 设置里只存 itemId；渲染时才去库里取 src。条目被删了就回退默认配色。
-  function readSetting() {
+  // cachedLib：调用链里已经 parse 过库时直接传入，避免同一次操作把 1MB+ 的库
+  // 反复 JSON.parse 五六遍（P-1429 实测 6 张图一次切换 ≈25-32ms 纯解析，随张数线性涨）。
+  function readSetting(cachedLib) {
     const v = normalizeBgSetting(readRaw(STORE_KEY))
     if (v.mode !== 'image') return v
     if (v.image) return v
-    const item = findItem(null, v.itemId)
+    const item = findItem(cachedLib || null, v.itemId)
     if (!item) return normalizeBgSetting(null)
     return { mode: 'image', itemId: v.itemId, image: item.src }
   }
@@ -309,7 +311,7 @@
     try { if (global.localStorage) global.localStorage.removeItem(STORE_KEY) } catch (e) {}
   }
 
-  function applySetting(setting, root, nonce) {
+  function applySetting(setting, root, nonce, cachedLib) {
     const v = normalizeBgSetting(setting)
     const el = root || (global.document && global.document.documentElement)
     if (!el || !el.dataset || !el.style) return v
@@ -318,7 +320,7 @@
       el.style.removeProperty('--auth-custom')
       return v
     }
-    const src = v.image || (findItem(null, v.itemId) || {}).src || ''
+    const src = v.image || (findItem(cachedLib || null, v.itemId) || {}).src || ''
     if (!src) { // 指向的条目已经没了，静默回退，别留个空背景
       el.dataset.authBg = DEFAULT_PRESET
       el.style.removeProperty('--auth-custom')
@@ -530,8 +532,8 @@
       return row
     }
 
-    function renderLib(activeId) {
-      const lib = readLib()
+    function renderLib(activeId, cachedLib) {
+      const lib = cachedLib || readLib()
       if (list) {
         list.textContent = ''
         lib.items.forEach(it => list.appendChild(buildRow(it, it.id === activeId)))
@@ -567,21 +569,21 @@
       usage.textContent = '当前：' + name
     }
 
-    function syncFoot(v) {
+    function syncFoot(v, cachedLib) {
       const next = $('btnAuthBgNext')
       if (!next) return
-      const it = v.mode === 'image' && v.itemId ? findItem(null, v.itemId) : null
+      const it = v.mode === 'image' && v.itemId ? findItem(cachedLib || null, v.itemId) : null
       const usable = v.mode === 'image' && (!it || it.kind === 'url')
       next.disabled = !usable
       next.title = usable ? '重新加载图片（随机图接口会换一张）' : '本地图片和配色预设不需要换一张'
     }
 
-    function setLibOpen(open, persist) {
+    function setLibOpen(open, persist, cachedLib) {
       if (!libBtn || !libBody) return
       libBody.hidden = !open
       libBtn.setAttribute('aria-expanded', open ? 'true' : 'false')
       if (persist) saveUi({ libOpen: open })
-      renderHead(readLib(), readSetting())
+      renderHead(cachedLib || readLib(), readSetting(cachedLib || null))
     }
 
     function setAddOpen(open) {
@@ -591,11 +593,12 @@
     }
 
     function refreshAll() {
-      const v = readSetting()
-      const lib = renderLib(v.itemId || '')
+      const lib = readLib()
+      const v = readSetting(lib)
+      renderLib(v.itemId || '', lib)
       markSwatches(v)
       renderHead(lib, v)
-      syncFoot(v)
+      syncFoot(v, lib)
       return v
     }
 
@@ -619,14 +622,14 @@
       const used = freshNonce()
       const v = { mode: 'image', itemId: r.item.id, image: r.item.src }
       if (!saveSetting(v)) { say('没能保存偏好：浏览器存储不可用'); return null }
-      applySetting(v, null, used)
-      setLibOpen(true, true)
+      applySetting(v, null, used, r.lib)
+      setLibOpen(true, true, r.lib)
       setAddOpen(false)
       if (nameInput) nameInput.value = '' // 成功才清，失败留着重试
-      renderLib(r.item.id)
+      renderLib(r.item.id, r.lib)
       markSwatches(v)
-      renderHead(readLib(), v)
-      syncFoot(v)
+      renderHead(r.lib, v)
+      syncFoot(v, r.lib)
       say(r.dup ? '这张背景已经在列表里了，已切换过去' : '已添加并应用：' + r.item.label)
       return { item: r.item, nonce: used, dup: !!r.dup }
     }
@@ -635,27 +638,28 @@
       const lib = readLib()
       const it = findItem(lib, id)
       if (!it) { say('这张背景已经不存在了'); refreshAll(); return }
-      const cur = readSetting()
+      const cur = readSetting(lib)
       if (cur.mode === 'image' && cur.itemId === id) return // 已经在用，不白刷一次
       const v = { mode: 'image', itemId: id, image: it.src }
       if (!saveSetting(v)) { say('没能保存偏好：浏览器存储不可用'); return }
-      applySetting(v, null, freshNonce())
-      renderLib(id)
+      applySetting(v, null, freshNonce(), lib)
+      renderLib(id, lib)
       markSwatches(v)
       renderHead(lib, v)
-      syncFoot(v)
+      syncFoot(v, lib)
       say('已切换：' + it.label)
     }
 
     function refreshCurrent(targetId) {
-      const v = readSetting()
+      const lib = readLib()
+      const v = readSetting(lib)
       if (v.mode !== 'image') return say('当前是配色预设，换一张只对图片地址有效')
       const id = targetId || v.itemId
-      const it = id ? findItem(null, id) : null
+      const it = id ? findItem(lib, id) : null
       if (it && it.kind === 'file') return say('本地图片不需要换一张，每次显示的都是同一张')
       const setting = id && it ? { mode: 'image', itemId: id, image: it.src } : v
-      applySetting(setting, null, freshNonce())
-      syncFoot(v)
+      applySetting(setting, null, freshNonce(), lib)
+      syncFoot(v, lib)
       say('已重新加载图片')
     }
 
@@ -677,7 +681,7 @@
       if (!it) return
       // 必须先读“当前用的是哪张”再删库：删完 readSetting 就查不到这条了，
       // 会误判成“删的不是当前项”，于是背景留着一条指向空气的 url()。
-      const cur = readSetting()
+      const cur = readSetting(lib)
       const wasActive = cur.mode === 'image' && cur.itemId === id
       const prevRaw = readRaw(LIB_KEY)
       const next = removeFromLib(lib, id)
@@ -688,10 +692,10 @@
         applySetting(v)
         markSwatches(v)
       }
-      const after = readSetting()
-      renderLib(after.itemId || '')
+      const after = readSetting(next)
+      renderLib(after.itemId || '', next)
       renderHead(next, after)
-      syncFoot(after)
+      syncFoot(after, next)
       say(wasActive ? '已删除并切回默认配色' : '已删除：' + it.label)
     }
 
@@ -757,9 +761,10 @@
       if (!saveSetting(v)) { say('未能保存偏好：浏览器存储不可用'); return }
       applySetting(v)
       markSwatches(v)
-      renderLib('')
-      renderHead(readLib(), v)
-      syncFoot(v)
+      const lib = readLib()
+      renderLib('', lib)
+      renderHead(lib, v)
+      syncFoot(v, lib)
       say('已切换背景：' + (b.textContent || '').trim())
     }))
 
@@ -805,9 +810,10 @@
       saveSetting(v)
       applySetting(v)
       markSwatches(v)
-      renderLib('')
-      renderHead(readLib(), v)
-      syncFoot(v)
+      const lib = readLib()
+      renderLib('', lib)
+      renderHead(lib, v)
+      syncFoot(v, lib)
       if (urlInput) urlInput.value = ''
       if (fileInput) fileInput.value = ''
       if (nameInput) nameInput.value = ''
