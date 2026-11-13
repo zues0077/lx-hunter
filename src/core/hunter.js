@@ -2225,8 +2225,12 @@ class Hunter {
       const vetoNow = this.store.db.veto || {}
       let frozenHere = 0
       p.queue = p.queue.map(item => {
-        if (!item || item.skip || !item.e) return item
-        if (!isFrozen(vetoNow, item.e)) return item
+        if (!item || !item.e) return item
+        // 冻结判断优先于任何 skip 标记（2026-11-13 联动测试发现）：同名同内容会先在
+        // _planImportQueue 里被标成「同内容已存在，无需重复灌入」，旧行为 `item.skip` 直接
+        // return 会把这个文案盖在冻结之上 —— 用户明明在服务端停用了这条源，结果面板却说
+        // 「已存在」，看不出「被冻结了」。冻结命中时一律改写成冻结文案（含已 skip 的项）。
+        if (item.frozen || !isFrozen(vetoNow, item.e)) return item
         frozenHere++
         return {
           e: item.e,

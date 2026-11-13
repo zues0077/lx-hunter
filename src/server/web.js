@@ -690,7 +690,9 @@ route('POST', '/api/import/url', guard(async (req, res, ctx) => {
 route('POST', '/api/service/toggle', guard(async (req, res, ctx) => {
   const svc = getActiveService(store.config)
   if (!svc) throw new Error(NO_ACCOUNT_ERR)
-  return await svc.adapter.toggle(svc.acct, ctx.body.id, ctx.body.enabled, { owner: ctx.body.owner })
+  // reason 透传（2026-11-13）：停用原因标签随开关写进服务端 sources.json 的 disableReason；
+  // 不传时服务端按 manual 兜底（网页手动停用本来就是 manual 语义，不传也正确）。
+  return await svc.adapter.toggle(svc.acct, ctx.body.id, ctx.body.enabled, { owner: ctx.body.owner, reason: ctx.body.reason })
 }))
 route('POST', '/api/service/remove', guard(async (req, res, ctx) => {
   const svc = getActiveService(store.config)
