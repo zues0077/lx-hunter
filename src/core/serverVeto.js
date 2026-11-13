@@ -100,8 +100,15 @@ function computeVeto(p) {
       type = VETO_TYPES.ISOLATED
       detail = '服务端自检护栏隔离了它（多为 CPU 占用异常）'
     } else if (srv.enabled === false) {
+      // 「灌入后停用」（disableReason=after-import，2026-11-13 与 lxserver 联动）不冻结：
+      // 这是灌入落盘时的默认停用，等 lxserver 停用源复检验证后自动启用 ——
+      // 不是用户的处置意图。把它当处置打标会锁死「验证→启用」的闭环。
+      // 复检判死升级的 probe-dead、用户手动停用的 manual/无标签 照旧冻结。
+      if (srv.disableReason === 'after-import') { continue }
       type = VETO_TYPES.DISABLED
-      detail = '服务端把它关掉了（enabled=false）'
+      detail = srv.disableReason === 'probe-dead'
+        ? '服务端停用源复检连续判定它无效（检测后停用）'
+        : '服务端把它关掉了（enabled=false）'
     } else {
       const off = Array.isArray(srv.disabledSources) ? srv.disabledSources.filter(Boolean) : []
       const all = Array.isArray(srv.supportedSources) ? srv.supportedSources.filter(Boolean) : []

@@ -44,6 +44,48 @@ ok('整源禁用 → disabled，且冻结', () => {
   assert.ok(vetoReason(r.veto.e1).indexOf('禁用') >= 0)
 })
 
+ok('灌入后停用（disableReason=after-import）→ 不冻结，可重灌（2026-11-13 联动）', () => {
+  const r = computeVeto({
+    imported: { e1: rec('src.js') },
+    sources: { e1: { id: 'e1', contentHash: 'sha-old' } },
+    serverList: [{ id: 'src.js', enabled: false, disableReason: 'after-import', supportedSources: ['kw'] }],
+    activePlatformId: 'p1',
+    prev: {},
+    now: NOW
+  })
+  assert.strictEqual(r.veto.e1, undefined, 'after-import 不产生冻结记录')
+  assert.strictEqual(isFrozen(r.veto, { id: 'e1', contentHash: 'sha-old' }), false)
+})
+
+ok('检测后停用（disableReason=probe-dead）→ 照旧冻结，理由指明复检判死', () => {
+  const r = computeVeto({
+    imported: { e1: rec('src.js') },
+    sources: { e1: { id: 'e1', contentHash: 'sha-old' } },
+    serverList: [{ id: 'src.js', enabled: false, disableReason: 'probe-dead', supportedSources: ['kw'] }],
+    activePlatformId: 'p1',
+    prev: {},
+    now: NOW
+  })
+  assert.strictEqual(r.veto.e1.type, VETO_TYPES.DISABLED)
+  assert.strictEqual(isFrozen(r.veto, { id: 'e1', contentHash: 'sha-old' }), true)
+  assert.ok(vetoReason(r.veto.e1).indexOf('复检') >= 0)
+})
+
+ok('after-import 老冻结记录随服务端标签出现而解除（prev 里有 disabled）', () => {
+  const prevSince = NOW - 3600000
+  const r = computeVeto({
+    imported: { e1: rec('src.js') },
+    sources: { e1: { id: 'e1', contentHash: 'sha-old' } },
+    serverList: [{ id: 'src.js', enabled: false, disableReason: 'after-import' }],
+    activePlatformId: 'p1',
+    prev: { e1: { type: VETO_TYPES.DISABLED, sha: 'sha-old', since: prevSince } },
+    now: NOW
+  })
+  // 升级为可自愈停用后冻结应被清除：computeVeto 纯函数层面表现为「不再产出该条」，
+  // 实际的 cleared 计数由 _refreshServerVeto 对比 prev/next 时统计
+  assert.strictEqual(r.veto.e1, undefined)
+})
+
 ok('只禁部分平台 → 只打展示标记，不冻结（源还能用）', () => {
   const r = computeVeto({
     imported: { e1: rec('src.js') },

@@ -181,9 +181,11 @@ async function afterImport(cfg, d, url) {
 async function toggle(cfg, id, enabled, opts) {
   const owner = opts && opts.owner
   const username = (owner && owner !== 'open' && owner !== '_open' && owner !== 'default') ? owner : 'default'
-  const r = await req(cfg, 'POST', '/api/custom-source/toggle', {
-    id, enabled: !!enabled, username
-  }, 120000)
+  // reason 透传（2026-11-13）：停用原因标签写入服务端 sources.json 的 disableReason。
+  // lxserver 侧只有显式 'after-import' 会被采纳，其余落 manual（最安全缺省）。
+  const body = { id, enabled: !!enabled, username }
+  if (opts && opts.reason) body.reason = opts.reason
+  const r = await req(cfg, 'POST', '/api/custom-source/toggle', body, 120000)
   if (!r.ok) return { success: false, message: (r.data && r.data.error) || `HTTP ${r.status}` }
   if (r.data && r.data.success === false) return { success: false, message: (r.data && (r.data.error || r.data.message)) || '切换失败' }
   return { success: true }
