@@ -779,7 +779,7 @@ ck('桌面 sources:get 挂载逐条 veto + 顶层 veto（与 Web 一致）', (()
 ck('桌面单实例锁 requestSingleInstanceLock',
   has(read('src/main/index.js'), /app\.requestSingleInstanceLock\(\)/) &&
   has(read('src/main/index.js'), /app\.on\('second-instance'/))
-ck('发行包版本 v1.14.3', pkg.version === '1.14.3')
+ck('发行包版本 v1.14.4', pkg.version === '1.14.4')
 
 console.log('\n' + (bad === 0 ? 'ALL PASS' : bad + ' FAILED'))
 process.exit(bad ? 1 : 0)

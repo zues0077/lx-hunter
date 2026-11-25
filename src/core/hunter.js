@@ -4479,8 +4479,16 @@ class Hunter {
     }
     for (const eid of Object.keys(prev)) if (!next[eid]) cleared++
 
+    // v1.14.2 性能修复：只在冻结表真正变化时落盘。
+    // 旧写法无条件 saveDb()：巡检收尾/灌入每次都把整份 data/sources.json（生产 36MB 级）
+    // 全量重写一遍，即使 veto 完全没变（computeVeto 每轮都会刷新条目的 at 字段，但那只是
+    // 诊断时间戳，不是需要持久化的业务变化）——这是真正的长期写放大（每天约 96 轮）。
+    // added/updated/cleared 在上方已按 type/sha 算好，直接复用；只有在冻结条目新增、
+    // 变更（type/sha 变）或解除时才写盘。db.veto 内存始终更新为 next（含刷新后的 at/since），
+    // 否则下次以 prev 为基准比对会错、水位/状态基准也会漂移。
+    const changed = added || updated || cleared
     db.veto = next
-    this.store.saveDb()
+    if (changed) this.store.saveDb()
 
     if (added || updated) {
       const names = Object.keys(next)
